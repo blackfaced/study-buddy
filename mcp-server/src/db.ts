@@ -14,9 +14,10 @@ export const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
-// 兼容老 DB：给已有表加新列（v0.5 state 列）
+// 兼容老 DB：给已有表加新列（v0.5 state 列 + writing_turns 分母）
 try { db.exec(`ALTER TABLE chat_turns ADD COLUMN state TEXT DEFAULT 'writing'`); } catch {}
 try { db.exec(`ALTER TABLE mistakes ADD COLUMN hint TEXT`); } catch {}
+try { db.exec(`ALTER TABLE sessions ADD COLUMN writing_turns INTEGER DEFAULT 0`); } catch {}
 
 // 初始化 schema
 db.exec(`
@@ -39,6 +40,7 @@ db.exec(`
     posture_warning_count INTEGER DEFAULT 0,
     offtopic_count INTEGER DEFAULT 0,
     offtopic_recovered INTEGER DEFAULT 0,
+    writing_turns INTEGER DEFAULT 0,
     FOREIGN KEY (child_id) REFERENCES children(id)
   );
 

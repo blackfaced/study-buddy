@@ -15,6 +15,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import { db } from "./db.js";
+import {
+  computeChatStats,
+  computeOfftopicRate,
+  computeRecoveryRate,
+  type ChatTurn,
+} from "./chat-stats.js";
 
 // ============ MCP Server 初始化 ============
 
@@ -203,24 +209,20 @@ async function handleTool(name: string, args: any) {
         )
         .get(sessionId) as any;
 
-      // 聚合对话
-      // 跑偏 = child 的 offtopic；拉回 = child offtopic 且 redirected=1（被 agent 拉回）
-      const chatStats = db
+      // 聚合对话（用 chat-stats 纯函数，自动过滤 freechat，且语义对：跑偏率=offtopic/writingTurns）
+      const chatRows = db
         .prepare(
-          `
-        SELECT
-          SUM(CASE WHEN role = 'child' AND topic = 'offtopic' THEN 1 ELSE 0 END) as offtopic,
-          SUM(CASE WHEN role = 'child' AND topic = 'offtopic' AND redirected = 1 THEN 1 ELSE 0 END) as recovered
-        FROM chat_turns WHERE session_id = ?
-      `
+          `SELECT role, topic, redirected, state FROM chat_turns WHERE session_id = ?`
         )
-        .get(sessionId) as any;
+        .all(sessionId) as ChatTurn[];
+      const chatStats = computeChatStats(chatRows);
 
       db.prepare(
         `
         UPDATE sessions SET
           ended_at = ?, total_minutes = ?, avg_focus_score = ?,
-          posture_warning_count = ?, offtopic_count = ?, offtopic_recovered = ?
+          posture_warning_count = ?, offtopic_count = ?, offtopic_recovered = ?,
+          writing_turns = ?
         WHERE id = ?
       `
       ).run(
@@ -228,8 +230,9 @@ async function handleTool(name: string, args: any) {
         durationMin,
         postureStats.avg_score || 0,
         postureStats.warnings || 0,
-        chatStats.offtopic || 0,
-        chatStats.recovered || 0,
+        chatStats.offtopic,
+        chatStats.recovered,
+        chatStats.writingTurns,
         sessionId
       );
 
@@ -238,8 +241,8 @@ async function handleTool(name: string, args: any) {
         durationMin,
         avgFocusScore: Math.round(postureStats.avg_score || 0),
         postureWarningCount: postureStats.warnings || 0,
-        offtopicCount: chatStats.offtopic || 0,
-        offtopicRecovered: chatStats.recovered || 0,
+        offtopicCount: chatStats.offtopic,
+        offtopicRecovered: chatStats.recovered,
       };
     }
 
@@ -306,6 +309,7 @@ async function handleTool(name: string, args: any) {
           postureWarnings: acc.postureWarnings + (s.posture_warning_count || 0),
           offtopic: acc.offtopic + (s.offtopic_count || 0),
           recovered: acc.recovered + (s.offtopic_recovered || 0),
+          writingTurns: acc.writingTurns + (s.writing_turns || 0),
         }),
         {
           totalMinutes: 0,
@@ -314,20 +318,15 @@ async function handleTool(name: string, args: any) {
           postureWarnings: 0,
           offtopic: 0,
           recovered: 0,
+          writingTurns: 0,
         }
       );
 
       const focusScore =
         totals.weight > 0 ? Math.round(totals.scoreWeight / totals.weight) : 0;
-      const totalOfftopicTurns = totals.offtopic + totals.recovered;
-      const offtopicRate =
-        totalOfftopicTurns > 0
-          ? Math.round((totals.offtopic / totalOfftopicTurns) * 100)
-          : 0;
-      const recoveryRate =
-        totals.offtopic > 0
-          ? Math.round((totals.recovered / totals.offtopic) * 100)
-          : 100;
+      // 跑偏率 = offtopic / writingTurns（不再把 recovered 加进分母——那是 offtopic 的子集）
+      const offtopicRate = computeOfftopicRate(totals);
+      const recoveryRate = computeRecoveryRate(totals);
 
       // 今日错题
       const mistakes = db
@@ -344,7 +343,7 @@ async function handleTool(name: string, args: any) {
       // 推荐决策
       let recommendation: "continue" | "limit_1h" | "pause_3d" = "continue";
       let recommendationReason = "一切正常，继续使用";
-      if (totals.totalMinutes > 0 && totalOfftopicTurns > 0) {
+      if (totals.totalMinutes > 0 && totals.writingTurns > 0) {
         if (offtopicRate > 50) {
           recommendation = "pause_3d";
           recommendationReason = `跑偏率 ${offtopicRate}% 很高，建议暂停 3 天跟孩子聊聊`;

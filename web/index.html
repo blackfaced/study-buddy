@@ -27,7 +27,6 @@
     .avatar.happy { transform: scale(1.1); }
     .name { font-size: 18px; font-weight: bold; }
     .status { font-size: 12px; color: #8b6f47; margin-top: 2px; }
-    .stars { font-size: 18px; padding: 4px 12px; background: #fff; border-radius: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
     .chat { flex: 1; overflow-y: auto; padding: 12px 16px; -webkit-overflow-scrolling: touch; }
     .msg { margin: 8px 0; padding: 10px 14px; border-radius: 18px; max-width: 78%; word-wrap: break-word; line-height: 1.4; font-size: 15px; }
     .msg-agent { background: #fff; border: 2px solid #ffb84d; margin-right: auto; }
@@ -69,7 +68,6 @@
         <div class="name">小书童</div>
         <div class="status" id="status">连接中...</div>
       </div>
-      <div class="stars" id="stars" style="display:none"></div>
     </div>
   </div>
   <div class="chat" id="chat"></div>
@@ -129,7 +127,6 @@ const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const statusEl = document.getElementById('status');
 const avatarEl = document.getElementById('avatar');
-const starsEl = null;
 let sessionId = null;
 let state = 'idle'; // idle | writing | done
 let recognition = null;
