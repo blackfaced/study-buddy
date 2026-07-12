@@ -16,6 +16,7 @@ import sharp from "sharp";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { analyzeMistakeImage, type VisionClient } from "./vision.js";
+import { requestLogger, type Logger, createLogger, stdoutSink } from "./logger.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -30,6 +31,8 @@ export interface AppOptions {
   visionClient?: VisionClient | null;
   /** Directory where mistake photos are written. */
   mistakesDir?: string;
+  /** Logger used for request access logs and event logs. Defaults to a stdout logger. */
+  logger?: Logger;
 }
 
 const OFFTOPIC_KEYWORDS = [
@@ -64,9 +67,13 @@ export function createApp(opts: AppOptions): express.Express {
   } catch {
     /* read-only fs in tests; we'll let writes fail loudly there */
   }
+  const logger: Logger = opts.logger ?? createLogger({ level: "info", sinks: [stdoutSink] });
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
+
+  // Access log: one entry per request, with method, path, status, durationMs.
+  app.use(requestLogger(logger));
 
   const upload = multer({
     storage: multer.memoryStorage(),
@@ -121,6 +128,7 @@ export function createApp(opts: AppOptions): express.Express {
       "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)"
     ).run(sessionId, childId, subject || null);
 
+    logger.info("session started", { sessionId, childId, subject });
     res.json({ sessionId, childId, subject, startedAt: Date.now() });
   });
 
@@ -187,6 +195,9 @@ export function createApp(opts: AppOptions): express.Express {
     const sessionKey = session?.id || "none";
 
     frameCountForLog = (frameCountForLog || 0) + 1;
+    if (frameCountForLog % 100 === 1) {
+      logger.debug("frame batch milestone", { received: frameCountForLog });
+    }
 
     try {
       const img = sharp(req.file.buffer);
@@ -242,6 +253,7 @@ export function createApp(opts: AppOptions): express.Express {
         debug: { avg: Math.round(avg), variance: Math.round(variance) },
       });
     } catch (e: any) {
+      logger.error("frame sharp error", { error: e.message });
       res.json({ score: 80, warning: undefined, debug: { error: e.message } });
     }
   });
