@@ -21,7 +21,3 @@ server.key
 
 # Git worktrees (feature/fix branches live here, not in main checkout)
 .worktrees/
-
-# Local CI workflow (kept on disk for inspection; the official one must be
-# added via the GitHub web UI because `gh` doesn't have the `workflow` scope).
-.github/
