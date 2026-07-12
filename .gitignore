@@ -1,0 +1,20 @@
+# Node
+node_modules/
+*.log
+npm-debug.log*
+.DS_Store
+
+# Runtime data (SQLite is shared between mcp-server and HTTP server)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Secrets / local TLS
+.env
+.env.local
+*.pem
+server.cert
+server.key
+
+# Mavis scratch (per-feature working notes; see docs/agents/issue-tracker.md)
+.scratch/

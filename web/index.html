@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#ffb84d">
+  <title>小书童 · 写作业</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(180deg, #fff8e7 0%, #ffe5b4 100%);
+      color: #5a3e1b;
+    }
+    .app { max-width: 480px; margin: 0 auto; height: 100%; display: flex; flex-direction: column; }
+    .header { padding: 16px; text-align: center; flex-shrink: 0; }
+    .avatar-row { display: flex; align-items: center; justify-content: center; gap: 12px; }
+    .avatar {
+      width: 64px; height: 64px; border-radius: 50%;
+      background: #ffb84d;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 36px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      transition: transform 0.2s;
+    }
+    .avatar.happy { transform: scale(1.1); }
+    .name { font-size: 18px; font-weight: bold; }
+    .status { font-size: 12px; color: #8b6f47; margin-top: 2px; }
+    .stars { font-size: 18px; padding: 4px 12px; background: #fff; border-radius: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+    .chat { flex: 1; overflow-y: auto; padding: 12px 16px; -webkit-overflow-scrolling: touch; }
+    .msg { margin: 8px 0; padding: 10px 14px; border-radius: 18px; max-width: 78%; word-wrap: break-word; line-height: 1.4; font-size: 15px; }
+    .msg-agent { background: #fff; border: 2px solid #ffb84d; margin-right: auto; }
+    .msg-child { background: #e3f2fd; border: 2px solid #64b5f6; margin-left: auto; text-align: right; }
+    .msg-system { background: rgba(255, 200, 100, 0.2); color: #8b6f47; text-align: center; margin: 8px auto; font-size: 12px; max-width: 90%; }
+    .warning { background: #ff6b6b; color: white; padding: 8px 12px; border-radius: 12px; text-align: center; font-weight: bold; margin: 8px 0; animation: shake 0.5s; }
+    @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+    .input-row { display: flex; gap: 8px; padding: 12px 16px; flex-shrink: 0; }
+    .input-row input { flex: 1; padding: 12px 16px; font-size: 16px; border: 2px solid #ffb84d; border-radius: 24px; outline: none; background: white; }
+    .input-row button { padding: 12px 20px; font-size: 16px; border: none; border-radius: 24px; background: #ffb84d; color: white; font-weight: bold; cursor: pointer; }
+    .input-row button:active { background: #ff9500; }
+    .btn-row { display: flex; gap: 8px; padding: 0 16px 16px; flex-shrink: 0; }
+    .btn-row button { flex: 1; padding: 12px; font-size: 15px; border: none; border-radius: 20px; background: #64b5f6; color: white; font-weight: bold; cursor: pointer; }
+    .btn-row button:active { background: #1976d2; }
+    .btn-row button.danger { background: #ff8a65; }
+    .btn-row button.danger:active { background: #d84315; }
+    .perm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
+    .perm-overlay .card { background: white; padding: 24px; border-radius: 16px; max-width: 360px; text-align: center; }
+    .perm-overlay button { margin-top: 16px; padding: 12px 32px; font-size: 16px; background: #ffb84d; color: white; border: none; border-radius: 24px; font-weight: bold; }
+    canvas { display: none; }
+    #cam-preview {
+      position: fixed; top: 16px; right: 16px;
+      width: 120px; height: 160px;
+      border-radius: 12px; object-fit: cover;
+      border: 3px solid #ffb84d;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      background: #333;
+      z-index: 10;
+    }
+    #cam-preview.mirrored { transform: scaleX(-1); }  /* 前置摄像头镜像 */
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <div class="avatar-row">
+      <div class="avatar" id="avatar">📚</div>
+      <div>
+        <div class="name">小书童</div>
+        <div class="status" id="status">连接中...</div>
+      </div>
+      <div class="stars" id="stars" style="display:none"></div>
+    </div>
+  </div>
+  <div class="chat" id="chat"></div>
+    <div class="input-row">
+    <input type="text" id="input" placeholder="跟小书童说句话...（点键盘 🎤 直接说话）" 
+           inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" 
+           enterkeyhint="send" />
+    <button onclick="send()">发送</button>
+  </div>
+  <div class="btn-row">
+    <button id="flip-btn" onclick="flipCamera()">🔄 翻转</button>
+    <button class="danger" onclick="endSession()">✅ 写完啦</button>
+  </div>
+</div>
+
+<video id="cam-preview" autoplay muted playsinline></video>
+<canvas id="canvas" width="320" height="240"></canvas>
+
+<div class="perm-overlay" id="perm-overlay" style="display:none;">
+  <div class="card">
+    <h2>小书童想看你~</h2>
+    <p>需要打开摄像头才能陪你写作业哦</p>
+    <button onclick="requestPerm()">好的</button>
+  </div>
+</div>
+
+<div class="perm-overlay" id="no-device-overlay" style="display:none;">
+  <div class="card">
+    <h2 id="no-device-title">这台设备没有摄像头/麦克风</h2>
+    <p id="no-device-hint"></p>
+    <details open style="margin-top:12px;text-align:left;font-size:12px;color:#888;">
+      <summary>调试信息（点击展开/折叠）</summary>
+      <pre id="device-debug" style="background:#f5f5f5;padding:8px;border-radius:4px;overflow:auto;max-height:240px;margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;"></pre>
+    </details>
+    <div style="display:flex;gap:8px;margin-top:12px;">
+      <button onclick="retryDeviceCheck()" style="background:#64b5f6;">重新检测</button>
+      <button onclick="enterTextMode()" style="background:#ffb84d;">文字模式继续</button>
+    </div>
+  </div>
+</div>
+
+<div class="perm-overlay" id="server-config" style="display:none;">
+  <div class="card">
+    <h2>连不上小书童服务器</h2>
+    <p>请确认：</p>
+    <ol style="text-align:left;font-size:14px;color:#666;line-height:1.6;">
+      <li>Mac mini 跑着 server（<code>npm start</code>）</li>
+      <li>Mac mini 跟当前设备同 WiFi</li>
+      <li>URL 写对了：<br><code style="background:#fff3e0;padding:2px 6px;border-radius:4px;">http://mac-mini.local:3000</code></li>
+    </ol>
+    <button onclick="location.reload()">重试</button>
+  </div>
+</div>
+
+<script>
+const chatEl = document.getElementById('chat');
+const inputEl = document.getElementById('input');
+const statusEl = document.getElementById('status');
+const avatarEl = document.getElementById('avatar');
+const starsEl = null;
+let sessionId = null;
+let state = 'idle'; // idle | writing | done
+let recognition = null;
+let isListening = false;
+let frameLoop = null;
+let videoStream = null; // = currentStream 别名，统一引用
+let currentFacing = 'environment'; // 默认后置（孩子用）
+let synthUnlocked = false; // iOS Safari 首次用户手势解锁 TTS
+
+function addMsg(role, text) {
+  const div = document.createElement('div');
+  div.className = 'msg msg-' + role;
+  div.textContent = text;
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+  if (role === 'agent') {
+    avatarEl.classList.add('happy');
+    setTimeout(() => avatarEl.classList.remove('happy'), 500);
+  }
+}
+
+function addSystem(text) {
+  const div = document.createElement('div');
+  div.className = 'msg msg-system';
+  div.textContent = text;
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function showWarning(text) {
+  const div = document.createElement('div');
+  div.className = 'warning';
+  div.textContent = text;
+  chatEl.appendChild(div);
+  setTimeout(() => div.remove(), 4000);
+  avatarEl.classList.add('happy');
+  setTimeout(() => avatarEl.classList.remove('happy'), 800);
+}
+
+function speak(text) {
+  if (!('speechSynthesis' in window)) return;
+  // iOS Safari: 必须在用户交互后才能 speak。首次解锁 + 静音 utterance 触发 unlock
+  if (synthUnlocked === false) {
+    const u0 = new SpeechSynthesisUtterance('');
+    u0.volume = 0;
+    speechSynthesis.speak(u0);
+    synthUnlocked = true;
+  }
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'zh-CN';
+  u.rate = 0.9;
+  u.pitch = 1.1;
+  // iOS 经常需要先 cancel 再 speak，否则新 utterance 不发声
+  speechSynthesis.cancel();
+  // 偶尔 speak 静默失败，setTimeout 重试一次
+  setTimeout(() => {
+    speechSynthesis.speak(u);
+  }, 50);
+  // iOS 后台被杀恢复后，speak 可能 5 秒后无声音，监听 onend 异常时再试
+  u.onerror = (e) => {
+    console.warn('TTS error:', e);
+  };
+}
+
+async function start() {
+  // 1. 先连 server（用当前 URL 的 origin）
+  try {
+    const r = await fetch('/api/health');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    statusEl.textContent = `连上服务器（v${data.version}）`;
+  } catch (e) {
+    statusEl.textContent = '服务器连不上';
+    document.getElementById('server-config').style.display = 'flex';
+    return;
+  }
+
+  // 2. 检测设备（客户端：Mac Pro / 手机 / 任何有摄像头的设备）
+  const deviceInfo = await checkDevices();
+  if (!deviceInfo.hasVideo && !deviceInfo.hasAudio) {
+    showNoDevice(deviceInfo);
+    return;
+  }
+
+  // 3. 有设备 → 弹权限框
+  document.getElementById('perm-overlay').style.display = 'flex';
+}
+
+async function checkDevices() {
+  const info = {
+    hasVideo: false,
+    hasAudio: false,
+    apiAvailable: false,
+    devices: [],
+    error: null,
+    userAgent: navigator.userAgent,
+    isSecureContext: window.isSecureContext,
+  };
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+      info.error = 'mediaDevices API 不可用';
+      return info;
+    }
+    info.apiAvailable = true;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    info.devices = devices.map(d => ({
+      kind: d.kind,
+      label: d.label || '(无 label — 需要先授权)',
+      deviceId: d.deviceId.slice(0, 8) + '...',
+    }));
+    info.hasVideo = devices.some(d => d.kind === 'videoinput');
+    info.hasAudio = devices.some(d => d.kind === 'audioinput');
+  } catch (e) {
+    info.error = e.name + ': ' + e.message;
+  }
+  return info;
+}
+
+function showNoDevice(info) {
+  document.getElementById('no-device-title').textContent =
+    info.hasVideo || info.hasAudio ? '只有部分设备' : '没检测到摄像头/麦克风';
+
+  // 调试信息
+  const debugEl = document.getElementById('device-debug');
+  debugEl.textContent = JSON.stringify(info, null, 2);
+
+  // 提示
+  const hints = [];
+  if (!info.apiAvailable) {
+    hints.push('❌ 浏览器不支持 mediaDevices API（试试 Chrome / Safari 最新版）');
+  }
+  if (info.error) {
+    hints.push(`❌ 错误：${info.error}`);
+  }
+  if (info.apiAvailable && !info.hasVideo) {
+    hints.push('❌ 没找到摄像头。Mac Pro 没有内置摄像头，需要外接 USB 摄像头或在 iPhone 上打开');
+  }
+  if (info.isSecureContext === false) {
+    hints.push('❌ 不是 secure context（应该用 https:// 或 localhost 或 mac-mini.local）');
+  }
+  if (hints.length === 0 && !info.hasVideo && !info.hasAudio) {
+    hints.push('可能的解决：');
+    hints.push('1. macOS 系统设置 → 隐私与安全性 → 摄像头 → 允许 Chrome');
+    hints.push('2. 系统设置 → 麦克风 → 允许 Chrome');
+    hints.push('3. 摄像头没被其他 App 占用（Zoom / FaceTime / OBS）');
+    hints.push('4. 用孩子的 iPhone / iPad / Android 手机打开（推荐）');
+  }
+
+  document.getElementById('no-device-hint').innerHTML = hints
+    .map(h => `<div style="text-align:left;margin:4px 0;font-size:14px;line-height:1.5;">${h}</div>`)
+    .join('');
+
+  document.getElementById('no-device-overlay').style.display = 'flex';
+}
+
+async function retryDeviceCheck() {
+  document.getElementById('no-device-overlay').style.display = 'none';
+  const info = await checkDevices();
+  if (info.hasVideo || info.hasAudio) {
+    document.getElementById('perm-overlay').style.display = 'flex';
+  } else {
+    showNoDevice(info);
+  }
+}
+
+async function requestPerm() {
+  document.getElementById('perm-overlay').style.display = 'none';
+  // 重新检测本机设备（requestPerm 单独调用时不知道 hasAudio）
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const hasVideo = devices.some(d => d.kind === 'videoinput');
+  const hasAudio = devices.some(d => d.kind === 'audioinput');
+
+  try {
+    // v0.1：只申请 video（不申请 audio），让麦克风给系统输入法用
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: hasVideo ? { width: 320, height: 240, facingMode: currentFacingMode } : false,
+    });
+    currentStream = stream;
+    videoStream = stream;
+    const video = document.getElementById('cam-preview');
+    if (video) {
+      video.srcObject = stream;
+      if (currentFacingMode === 'user') video.classList.add('mirrored');
+      await video.play();
+    }
+    addSystem('✅ 摄像头就绪');
+  } catch (e) {
+    if (e.name === 'NotFoundError' || e.name === 'OverconstrainedError') {
+      addSystem('没找到摄像头/麦克风');
+    } else if (e.name === 'NotAllowedError') {
+      addSystem('权限被拒绝，点地址栏小锁重新允许');
+    } else if (e.name === 'NotReadableError') {
+      addSystem('摄像头被其他 App 占用（关掉 Zoom/FaceTime 再试）');
+    } else {
+      addSystem('打开失败：' + e.message);
+    }
+  }
+
+  // 开 session
+  try {
+    const r = await fetch('/api/session/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ childId: 'default', subject: '作业' })
+    });
+    const data = await r.json();
+    sessionId = data.sessionId;
+    state = 'writing';
+    statusEl.textContent = '写作业中...';
+    addMsg('agent', '你好呀！我是小书童，我们开始写作业吧~');
+    speak('你好呀！我是小书童，我们开始写作业吧');
+  } catch (e) {
+    statusEl.textContent = '会话启动失败';
+    return;
+  }
+
+  // 启动坐姿循环
+  startFrameLoop();
+}
+
+async function startFrameLoop() {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  let frameCount = 0;
+  let sendCount = 0;
+  let lastReport = Date.now();
+  let lastReadyState = -1;
+  let lastVideoId = '';
+  let firstError = null;
+
+  // 启动诊断
+  setTimeout(() => {
+    const v = document.getElementById('cam-preview');
+    if (v) {
+      addSystem(`📷 视频: srcObject=${!!v.srcObject} readyState=${v.readyState} ${v.videoWidth}x${v.videoHeight}`);
+    } else {
+      addSystem('⚠️ 没找到视频元素');
+    }
+  }, 1000);
+
+  frameLoop = setInterval(async () => {
+    const video = document.getElementById('cam-preview');
+    if (!video) return;
+    if (lastVideoId !== video.id) {
+      lastVideoId = video.id;
+      addSystem(`📷 新视频元素 readyState=${video.readyState} ${video.videoWidth}x${video.videoHeight}`);
+    }
+    if (video.readyState < 2) {
+      if (lastReadyState !== video.readyState) {
+        lastReadyState = video.readyState;
+        if (video.readyState === 0 && !video.srcObject) {
+          addSystem('⏳ 摄像头未启动（srcObject 空）');
+        } else {
+          addSystem(`⏳ 摄像头就绪中（readyState=${video.readyState}）`);
+        }
+      }
+      return;
+    }
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      // readyState OK 但没实际像素流
+      if (!firstError) {
+        firstError = Date.now();
+        addSystem('⚠️ 视频无像素流（videoWidth=0），可能 Android Chrome 还没真正开始推流');
+      }
+      return;
+    }
+    lastReadyState = video.readyState;
+    firstError = null;
+    try {
+      ctx.drawImage(video, 0, 0, 320, 240);
+      const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.5));
+      if (!blob) {
+        console.warn('[frame] toBlob null');
+        return;
+      }
+      if (blob.size < 100) {
+        console.warn('[frame] blob too small:', blob.size);
+        return;
+      }
+      frameCount++;
+      const form = new FormData();
+      form.append('frame', blob);
+      try {
+        const resp = await fetch('/api/frame', { method: 'POST', body: form });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.warning) {
+          showWarning(data.warning);
+          addMsg('agent', data.warning);
+          speak(data.warning);
+        }
+      } catch (e) {
+        // 静默失败，不打扰孩子
+      }
+    } catch (e) {
+      console.error('[frame] error:', e);
+    }
+  }, 500);
+}
+
+async function send() {
+  // iOS Safari: 第一次用户手势立刻解锁 TTS（必须这次，异步后失效）
+  if ('speechSynthesis' in window && !synthUnlocked) {
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0;
+    speechSynthesis.speak(u);
+    synthUnlocked = true;
+  }
+  const text = inputEl.value.trim();
+  if (!text) return;
+  inputEl.value = '';
+  addMsg('child', text);
+
+  // done 状态下，孩子说"我要写作业"自动切回 writing 模式
+  if (state === 'done' && /我要(写|做)作业|继续写|再写|接着写|想写作业|还要写/i.test(text)) {
+    addSystem('切回作业模式...');
+    await startSession();
+    return;
+  }
+
+  try {
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, state })
+    });
+    if (!r.ok) {
+      const errText = await r.text();
+      addSystem('chat HTTP ' + r.status + ': ' + errText.slice(0, 200));
+      addMsg('agent', '网络不好，再说一次？');
+      return;
+    }
+    const { reply } = await r.json();
+    addMsg('agent', reply);
+    speak(reply);
+  } catch (e) {
+    addSystem('chat 失败: ' + e.message);
+    addMsg('agent', '网络不好，再说一次？');
+  }
+}
+
+let micTimeout = null;
+let mediaRecorder = null;
+let audioChunks = [];
+let recordingStartTs = 0;
+
+function stopMic() {
+  if (recognition) {
+    try { recognition.stop(); } catch (e) { /* ignore */ }
+    recognition = null;
+  }
+  isListening = false;
+  const btn = document.getElementById('mic-btn');
+  if (btn) btn.textContent = '🎤 按住说话';
+}
+
+let currentFacingMode = 'environment';  // 'user' 前置 | 'environment' 后置（默认后置，孩子用）
+let currentStream = null;
+
+async function flipCamera() {
+  const newMode = currentFacingMode === 'user' ? 'environment' : 'user';
+  addSystem(`切换到${newMode === 'user' ? '前置' : '后置'}摄像头...`);
+
+  // 1. 彻底释放老 stream
+  if (currentStream) {
+    currentStream.getTracks().forEach(t => t.stop());
+    currentStream = null;
+  }
+
+  // 2. 删掉老 video 元素（Android Chrome 上同一元素切换 facingMode 经常失败）
+  const oldVideo = document.getElementById('cam-preview');
+  if (oldVideo && oldVideo.parentNode) {
+    oldVideo.srcObject = null;
+    oldVideo.parentNode.removeChild(oldVideo);
+  }
+
+  // 3. 创建新 video 元素
+  const newVideo = document.createElement('video');
+  newVideo.id = 'cam-preview';
+  newVideo.autoplay = true;
+  newVideo.muted = true;
+  newVideo.playsInline = true;
+  if (newMode === 'user') newVideo.classList.add('mirrored');
+  document.body.appendChild(newVideo);
+
+  // 4. 等 500ms 让硬件释放
+  await new Promise(r => setTimeout(r, 500));
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 320 }, height: { ideal: 240 }, facingMode: newMode },
+    });
+    currentStream = stream;
+    videoStream = stream; // 同步
+    newVideo.srcObject = stream;
+    await newVideo.play();
+    currentFacingMode = newMode;
+    addSystem(`已切换到${newMode === 'user' ? '前置' : '后置'}摄像头`);
+  } catch (e) {
+    addSystem('切换失败：' + e.message + '（刷新页面重试）');
+  }
+}
+
+async function startRecording(e) {
+  if (e) e.preventDefault();
+  if (isListening) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    addSystem('浏览器不支持录音');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 },
+    });
+    mediaRecorder = new MediaRecorder(stream, {
+      mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm',
+    });
+    audioChunks = [];
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      const duration = Date.now() - recordingStartTs;
+      addSystem(`🎤 录音 ${(duration/1000).toFixed(1)} 秒，发送中...`);
+      const blob = new Blob(audioChunks, { type: 'audio/webm' });
+      const form = new FormData();
+      form.append('audio', blob, 'voice.webm');
+      try {
+        const r = await fetch('/api/voice', { method: 'POST', body: form });
+        const data = await r.json();
+        if (data.text) {
+          addSystem(`识别结果：${data.text}`);
+          inputEl.value = data.text;
+          send();
+        } else if (data.error) {
+          addSystem('识别失败：' + data.error);
+        }
+      } catch (err) {
+        addSystem('发送失败：' + err.message);
+      }
+    };
+    mediaRecorder.start();
+    recordingStartTs = Date.now();
+    isListening = true;
+    const btn = document.getElementById('mic-btn');
+    if (btn) btn.textContent = '🛑 松开发送';
+    addSystem('🎤 录音中...');
+    // 30 秒自动停
+    micTimeout = setTimeout(() => {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+      }
+    }, 30000);
+  } catch (e) {
+    addSystem('启动录音失败：' + e.name + ' - ' + e.message);
+    if (e.name === 'NotAllowedError') {
+      addSystem('需要麦克风权限，点地址栏小锁重新允许');
+    }
+  }
+}
+
+function stopRecording(e) {
+  if (e) e.preventDefault();
+  if (micTimeout) {
+    clearTimeout(micTimeout);
+    micTimeout = null;
+  }
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+  }
+  stopMic();
+}
+
+async function enterTextMode() {
+  document.getElementById('no-device-overlay').style.display = 'none';
+  statusEl.textContent = '文字模式（无摄像头/麦克风）';
+  addSystem('文字模式：可以打字跟小书童聊天，但没有坐姿检测和语音');
+  // 仍然起 session
+  try {
+    const r = await fetch('/api/session/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ childId: 'default', subject: '作业' })
+    });
+    const data = await r.json();
+    sessionId = data.sessionId;
+    addMsg('agent', '你好呀！我是小书童，文字模式陪你写作业~');
+  } catch (e) {
+    statusEl.textContent = '会话启动失败';
+  }
+}
+
+async function endSession() {
+  if (state !== 'writing') {
+    addSystem('还没开始写作业呢');
+    return;
+  }
+  try {
+    await fetch('/api/session/end', { method: 'POST' });
+    addMsg('agent', '写完啦！');
+    speak('写完啦');
+    addSystem('小书童陪你聊会儿吧');
+    if (frameLoop) { clearInterval(frameLoop); frameLoop = null; }
+    // 不停摄像头流（用户没要求），但停掉 frameLoop（不再发帧）
+    if (videoStream) {
+      videoStream.getTracks().forEach(t => t.stop());
+      videoStream = null;
+    }
+    state = 'done';
+    statusEl.textContent = '写完啦，可以跟小书童聊会儿~';
+  } catch (e) {
+    addSystem('结束失败');
+  }
+}
+
+async function startSession() {
+  if (state === 'writing') return;
+  try {
+    const r = await fetch('/api/session/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const data = await r.json();
+    sessionId = data.sessionId;
+    state = 'writing';
+    if (!frameLoop && videoStream) {
+      // 已经在 idle/done 时保留了 stream？不应该，endSession 已停 stream
+      // 这里重新启动摄像头
+    }
+    // 重新启动摄像头
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      try {
+        videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, facingMode: currentFacing } });
+        const v = document.getElementById('cam-preview');
+        v.srcObject = videoStream;
+        await v.play();
+        startFrameLoop();
+      } catch (e) {
+        addSystem('摄像头没开成，继续聊吧');
+      }
+    }
+    addMsg('agent', '好嘞，继续写！');
+    speak('好嘞，继续写');
+    statusEl.textContent = '写作业中...';
+  } catch (e) {
+    addSystem('启动失败');
+  }
+}
+
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') send();
+});
+
+start();
+</script>
+</body>
+</html>

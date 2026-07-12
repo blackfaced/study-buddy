@@ -1,0 +1,21 @@
+{
+  "name": "study-buddy-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Study Buddy MCP server - 陪孩子写作业",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.11.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2"
+  }
+}
