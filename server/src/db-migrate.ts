@@ -21,6 +21,12 @@ export function migrateSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE chat_turns ADD COLUMN state TEXT DEFAULT 'writing'`); } catch {}
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN hint TEXT`); } catch {}
   try { db.exec(`ALTER TABLE sessions ADD COLUMN writing_turns INTEGER DEFAULT 0`); } catch {}
+  // v0.5: vision-mistake columns
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN image_path TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN vision_input TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN vision_reasoning TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN vision_model TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN vision_ts INTEGER`); } catch {}
 
   // 初始化 schema
   db.exec(`
@@ -77,6 +83,11 @@ export function migrateSchema(db: Database.Database): void {
       error_type TEXT,
       hint TEXT,
       reviewed_count INTEGER DEFAULT 0,
+      image_path TEXT,
+      vision_input TEXT,
+      vision_reasoning TEXT,
+      vision_model TEXT,
+      vision_ts INTEGER,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
