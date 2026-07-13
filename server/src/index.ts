@@ -6,8 +6,10 @@
 //   1. Loading .env
 //   2. Opening the real SQLite database
 //   3. Running the schema migration (Bug 4 fix: was missing in v0.1)
-//   4. Building the Express app via createApp(db)
-//   5. Starting HTTPS (with self-signed cert) or HTTP listener
+//   4. Building the logger (stdout + rotating file)
+//   5. Building the vision client (v0.5) if MINIMAX_API_KEY is set
+//   6. Building the Express app via createApp(db)
+//   7. Starting HTTPS (with self-signed cert) or HTTP listener
 
 import { config as loadDotenv } from "dotenv";
 import Database from "better-sqlite3";
@@ -20,6 +22,12 @@ import express from "express";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
 import { MiniMaxVisionClient } from "./vision-client.js";
+import {
+  createLogger,
+  stdoutSink,
+  rotatingFileSink,
+  type LogLevel,
+} from "./logger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 loadDotenv({ path: resolve(__dirname, "../../.env") });
@@ -29,13 +37,23 @@ const DB_PATH = process.env.STUDY_DB || join(ROOT, "data/study.db");
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 3000);
 const HTTP_PORT = Number(process.env.HTTP_PORT || 3001);
 const MISTAKES_DIR = process.env.MISTAKES_DIR || join(ROOT, "data/mistakes");
+const LOG_DIR = process.env.LOG_DIR || join(ROOT, "data/logs");
+const LOG_FILE = process.env.LOG_FILE || join(LOG_DIR, "study-buddy-server.log");
+const LOG_LEVEL = (process.env.LOG_LEVEL || "info") as LogLevel;
+const LOG_MAX_BYTES = Number(process.env.LOG_MAX_BYTES || 5 * 1024 * 1024); // 5MB
 
 const KEY_PATH = process.env.SSL_KEY || join(ROOT, "server.key");
 const CERT_PATH = process.env.SSL_CERT || join(ROOT, "server.cert");
 const hasCert = existsSync(KEY_PATH) && existsSync(CERT_PATH);
 
+// Build the logger before opening the DB so we can log startup steps.
+const logger = createLogger({
+  level: LOG_LEVEL,
+  sinks: [stdoutSink, rotatingFileSink({ path: LOG_FILE, maxBytes: LOG_MAX_BYTES, keep: 3 })],
+});
+
 if (!hasCert) {
-  console.warn(`[study-buddy-server] SSL cert missing at ${KEY_PATH} / ${CERT_PATH} — HTTPS disabled`);
+  logger.warn("SSL cert missing — HTTPS disabled", { key: KEY_PATH, cert: CERT_PATH });
 }
 
 // Bug 4 fix: open the DB AND run the schema migration so writes to
@@ -43,7 +61,7 @@ if (!hasCert) {
 // touches the DB.
 const db = new Database(DB_PATH);
 migrateSchema(db);
-console.log(`[study-buddy-server] DB ready at ${DB_PATH}`);
+logger.info("DB ready", { path: DB_PATH });
 
 // v0.5: wire up the vision client if an API key is present. /api/mistake-photo
 // returns 503 when this is null.
@@ -52,9 +70,9 @@ const visionClient = visionApiKey
   ? new MiniMaxVisionClient({ apiKey: visionApiKey })
   : null;
 if (visionClient) {
-  console.log(`[study-buddy-server] vision client ready (model=MiniMax-M3)`);
+  logger.info("vision client ready", { model: "MiniMax-M3" });
 } else {
-  console.warn(`[study-buddy-server] MINIMAX_API_KEY not set — /api/mistake-photo will return 503`);
+  logger.warn("MINIMAX_API_KEY not set — /api/mistake-photo will return 503");
 }
 
 const app = createApp({
@@ -62,6 +80,7 @@ const app = createApp({
   httpsPort: HTTPS_PORT,
   visionClient,
   mistakesDir: MISTAKES_DIR,
+  logger,
 });
 
 if (hasCert) {
@@ -69,9 +88,10 @@ if (hasCert) {
     { key: readFileSync(KEY_PATH), cert: readFileSync(CERT_PATH) },
     app
   ).listen(HTTPS_PORT, "0.0.0.0", () => {
-    console.log(`[study-buddy-server] HTTPS on :${HTTPS_PORT}`);
-    console.log(`[study-buddy-server] Web UI: https://localhost:${HTTPS_PORT}/`);
-    console.log(`[study-buddy-server] Web UI (LAN): https://mac-mini.local:${HTTPS_PORT}/`);
+    logger.info("HTTPS listening", { port: HTTPS_PORT, urls: [
+      `https://localhost:${HTTPS_PORT}/`,
+      `https://mac-mini.local:${HTTPS_PORT}/`,
+    ]});
   });
 
   const redirectApp = express();
@@ -80,10 +100,10 @@ if (hasCert) {
     res.redirect(301, `https://${host}:${HTTPS_PORT}${req.url}`);
   });
   httpCreate(redirectApp).listen(HTTP_PORT, "0.0.0.0", () => {
-    console.log(`[study-buddy-server] HTTP redirect → HTTPS on :${HTTP_PORT}`);
+    logger.info("HTTP→HTTPS redirect listening", { port: HTTP_PORT });
   });
 } else {
   app.listen(HTTPS_PORT, "0.0.0.0", () => {
-    console.log(`[study-buddy-server] HTTP (no HTTPS) on :${HTTPS_PORT}`);
+    logger.info("HTTP listening (no TLS)", { port: HTTPS_PORT });
   });
 }

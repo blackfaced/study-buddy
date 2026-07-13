@@ -12,9 +12,25 @@ study-buddy/
 ├── mcp-server/      # Node.js + TypeScript MCP server (Mavis agent queries)
 ├── server/          # Node.js + TypeScript HTTP server (iPad/safari client)
 ├── web/             # static HTML (camera + chat UI, served by server/)
-├── data/            # SQLite (study.db) — shared between mcp-server and server
-└── docs/            # engineering skill docs (issue tracker / triage / domain)
+├── data/            # SQLite (study.db) + logs/ — shared between mcp-server and server
+├── bin/             # process control scripts (study-buddy-server.sh start|stop|…)
+└── docs/            # engineering skill docs (issue tracker / triage / domain / deploy)
 ```
+
+## Deploy
+
+The HTTP server is managed by `bin/study-buddy-server.sh` (no system service manager required).
+
+```bash
+bin/study-buddy-server.sh start   # background-launch npm start, capture logs
+bin/study-buddy-server.sh status  # PID + port + log line count
+bin/study-buddy-server.sh logs    # tail -f data/logs/study-buddy-server.log
+bin/study-buddy-server.sh stop    # SIGTERM → 5s → SIGKILL
+```
+
+Logs go to `data/logs/study-buddy-server.log` (5MB rotation, 3 generations kept). One JSON-meta line per request: `INFO request {"method":"GET","path":"/api/pair","status":200,"durationMs":0.4,...}`. Status → level mapping: 2xx/3xx → info, 4xx → warn, 5xx → error.
+
+The mcp-server is a child of the mavis daemon (`mavis mcp add`); don't manage it from the script. See `docs/deploy.md` for the full reference, env vars, and a launchd plist for boot-time start.
 
 ## Conventions
 
