@@ -19,6 +19,7 @@ import { createServer as httpCreate } from "node:http";
 import express from "express";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
+import { MiniMaxVisionClient } from "./vision-client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 loadDotenv({ path: resolve(__dirname, "../../.env") });
@@ -27,6 +28,7 @@ const ROOT = resolve(__dirname, "../..");
 const DB_PATH = process.env.STUDY_DB || join(ROOT, "data/study.db");
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 3000);
 const HTTP_PORT = Number(process.env.HTTP_PORT || 3001);
+const MISTAKES_DIR = process.env.MISTAKES_DIR || join(ROOT, "data/mistakes");
 
 const KEY_PATH = process.env.SSL_KEY || join(ROOT, "server.key");
 const CERT_PATH = process.env.SSL_CERT || join(ROOT, "server.cert");
@@ -43,7 +45,24 @@ const db = new Database(DB_PATH);
 migrateSchema(db);
 console.log(`[study-buddy-server] DB ready at ${DB_PATH}`);
 
-const app = createApp({ db, httpsPort: HTTPS_PORT });
+// v0.5: wire up the vision client if an API key is present. /api/mistake-photo
+// returns 503 when this is null.
+const visionApiKey = process.env.MINIMAX_API_KEY;
+const visionClient = visionApiKey
+  ? new MiniMaxVisionClient({ apiKey: visionApiKey })
+  : null;
+if (visionClient) {
+  console.log(`[study-buddy-server] vision client ready (model=MiniMax-M3)`);
+} else {
+  console.warn(`[study-buddy-server] MINIMAX_API_KEY not set — /api/mistake-photo will return 503`);
+}
+
+const app = createApp({
+  db,
+  httpsPort: HTTPS_PORT,
+  visionClient,
+  mistakesDir: MISTAKES_DIR,
+});
 
 if (hasCert) {
   httpsCreate(

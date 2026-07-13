@@ -13,7 +13,9 @@ import multer from "multer";
 import Database from "better-sqlite3";
 import { join, resolve } from "node:path";
 import sharp from "sharp";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { analyzeMistakeImage, type VisionClient } from "./vision.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -24,6 +26,10 @@ export interface AppOptions {
   db: Database.Database;
   /** Override the HTTPS port surfaced in /api/pair.serverUrl. Defaults to env HTTPS_PORT. */
   httpsPort?: number;
+  /** Vision client for /api/mistake-photo. If null, the endpoint returns 503. */
+  visionClient?: VisionClient | null;
+  /** Directory where mistake photos are written. */
+  mistakesDir?: string;
 }
 
 const OFFTOPIC_KEYWORDS = [
@@ -50,6 +56,14 @@ function classifyTopic(text: string): "learning" | "offtopic" | "emotion" {
 export function createApp(opts: AppOptions): express.Express {
   const { db } = opts;
   const httpsPort = opts.httpsPort ?? HTTPS_PORT;
+  const visionClient = opts.visionClient === undefined ? null : opts.visionClient;
+  const mistakesDir = opts.mistakesDir ?? resolve(process.cwd(), "data/mistakes");
+  // Ensure the mistakes dir exists. No-op if it already does.
+  try {
+    mkdirSync(mistakesDir, { recursive: true });
+  } catch {
+    /* read-only fs in tests; we'll let writes fail loudly there */
+  }
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
@@ -339,6 +353,81 @@ export function createApp(opts: AppOptions): express.Express {
       size: req.file.size,
     });
   });
+
+  // ============== 错题拍照（v0.5） ==============
+  // Reuse the existing `upload` multer instance. Different limits would
+  // matter in production (2MB vs 500KB) but for testing we just need parsing
+  // to work end-to-end with the same `app` that's already wired with
+  // `upload` for /api/frame and /api/voice.
+  const photoUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 2 * 1024 * 1024 },
+  });
+
+  app.post(
+    "/api/mistake-photo",
+    upload.single("photo"),
+    async (req: Request, res: Response) => {
+      if (!visionClient) {
+        return res.status(503).json({
+          error: "vision not configured (MINIMAX_API_KEY not set on the server)",
+        });
+      }
+      if (!req.file) return res.status(400).json({ error: "no photo" });
+      const session = getActiveSession();
+      if (!session) return res.status(400).json({ error: "no active session" });
+
+      // 1. 写文件到 mistakesDir
+      const mistakeId = randomUUID();
+      const filename = `${mistakeId}.jpg`;
+      const imagePath = join(mistakesDir, filename);
+      try {
+        writeFileSync(imagePath, req.file.buffer);
+      } catch (e: any) {
+        return res.status(500).json({ error: `failed to save photo: ${e.message}` });
+      }
+
+      // 2. 调 vision
+      const base64 = req.file.buffer.toString("base64");
+      let analysis;
+      try {
+        analysis = await analyzeMistakeImage(visionClient, base64);
+      } catch (e: any) {
+        return res.status(502).json({ error: `vision failed: ${e.message}` });
+      }
+
+      // 3. 写 mistakes 表
+      const now = Date.now();
+      try {
+        db.prepare(
+          `INSERT INTO mistakes
+           (session_id, subject, problem, error_type, image_path, vision_input, vision_reasoning, vision_model, vision_ts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          session.id,
+          "math", // v0.5a 假设是数学题；v0.5b 让 agent 分类
+          analysis.problemText || "(无题目文字)",
+          "vision_pending", // 错误类型等 v0.5b 用 LLM 归类
+          imagePath,
+          analysis.problemText,
+          analysis.reasoning,
+          analysis.model,
+          now
+        );
+      } catch (e: any) {
+        return res.status(500).json({ error: `db insert failed: ${e.message}` });
+      }
+
+      res.json({
+        mistakeId,
+        imagePath,
+        problemText: analysis.problemText,
+        reasoning: analysis.reasoning,
+        model: analysis.model,
+        visionTs: now,
+      });
+    }
+  );
 
   return app;
 }

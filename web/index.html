@@ -38,6 +38,7 @@
     .input-row input { flex: 1; padding: 12px 16px; font-size: 16px; border: 2px solid #ffb84d; border-radius: 24px; outline: none; background: white; }
     .input-row button { padding: 12px 20px; font-size: 16px; border: none; border-radius: 24px; background: #ffb84d; color: white; font-weight: bold; cursor: pointer; }
     .input-row button:active { background: #ff9500; }
+    .input-row #photo-btn { padding: 12px 16px; font-size: 18px; }
     .btn-row { display: flex; gap: 8px; padding: 0 16px 16px; flex-shrink: 0; }
     .btn-row button { flex: 1; padding: 12px; font-size: 15px; border: none; border-radius: 20px; background: #64b5f6; color: white; font-weight: bold; cursor: pointer; }
     .btn-row button:active { background: #1976d2; }
@@ -72,9 +73,10 @@
   </div>
   <div class="chat" id="chat"></div>
     <div class="input-row">
-    <input type="text" id="input" placeholder="跟小书童说句话...（点键盘 🎤 直接说话）" 
-           inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" 
+    <input type="text" id="input" placeholder="跟小书童说句话...（点键盘 🎤 直接说话）"
+           inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off"
            enterkeyhint="send" />
+    <button id="photo-btn" onclick="captureMistake()" title="拍一下错题">📷</button>
     <button onclick="send()">发送</button>
   </div>
   <div class="btn-row">
@@ -678,6 +680,53 @@ async function startSession() {
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') send();
 });
+
+// ============== v0.5: 拍题按钮 ==============
+// v0.5a thin slice: tap 📷 → grab a still from the live cam-preview → POST
+// to /api/mistake-photo → drop the vision reasoning into the chat as an
+// agent reply. No preview, no retake (v0.5b will add a proper modal).
+let photoInFlight = false;
+async function captureMistake() {
+  if (photoInFlight) return;
+  if (!sessionId) {
+    appendMsg('agent', '先开始写作业会话再拍题哦～', 'learning', false);
+    return;
+  }
+  const video = document.getElementById('cam-preview');
+  if (!video || !video.videoWidth) {
+    appendMsg('agent', '摄像头还没准备好，先等我看到画面再点 📷', 'learning', false);
+    return;
+  }
+  photoInFlight = true;
+  appendMsg('system', '📷 拍照中…', null, false);
+  try {
+    // Snap a still from the live preview into a JPEG blob
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve, reject) =>
+      canvas.toBlob(b => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/jpeg', 0.85)
+    );
+    const fd = new FormData();
+    fd.append('photo', blob, 'mistake.jpg');
+    const res = await fetch('/api/mistake-photo', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+      appendMsg('agent', '拍照失败：' + (data.error || res.status), 'learning', false);
+      return;
+    }
+    // Show what vision read + the reasoning
+    const problemLine = data.problemText ? `我看到：${data.problemText}` : '我没看清题目';
+    const reasoningLine = data.reasoning ? `\n我的思路：${data.reasoning}` : '';
+    appendMsg('agent', problemLine + reasoningLine, 'learning', false);
+  } catch (e) {
+    appendMsg('agent', '拍照出错：' + e.message, 'learning', false);
+  } finally {
+    photoInFlight = false;
+  }
+}
 
 start();
 </script>
