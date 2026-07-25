@@ -6,8 +6,16 @@ study-buddy 不再是单个 agent 助手，而是一个**应用平台 (hub)**：
 
 - **共享数据**：错题本 (mistakes)、会话 (sessions)、孩子画像 (children) 在所有 app 间互通
 - **可插拔 app**：每个 app 是 `web/<app-dir>/` 下的独立子项目，可以是 HTML5 小游戏、JS 工具、静态练习题等
-- **门户页**：`web/index.html` 列出所有 `status: "ready"` 的 app，孩子点哪个进哪个
+- **门户页**：`web/index.html` 位于 `/`，列出核心陪伴入口和所有 `status: "ready"` 的 app；陪伴页本身位于 `/buddy/`
 - **Mavis agent 可见**：`get_apps` MCP 工具返回同样的列表，agent 知道有哪些 app 可调
+
+## 当前入口
+
+| 路径 | 名称 | 用途 |
+|---|---|---|
+| `/` | 小书童学习空间 | 门户页，列出所有可用入口 |
+| `/buddy/` | 小书童陪伴 | 聊天、拍题和陪写作业 |
+| `/games/candy-math-island/` | 糖果口算岛 | 口算小游戏 |
 
 ## 当前挂载的 app
 
