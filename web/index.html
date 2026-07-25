@@ -44,6 +44,47 @@
     .btn-row button:active { background: #1976d2; }
     .btn-row button.danger { background: #ff8a65; }
     .btn-row button.danger:active { background: #d84315; }
+
+    /* ============== 小工具横条 ============== */
+    .apps-bar {
+      margin: 0 16px 12px;
+      padding: 12px 14px;
+      background: rgba(255, 255, 255, 0.7);
+      border-radius: 18px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+    }
+    .apps-bar-label {
+      font-size: 12px;
+      color: #8b6f47;
+      margin-bottom: 8px;
+    }
+    .apps-bar-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .app-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #fff8e7, #ffe5b4);
+      color: #5a3e1b;
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+      transition: transform 150ms;
+    }
+    .app-chip:active { transform: scale(0.96); }
+    .app-chip .status-dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #b5ead7;
+    }
+    .app-chip.draft .status-dot { background: #c7ceea; }
     .perm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
     .perm-overlay .card { background: white; padding: 24px; border-radius: 16px; max-width: 360px; text-align: center; }
     .perm-overlay button { margin-top: 16px; padding: 12px 32px; font-size: 16px; background: #ffb84d; color: white; border: none; border-radius: 24px; font-weight: bold; }
@@ -82,6 +123,10 @@
   <div class="btn-row">
     <button id="flip-btn" onclick="flipCamera()">🔄 翻转</button>
     <button class="danger" onclick="endSession()">✅ 写完啦</button>
+  </div>
+  <div class="apps-bar" id="apps-bar" style="display:none">
+    <div class="apps-bar-label">📱 小工具</div>
+    <div class="apps-bar-list" id="apps-bar-list"></div>
   </div>
 </div>
 
@@ -728,6 +773,40 @@ async function captureMistake() {
   }
 }
 
+// ============== 小工具 (apps) ==============
+// Fetch the apps registry from the server and render a horizontal chip
+// row above the chat. Each chip is a link to the app's URL. Apps with
+// status='draft' get a grey dot; ready apps get a green dot.
+async function loadApps() {
+  try {
+    const res = await fetch('/api/apps');
+    if (!res.ok) return;
+    const { apps } = await res.json();
+    if (!Array.isArray(apps) || apps.length === 0) return;
+    const bar = document.getElementById('apps-bar');
+    const list = document.getElementById('apps-bar-list');
+    list.innerHTML = '';
+    for (const app of apps) {
+      const a = document.createElement('a');
+      a.href = app.url;
+      a.className = 'app-chip' + (app.status === 'draft' ? ' draft' : '');
+      a.title = app.description || app.name;
+      a.innerHTML =
+        `<span class="status-dot"></span>` +
+        `<span>${app.emoji || '📦'}</span>` +
+        `<span>${app.name}</span>`;
+      // Open in same tab so the kid stays inside the kid-side UI. App
+      // pages can navigate back with browser back button.
+      a.target = '_self';
+      list.appendChild(a);
+    }
+    bar.style.display = 'block';
+  } catch (e) {
+    // Apps bar is decorative; a failure here is non-fatal.
+  }
+}
+
+loadApps();
 start();
 </script>
 </body>

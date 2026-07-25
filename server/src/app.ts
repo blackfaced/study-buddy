@@ -17,6 +17,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { analyzeMistakeImage, type VisionClient } from "./vision.js";
 import { requestLogger, type Logger, createLogger, stdoutSink } from "./logger.js";
+import { recordGameMistake, getGameWeakTopics } from "./game-sync.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -31,6 +32,8 @@ export interface AppOptions {
   visionClient?: VisionClient | null;
   /** Directory where mistake photos are written. */
   mistakesDir?: string;
+  /** Path to the Memory Nexus outbox JSONL. */
+  outboxPath?: string;
   /** Logger used for request access logs and event logs. Defaults to a stdout logger. */
   logger?: Logger;
 }
@@ -68,6 +71,8 @@ export function createApp(opts: AppOptions): express.Express {
     /* read-only fs in tests; we'll let writes fail loudly there */
   }
   const logger: Logger = opts.logger ?? createLogger({ level: "info", sinks: [stdoutSink] });
+  const outboxPath =
+    opts.outboxPath ?? resolve(process.cwd(), "data/nexus-outbox.jsonl");
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
@@ -441,8 +446,82 @@ export function createApp(opts: AppOptions): express.Express {
     }
   );
 
+  // ============== Apps (platform registry) ==============
+  app.get("/api/apps", (_req: Request, res: Response) => {
+    res.json({ apps: APPS });
+  });
+
+  // ============== Game sync (v0.5b) ==============
+  // Apps like candy-math-island POST their mistakes here. We persist to
+  // the shared mistakes table (source='game') and append the same event
+  // to the outbox so the Memory Nexus worker can index it asynchronously.
+  app.post("/api/game/mistake", async (req: Request, res: Response) => {
+    const { childId, subject, problem, errorType, userAnswer, correctAnswer, level } = req.body ?? {};
+    if (
+      typeof childId !== "string" ||
+      typeof subject !== "string" ||
+      typeof problem !== "string" ||
+      typeof errorType !== "string" ||
+      typeof userAnswer !== "number" ||
+      typeof correctAnswer !== "number" ||
+      typeof level !== "number"
+    ) {
+      return res.status(400).json({ error: "missing or invalid fields" });
+    }
+    try {
+      const id = await recordGameMistake(db, outboxPath, {
+        childId,
+        subject,
+        problem,
+        errorType,
+        userAnswer,
+        correctAnswer,
+        level,
+      });
+      logger.info("game mistake recorded", { mistakeId: id, errorType, level });
+      res.json({ mistakeId: id });
+    } catch (e: any) {
+      logger.error("game mistake record failed", { error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/game/weak-topics", async (req: Request, res: Response) => {
+    const days = Number(req.query.days ?? 7);
+    if (!Number.isFinite(days) || days <= 0) {
+      return res.status(400).json({ error: "days must be a positive number" });
+    }
+    const topics = await getGameWeakTopics(db, days);
+    res.json({ days, weakTopics: topics });
+  });
+
   return app;
 }
+
+// ============== Apps registry (study-buddy = platform) ==============
+// Static, code-defined list of apps that hang off the study-buddy hub.
+// Each entry maps to a URL the portal page links to. Adding a new app =
+// add an entry here + a directory under web/ + its own sync endpoints if
+// it has server-side data.
+export interface AppDescriptor {
+  id: string;
+  name: string;
+  url: string;
+  emoji: string;
+  description: string;
+  status: "ready" | "draft";
+}
+
+export const APPS: AppDescriptor[] = [
+  {
+    id: "candy-math-island",
+    name: "糖果口算岛",
+    url: "/games/candy-math-island/",
+    emoji: "🍭",
+    description: "10 分钟口算闯关，进位 / 退位 / 应用题。错题自动汇入家长看板。",
+    status: "ready",
+  },
+];
 
 // 辅助函数，给外部用（例如测试 / 文档）
 export { classifyTopic };

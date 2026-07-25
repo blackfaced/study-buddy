@@ -27,6 +27,11 @@ export function migrateSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN vision_reasoning TEXT`); } catch {}
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN vision_model TEXT`); } catch {}
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN vision_ts INTEGER`); } catch {}
+  // v0.5b: game-sync columns. `source` is one of "study-buddy" | "game" | "vision" — let
+  // us split mistake streams when computing weak topics for the agent.
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN source TEXT DEFAULT 'study-buddy'`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN user_answer TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN correct_answer TEXT`); } catch {}
 
   // 初始化 schema
   db.exec(`
@@ -88,6 +93,9 @@ export function migrateSchema(db: Database.Database): void {
       vision_reasoning TEXT,
       vision_model TEXT,
       vision_ts INTEGER,
+      source TEXT DEFAULT 'study-buddy',
+      user_answer TEXT,
+      correct_answer TEXT,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 

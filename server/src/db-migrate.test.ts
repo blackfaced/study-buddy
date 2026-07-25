@@ -58,6 +58,15 @@ describe("migrateSchema", () => {
     db.close();
   });
 
+  it("adds the `source` column to mistakes (study-buddy / game / vision)", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const cols = db.prepare("PRAGMA table_info(mistakes)").all() as Array<{ name: string }>;
+    const colNames = cols.map((c) => c.name);
+    expect(colNames).toContain("source");
+    db.close();
+  });
+
   it("is idempotent — running it twice does not throw", () => {
     const db = freshDb();
     (globalThis as any).__migrateSchema(db);
