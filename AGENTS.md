@@ -45,7 +45,7 @@ The mcp-server is a child of the mavis daemon (`mavis mcp add`); don't manage it
 
 ### Issue tracker
 
-Local markdown at `.scratch/<feature>/` (gitignored). Each feature gets `PRD.md` + `issues/NN-<slug>.md`. No GitHub/GitLab. See `docs/agents/issue-tracker.md`.
+GitHub Issues at `https://github.com/blackfaced/study-buddy` via the `gh` CLI. External PRs (`CONTRIBUTOR` / `FIRST_TIME_CONTRIBUTOR` / `NONE`) are also a triage surface. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
