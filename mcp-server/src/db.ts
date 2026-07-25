@@ -7,9 +7,12 @@
 // 3. 兼容老调用：`import { db } from "./db.js"` 通过 Proxy 转发到 getDb()
 import Database from "better-sqlite3";
 import { mkdirSync, existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const DEFAULT_DB_PATH = process.env.STUDY_DB || "/Users/mac/study-buddy/data/study.db";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// 解析 <repo>/data/study.db，与部署路径无关（之前硬编码 /Users/mac/study-buddy/...）
+const DEFAULT_DB_PATH = process.env.STUDY_DB || resolve(__dirname, "..", "..", "data", "study.db");
 
 let _db: Database.Database | null = null;
 let _dbPath: string | null = null;

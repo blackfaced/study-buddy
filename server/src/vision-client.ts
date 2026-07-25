@@ -1,10 +1,10 @@
 // src/vision-client.ts
 //
 // v0.5: production VisionClient that talks to MiniMax M3's
-// /v1/vl/chat/completions endpoint. Kept as a separate class from
-// ./vision.ts so the pure prompt + parse functions stay testable without
-// network, and so we can swap models / providers later without touching
-// the route handler.
+// /v1/text/chatcompletion_v2 endpoint (also accepts vision input as
+// image_url). Kept as a separate class from ./vision.ts so the pure
+// prompt + parse functions stay testable without network, and so we can
+// swap models / providers later without touching the route handler.
 
 import type { VisionClient } from "./vision.js";
 
@@ -35,7 +35,7 @@ export class MiniMaxVisionClient implements VisionClient {
   constructor(opts: MiniMaxVisionClientOptions) {
     this.apiKey = opts.apiKey;
     this.model = opts.model ?? "MiniMax-M3";
-    this.baseUrl = opts.baseUrl ?? "https://api.minimaxi.com/v1/vl/chat/completions";
+    this.baseUrl = opts.baseUrl ?? "https://api.minimaxi.com/v1/text/chatcompletion_v2";
     this.fetchFn = opts.fetchFn ?? fetch;
     this.signal = opts.signal;
   }

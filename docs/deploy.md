@@ -83,14 +83,14 @@ cat > ~/Library/LaunchAgents/com.study-buddy.server.plist <<'PLIST'
   <key>Label</key><string>com.study-buddy.server</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/mac/study-buddy/bin/study-buddy-server.sh</string>
+    <string>/Users/mac/hc/github/study-buddy/bin/study-buddy-server.sh</string>
     <string>start</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/mac/study-buddy/data/logs/launchd.out.log</string>
-  <key>StandardErrorPath</key><string>/Users/mac/study-buddy/data/logs/launchd.err.log</string>
-  <key>WorkingDirectory</key><string>/Users/mac/study-buddy</string>
+  <key>StandardOutPath</key><string>/Users/mac/hc/github/study-buddy/data/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/mac/hc/github/study-buddy/data/logs/launchd.err.log</string>
+  <key>WorkingDirectory</key><string>/Users/mac/hc/github/study-buddy</string>
 </dict>
 </plist>
 PLIST

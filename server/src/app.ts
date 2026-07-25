@@ -85,7 +85,30 @@ export function createApp(opts: AppOptions): express.Express {
     limits: { fileSize: 500 * 1024 },
   });
 
-  app.use(express.static(WEB_DIR));
+  // iOS Safari 经常 page cache 住旧 HTML → 访问 / 强制 302 到带版本号的 URL，
+  // 让浏览器把它当成全新 URL 拿新 HTML（带 ?v= 时不再 redirect，避免死循环）
+  app.get('/', (req, res, next) => {
+    if (Object.keys(req.query).length > 0) {
+      return next();  // 有 query string → 让 static 接管
+    }
+    res.redirect(302, '/?v=' + Date.now());
+  });
+
+  // 强制不缓存 HTML（iOS Safari 经常用 cached 旧版导致 send() 失败）
+  app.use(express.static(WEB_DIR, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        // 关掉 ETag：避免 Safari 用 304 Not Modified 拿 cached 旧版
+        res.removeHeader('ETag');
+        res.setHeader('Last-Modified', new Date().toUTCString());
+      }
+    },
+    etag: false,
+    lastModified: false,
+  }));
 
   // ============== 健康检查 ==============
   app.get("/api/health", (_req: Request, res: Response) => {
@@ -192,6 +215,15 @@ export function createApp(opts: AppOptions): express.Express {
   let frameCountForLog = 0;
   const FRAME_WARN_DEBOUNCE = 3;
   const warnStreak = new Map<string, number>();
+  // 视频模式开关（iPad 端控制）—— 关掉就只返 ok，不算 warning
+  let videoModeEnabled = true;
+
+  app.post("/api/video-mode", (req: Request, res: Response) => {
+    const { enabled } = req.body || {};
+    videoModeEnabled = !!enabled;
+    logger.info("video mode", { enabled: videoModeEnabled });
+    res.json({ ok: true, videoEnabled: videoModeEnabled });
+  });
 
   app.post("/api/frame", upload.single("frame"), async (req: Request, res: Response) => {
     if (!req.file) return res.status(400).json({ error: "no frame" });
@@ -243,6 +275,12 @@ export function createApp(opts: AppOptions): express.Express {
         warnStreak.set(sessionKey, cur);
         if (cur >= FRAME_WARN_DEBOUNCE) shouldWarn = true;
       } else {
+        warnStreak.set(sessionKey, 0);
+      }
+
+      // 视频模式关了：不算 warning（也不写 posture_events，但返 ok 保持 iPad 帧流不报错）
+      if (!videoModeEnabled) {
+        shouldWarn = false;
         warnStreak.set(sessionKey, 0);
       }
 
