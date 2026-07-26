@@ -18,7 +18,17 @@
       color: #5a3e1b;
     }
     .app { max-width: 480px; margin: 0 auto; height: 100%; display: flex; flex-direction: column; }
-    .header { padding: 16px; text-align: center; flex-shrink: 0; }
+    .header { padding: 16px; text-align: center; flex-shrink: 0; position: relative; }
+    .header-portal-link {
+      position: absolute; top: 12px; right: 12px;
+      background: rgba(255, 255, 255, 0.7);
+      color: #8b6f47; text-decoration: none;
+      font-size: 18px; line-height: 1;
+      padding: 8px 12px; border-radius: 999px;
+      border: 1px solid rgba(0, 0, 0, 0.04);
+      transition: transform 0.1s, background 0.1s;
+    }
+    .header-portal-link:active { transform: scale(0.95); background: white; }
     .avatar-row { display: flex; align-items: center; justify-content: center; gap: 12px; }
     .avatar {
       width: 64px; height: 64px; border-radius: 50%;
@@ -91,6 +101,7 @@
 <body>
 <div class="app">
   <div class="header">
+    <a class="header-portal-link" href="/" title="回门户" aria-label="回门户">🏠</a>
     <div class="avatar-row">
       <div class="avatar" id="avatar">📚</div>
       <div>

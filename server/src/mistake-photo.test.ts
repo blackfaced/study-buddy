@@ -64,12 +64,14 @@ describe("POST /api/mistake-photo (v0.5)", () => {
     expect(res.body.error).toBe("no photo");
   });
 
-  it("returns 400 when there is no active session", async () => {
+  it("auto-creates a session when none is active (v0.6.1, like /api/chat)", async () => {
+    // v0.6.1: the camera might fire after "写完啦" ended the previous
+    // session, so we auto-start one instead of 400-ing.
     const res = await request(app)
       .post("/api/mistake-photo")
-      .attach("photo", Buffer.from("fake-jpeg-bytes"), "test.jpg");
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe("no active session");
+      .attach("photo", Buffer.from("FAKE-JPEG-CONTENT"), "math.jpg");
+    expect(res.status).toBe(200);
+    expect(res.body.mistakeId).toBeDefined();
   });
 
   it("on success: writes the photo to mistakesDir, persists a mistakes row, and returns parsed vision", async () => {

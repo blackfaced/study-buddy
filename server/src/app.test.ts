@@ -59,3 +59,71 @@ describe("GET /api/pair (Bug 1: serverUrl must not be :undefined)", () => {
   });
 });
 
+// Bug fix (v0.6.1): after /api/session/end, /api/chat used to return
+// 400 "no active session". Now it auto-creates a new session for the
+// default child so the kid can keep chatting right after "写完啦".
+describe("POST /api/chat (v0.6.1: auto-start session when none active)", () => {
+  it("returns 200 (not 400) when no session is active", async () => {
+    // No /api/session/start was called. Should still work.
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "你好", state: "writing" });
+    expect(res.status).toBe(200);
+    expect(typeof res.body.reply).toBe("string");
+  });
+
+  it("auto-creates a session and writes chat_turns to it", async () => {
+    // Clean up any sessions from previous tests
+    db.exec("UPDATE sessions SET ended_at = strftime('%s','now')*1000 WHERE ended_at IS NULL");
+
+    const before = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as any).c;
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "测试", state: "writing" });
+    expect(res.status).toBe(200);
+
+    const after = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as any).c;
+    expect(after).toBe(before + 1);
+
+    // chat_turns should reference the new session
+    const turns = db.prepare(
+      "SELECT role, content, state FROM chat_turns ORDER BY id DESC LIMIT 2"
+    ).all() as Array<{ role: string; content: string; state: string }>;
+    expect(turns[0].role).toBe("agent");
+    expect(turns[0].state).toBe("writing");
+    expect(turns[1].role).toBe("child");
+    expect(turns[1].content).toBe("测试");
+  });
+
+  it("reuses an existing active session (does not create a duplicate)", async () => {
+    db.exec("UPDATE sessions SET ended_at = strftime('%s','now')*1000 WHERE ended_at IS NULL");
+    // Start one session explicitly
+    const start = await request(app).post("/api/session/start").send({});
+    const sessionId = start.body.sessionId;
+
+    const before = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as any).c;
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "继续", state: "writing" });
+    expect(res.status).toBe(200);
+
+    const after = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as any).c;
+    expect(after).toBe(before);  // no new session
+    // chat_turns linked to the existing session
+    const turn = db.prepare(
+      "SELECT session_id FROM chat_turns ORDER BY id DESC LIMIT 1"
+    ).get() as { session_id: string };
+    expect(turn.session_id).toBe(sessionId);
+  });
+
+  it("after /api/session/end, the next chat auto-creates a new session", async () => {
+    // End the current session
+    await request(app).post("/api/session/end").send({});
+    // Next chat should succeed (not 400)
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "又来了", state: "writing" });
+    expect(res.status).toBe(200);
+  });
+});
+

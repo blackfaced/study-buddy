@@ -53,6 +53,9 @@
     margin-top: 18px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
     transition: transform 0.1s;
+    /* iOS Safari: instant tap on the "开始" button. */
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
   }
   .btn-start:active { transform: scale(0.96); }
   .today-strip {
@@ -75,6 +78,12 @@
     border-radius: 999px;
     padding: 10px 18px;
     border: 1px solid rgba(0, 0, 0, 0.05);
+    /* iOS Safari: remove 300ms tap delay on topbar pills (e.g. 🏠 portal,
+     * 结束). Without this, taps feel laggy. */
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    text-decoration: none;
+    display: inline-block;
   }
 
   /* ============== 答题页 ============== */
@@ -94,6 +103,8 @@
   @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
   .quiz-counter { font-size: 16px; color: #6B5A78; }
   .quiz-counter b { color: #FF6B9D; }
+  .quiz-actions { display: flex; gap: 6px; }
+  .quiz-actions .btn-portal { font-size: 16px; padding: 6px 10px; }
 
   .question-card {
     background: white;
@@ -103,8 +114,8 @@
     text-align: center;
     margin-bottom: 20px;
   }
-  .q-text { font-size: 48px; font-weight: 800; color: #3D3D5C; letter-spacing: 2px; }
-  .q-scenario { font-size: 16px; color: #806478; margin-bottom: 12px; }
+  .q-text { font-size: 48px; font-weight: 800; color: #3D3D5C; letter-spacing: 2px; user-select: none; -webkit-user-select: none; }
+  .q-scenario { font-size: 16px; color: #806478; margin-bottom: 12px; user-select: none; -webkit-user-select: none; }
   .answer-input {
     width: 100%;
     font-size: 32px;
@@ -117,6 +128,9 @@
     background: #FFFAFC;
     outline: none;
     transition: border-color 0.15s;
+    /* iOS Safari: prevent zoom on input focus, no double-tap zoom. */
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
   }
   .answer-input:focus { border-color: #FF8FB1; }
   .answer-input.correct { border-color: #4ECB71; background: #F0FFF4; animation: shake-good 0.3s; }
@@ -134,6 +148,11 @@
     color: #3D3D5C;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
     transition: transform 0.08s, background 0.1s;
+    /* iOS Safari touch fixes: remove 300ms tap delay, disable double-tap
+     * zoom on the button. Pinch-zoom still works (parent container
+     * allows it) so parents can zoom in if needed. */
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
   }
   .keypad button:active { transform: scale(0.94); background: #FFE5EC; }
   .keypad .key-w { background: #FFE5EC; color: #FF6B9D; }
@@ -162,6 +181,11 @@
     font-weight: 700;
     margin: 6px;
     transition: transform 0.1s;
+    /* iOS Safari: instant tap response on result-page buttons. */
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    text-decoration: none;
+    display: inline-block;
   }
   .btn-primary { background: linear-gradient(135deg, #FF8FB1, #FF6B9D); color: white; box-shadow: 0 6px 16px rgba(255, 107, 157, 0.3); }
   .btn-secondary { background: rgba(255, 255, 255, 0.8); color: #6B5A78; border: 1px solid rgba(0, 0, 0, 0.05); }
@@ -219,9 +243,12 @@
   <!-- ============== 答题页 ============== -->
   <div class="page" id="page-quiz">
     <div class="quiz-topbar">
-      <div class="quiz-counter">已答 <b id="quiz-count">0</b></div>
+      <div class="quiz-counter">已答 <b id="quiz-count">0</b> · L<span id="quiz-level">1</span></div>
       <div class="quiz-timer" id="quiz-timer">60</div>
-      <button class="btn-pill" id="btn-quit">结束</button>
+      <div class="quiz-actions">
+        <button class="btn-pill" id="btn-quit" title="结束本局看战报">结束</button>
+        <a class="btn-pill btn-portal" href="/" title="回门户" aria-label="回门户">🏠</a>
+      </div>
     </div>
     <div class="question-card">
       <div class="q-scenario" id="q-scenario" style="display:none"></div>
@@ -262,6 +289,7 @@
       <div>
         <button class="btn-primary" id="btn-again">再来一次 🔁</button>
         <button class="btn-secondary" id="btn-home">回主页</button>
+        <a class="btn-secondary" href="/">🏠 回门户</a>
       </div>
     </div>
   </div>
@@ -331,16 +359,20 @@ function genL3() {
 }
 
 const GENERATORS = [genL1, genL2, genL3];
-// 60 秒模式以 L1+L2 为主（小学二年级重点），少量 L3
-const WEIGHTS = [0.45, 0.45, 0.10];
+
+// v0.6.1: pickGen now uses the adaptive level. 80% from the current
+// level, 20% from the others (so the kid isn't exclusively stuck on
+// one tier). When state.level is undefined (first call before any
+// answer), fall back to L1 (level 1, the easiest tier).
 function pickGen() {
+  const lvl = state.level ?? 1;
   const r = Math.random();
-  let acc = 0;
-  for (let i = 0; i < GENERATORS.length; i++) {
-    acc += WEIGHTS[i];
-    if (r < acc) return GENERATORS[i];
+  if (r < ADAPTIVE.CURRENT_LEVEL_WEIGHT) {
+    return GENERATORS[lvl - 1];
   }
-  return GENERATORS[GENERATORS.length - 1];
+  // Pick a different level uniformly at random.
+  const others = [0, 1, 2].filter(i => i !== lvl - 1);
+  return GENERATORS[others[Math.floor(Math.random() * others.length)]];
 }
 
 // ============== 错题类型检测 ==============
@@ -381,7 +413,43 @@ let state = {
   endedAt: 0,
   pendingMistakes: [],  // 等待同步到 server 的错题
   tickHandle: null,
+  // 自适应阶梯 (v0.6.1 option A): 60s 内根据答题连击升降 L1↔L2↔L3
+  level: 1,           // 1=简单 (L1), 2=中等 (L2 进位/退位), 3=挑战 (L3 乘法/应用)
+  streak: 0,          // 连续答对次数
+  wrongStreak: 0,     // 连续答错次数
 };
+
+const ADAPTIVE = {
+  PROMOTE_AT: 3,      // 连对 3 题升级
+  DEMOTE_AT: 2,       // 连错 2 题降级
+  MAX_LEVEL: 3,
+  MIN_LEVEL: 1,
+  // 选题权重: 当前等级 80%, 其他等级平均分 20%
+  CURRENT_LEVEL_WEIGHT: 0.80,
+};
+
+/**
+ * Pure state machine: given current level + streak + whether the latest
+ * answer was correct, return the new level state and a side effect
+ * (level-up / level-down / none). Streaks reset on promotion/demotion
+ * or when the answer doesn't follow the trend (e.g. correct after a
+ * wrong streak resets the wrong streak to 0).
+ */
+function updateAdaptiveLevel(level, streak, wrongStreak, isCorrect) {
+  if (isCorrect) {
+    const newStreak = streak + 1;
+    if (newStreak >= ADAPTIVE.PROMOTE_AT && level < ADAPTIVE.MAX_LEVEL) {
+      return { level: level + 1, streak: 0, wrongStreak: 0, event: "promote" };
+    }
+    return { level, streak: newStreak, wrongStreak: 0, event: "none" };
+  } else {
+    const newWrongStreak = wrongStreak + 1;
+    if (newWrongStreak >= ADAPTIVE.DEMOTE_AT && level > ADAPTIVE.MIN_LEVEL) {
+      return { level: level - 1, streak: 0, wrongStreak: 0, event: "demote" };
+    }
+    return { level, streak: 0, wrongStreak: newWrongStreak, event: "none" };
+  }
+}
 
 const STORAGE = { wrong: "candy_wrong_v2" };
 function loadWrong() { try { return JSON.parse(localStorage.getItem(STORAGE.wrong) || "[]"); } catch { return []; } }
@@ -426,12 +494,34 @@ function startQuiz() {
   state.correctCount = 0;
   state.pendingMistakes = [];
   state.startedAt = Date.now();
+  // v0.6.1: reset adaptive ladder state for a fresh 60s sprint.
+  state.level = 1;
+  state.streak = 0;
+  state.wrongStreak = 0;
+  updateLevelBadge(state.level);
   showPage("quiz");
   nextQuestion();
   if (state.tickHandle) clearInterval(state.tickHandle);
   state.tickHandle = setInterval(tick, 100);
   // 焦点让数字键盘弹起（iPad Safari）
   setTimeout(() => document.getElementById("answer-input").focus(), 100);
+}
+
+/** Update the "L1/L2/L3" badge in the quiz topbar. */
+function updateLevelBadge(level) {
+  const el = document.getElementById("quiz-level");
+  if (el) el.textContent = String(level);
+}
+
+/** Brief visual feedback when the level changes mid-game. */
+function flashLevelEvent(event) {
+  if (event === "none") return;
+  const el = document.getElementById("quiz-level");
+  if (!el) return;
+  const orig = el.style.color;
+  el.style.color = event === "promote" ? "#4ECB71" : "#FF4757";
+  el.style.transition = "color 0.2s";
+  setTimeout(() => { el.style.color = orig; }, 600);
 }
 
 function nextQuestion() {
@@ -474,7 +564,8 @@ function submitAnswer() {
   const correct = state.currentQuestion.answer;
   state.totalQuestions++;
   const inputEl = document.getElementById("answer-input");
-  if (user === correct) {
+  const isCorrect = (user === correct);
+  if (isCorrect) {
     state.correctCount++;
     inputEl.classList.add("correct");
   } else {
@@ -490,6 +581,15 @@ function submitAnswer() {
       syncedToServer: false,
       ts: Date.now(),
     });
+  }
+  // v0.6.1: 自适应阶梯 — 根据对错更新 level
+  const next = updateAdaptiveLevel(state.level, state.streak, state.wrongStreak, isCorrect);
+  state.level = next.level;
+  state.streak = next.streak;
+  state.wrongStreak = next.wrongStreak;
+  if (next.event !== "none") {
+    updateLevelBadge(state.level);
+    flashLevelEvent(next.event);
   }
   // 短暂停留后下一题
   setTimeout(nextQuestion, 280);
@@ -520,7 +620,11 @@ inputEl.addEventListener("keydown", (e) => {
 });
 
 document.querySelectorAll("#keypad button").forEach(btn => {
-  btn.addEventListener("click", () => {
+  // Use pointerdown (not click) to avoid iOS Safari's 300ms tap delay.
+  // The keypad area has `touch-action: manipulation` so the system
+  // still gets pinch/drag gestures but doesn't wait for double-tap.
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();  // suppress the synthesized click + focus jump
     const k = btn.dataset.k;
     if (k === "back") {
       state.currentAnswer = state.currentAnswer.slice(0, -1);

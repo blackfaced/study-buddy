@@ -144,6 +144,26 @@ export function createApp(opts: AppOptions): express.Express {
       .get() as any;
   }
 
+  /**
+   * Get the active session, or auto-create one for the default child if
+   * none exists. Lets the kid keep chatting / logging events after a
+   * previous session was ended (e.g. after "写完啦"), instead of getting
+   * 400 "no active session".
+   *
+   * Mirrors the `ensureActiveSession` pattern used by recordGameMistake
+   * in game-sync.ts. Session stays open until a real /api/session/end
+   * call.
+   */
+  function getOrCreateActiveSession() {
+    const existing = getActiveSession();
+    if (existing) return existing;
+    const id = crypto.randomUUID();
+    db.prepare(
+      "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)"
+    ).run(id, "default", null);
+    return { id, child_id: "default" } as any;
+  }
+
   // ============== 开始会话 ==============
   app.post("/api/session/start", (req: Request, res: Response) => {
     const { childId = "default", subject } = req.body;
@@ -228,8 +248,10 @@ export function createApp(opts: AppOptions): express.Express {
   app.post("/api/frame", upload.single("frame"), async (req: Request, res: Response) => {
     if (!req.file) return res.status(400).json({ error: "no frame" });
 
-    const session = getActiveSession();
-    const sessionKey = session?.id || "none";
+    // Auto-create a session if needed; the camera might fire after "写完啦"
+    // ended the previous session.
+    const session = getOrCreateActiveSession();
+    const sessionKey = session.id;
 
     frameCountForLog = (frameCountForLog || 0) + 1;
     if (frameCountForLog % 100 === 1) {
@@ -364,8 +386,10 @@ export function createApp(opts: AppOptions): express.Express {
       return res.status(400).json({ error: "no text" });
     }
 
-    const session = getActiveSession();
-    if (!session) return res.status(400).json({ error: "no active session" });
+    // Auto-create a session if none is active (e.g. after "写完啦" was
+    // pressed, or on first message ever). Don't 400 — the kid should be
+    // able to chat right after ending a session.
+    const session = getOrCreateActiveSession();
 
     const systemPrompt = state === "done" ? CHAT_PROMPT : SYSTEM_PROMPT;
     const messages = [
@@ -429,8 +453,8 @@ export function createApp(opts: AppOptions): express.Express {
         });
       }
       if (!req.file) return res.status(400).json({ error: "no photo" });
-      const session = getActiveSession();
-      if (!session) return res.status(400).json({ error: "no active session" });
+      // Auto-create a session if needed; same reasoning as /api/chat.
+      const session = getOrCreateActiveSession();
 
       // 1. 写文件到 mistakesDir
       const mistakeId = randomUUID();
