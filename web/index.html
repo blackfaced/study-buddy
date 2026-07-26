@@ -20,6 +20,25 @@
     .entry h2 { margin: 0 0 5px; font-size: 18px; }
     .entry p { margin: 0; color: #806748; font-size: 14px; line-height: 1.45; }
     .arrow { margin-left: auto; color: #be8a42; font-size: 22px; }
+
+    .game-strip { width: min(100%, 560px); margin: 24px auto 0; }
+    .game-strip-link {
+      display: flex; align-items: center; gap: 14px;
+      padding: 14px 18px;
+      border-radius: 18px;
+      background: rgba(255, 224, 234, 0.55);
+      color: #513a1e;
+      text-decoration: none;
+      border: 1px dashed rgba(255, 143, 177, 0.5);
+      transition: transform .12s;
+    }
+    .game-strip-link:active { transform: scale(.98); }
+    .strip-emoji { font-size: 28px; }
+    .strip-content { flex: 1; }
+    .strip-title { display: block; font-size: 14px; font-weight: 700; color: #FF6B9D; }
+    .strip-stats { display: block; font-size: 13px; color: #806748; margin-top: 2px; }
+    .strip-stats b { color: #FF6B9D; font-variant-numeric: tabular-nums; }
+    .strip-arrow { color: #be8a42; font-size: 20px; }
   </style>
 </head>
 <body>
@@ -35,6 +54,22 @@
         <span class="arrow" aria-hidden="true">›</span>
       </a>
       <div id="apps"></div>
+    </section>
+
+    <!-- 糖果口算今日战报（v0.6 — 显示今日 / 正确率 / 次数） -->
+    <section class="game-strip" id="game-today-strip" style="display:none" aria-label="糖果口算今日战报">
+      <a class="game-strip-link" href="/games/candy-math-island/">
+        <span class="strip-emoji">🍭</span>
+        <span class="strip-content">
+          <span class="strip-title">今日口算战报</span>
+          <span class="strip-stats">
+            <b data-q>0</b> 题 ·
+            正确率 <b data-rate>—</b> ·
+            <b data-sessions>0</b> 次
+          </span>
+        </span>
+        <span class="strip-arrow" aria-hidden="true">›</span>
+      </a>
     </section>
   </main>
   <script>
@@ -54,7 +89,26 @@
         }
       } catch { /* The companion link still works when the API is unavailable. */ }
     }
+
+    // 加载糖果口算的今日战报小条（如有）
+    async function loadGameTodayStrip() {
+      const strip = document.getElementById('game-today-strip');
+      if (!strip) return;
+      try {
+        const res = await fetch('/api/game/daily?days=1&appId=candy-math-island');
+        if (!res.ok) { strip.style.display = 'none'; return; }
+        const data = await res.json();
+        const today = (data.daily || [])[0];
+        if (!today) { strip.style.display = 'none'; return; }
+        strip.style.display = '';
+        strip.querySelector('[data-q]').textContent = today.totalQuestions;
+        strip.querySelector('[data-rate]').textContent = today.correctRate + '%';
+        strip.querySelector('[data-sessions]').textContent = today.sessionCount;
+      } catch { strip.style.display = 'none'; }
+    }
+
     loadApps();
+    loadGameTodayStrip();
   </script>
 </body>
 </html>

@@ -101,4 +101,18 @@ describe("migrateSchema", () => {
     expect(settings).toBeDefined();
     db.close();
   });
+
+  it("creates the game_sessions table for v0.6 time-mode runs", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const cols = db.prepare("PRAGMA table_info(game_sessions)").all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "id", "child_id", "app_id", "duration_sec", "total_questions",
+        "correct_count", "started_at", "ended_at", "created_at",
+      ])
+    );
+    db.close();
+  });
 });

@@ -118,10 +118,26 @@ export function migrateSchema(db: Database.Database): void {
       FOREIGN KEY (child_id) REFERENCES children(id)
     );
 
+    -- v0.6: per-game-session summary (one row per finished time-mode run).
+    -- Used for daily correct-rate + questions-completed aggregations.
+    CREATE TABLE IF NOT EXISTS game_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      child_id TEXT NOT NULL,
+      app_id TEXT NOT NULL,
+      duration_sec INTEGER NOT NULL,
+      total_questions INTEGER NOT NULL,
+      correct_count INTEGER NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      FOREIGN KEY (child_id) REFERENCES children(id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sessions_child ON sessions(child_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posture_session ON posture_events(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_turns(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_mistakes_session ON mistakes(session_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_game_sessions_child ON game_sessions(child_id, started_at DESC);
   `);
 
   // 首次启动：建一个默认孩子

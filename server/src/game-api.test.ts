@@ -24,6 +24,12 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  // Clear game-related tables so tests don't see each other's rows.
+  db.exec("DELETE FROM game_sessions");
+  db.exec("DELETE FROM mistakes");
+});
+
+beforeEach(() => {
   // Reset between tests so aggregates are deterministic.
   db.prepare("UPDATE sessions SET ended_at = strftime('%s','now')*1000 WHERE ended_at IS NULL").run();
   db.prepare("DELETE FROM mistakes").run();
@@ -131,6 +137,127 @@ describe("GET /api/game/weak-topics", () => {
 
   it("returns 400 on a non-positive days value", async () => {
     const res = await request(app).get("/api/game/weak-topics?days=0");
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/game/session (v0.6 time-mode)", () => {
+  it("records a finished session and returns the sessionId + correctRate", async () => {
+    const startedAt = Date.now() - 60_000;
+    const res = await request(app)
+      .post("/api/game/session")
+      .send({
+        childId: "default",
+        appId: "candy-math-island",
+        durationSec: 60,
+        totalQuestions: 10,
+        correctCount: 8,
+        startedAt,
+        endedAt: Date.now(),
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBeGreaterThan(0);
+    expect(res.body.correctRate).toBe(80);
+  });
+
+  it("returns 400 when totalQuestions is 0 (validation in recordGameSession)", async () => {
+    const res = await request(app)
+      .post("/api/game/session")
+      .send({
+        childId: "default",
+        appId: "candy-math-island",
+        durationSec: 60,
+        totalQuestions: 0,
+        correctCount: 0,
+        startedAt: Date.now() - 60_000,
+        endedAt: Date.now(),
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/totalQuestions/);
+  });
+
+  it("returns 400 on missing required fields", async () => {
+    const res = await request(app)
+      .post("/api/game/session")
+      .send({ childId: "default" });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /api/game/daily (v0.6 daily aggregation)", () => {
+  it("returns one row per day for recent sessions", async () => {
+    const now = Date.now();
+    // Today: 2 sessions, 20 questions, 17 correct (85%)
+    for (const [total, correct] of [[12, 9], [8, 8]] as const) {
+      await request(app).post("/api/game/session").send({
+        childId: "default",
+        appId: "candy-math-island",
+        durationSec: 60,
+        totalQuestions: total,
+        correctCount: correct,
+        startedAt: now - 60_000,
+        endedAt: now,
+      });
+    }
+    // Yesterday: 1 session, 10 questions, 7 correct
+    await request(app).post("/api/game/session").send({
+      childId: "default",
+      appId: "candy-math-island",
+      durationSec: 60,
+      totalQuestions: 10,
+      correctCount: 7,
+      startedAt: now - 24 * 3600 * 1000,
+      endedAt: now - 24 * 3600 * 1000 + 60_000,
+    });
+
+    const res = await request(app).get("/api/game/daily?days=7");
+    expect(res.status).toBe(200);
+    expect(res.body.days).toBe(7);
+    expect(res.body.daily).toHaveLength(2);
+    expect(res.body.daily[0].sessionCount).toBe(2);
+    expect(res.body.daily[0].totalQuestions).toBe(20);
+    expect(res.body.daily[0].correctCount).toBe(17);
+    expect(res.body.daily[0].correctRate).toBe(85);
+    expect(res.body.daily[1].sessionCount).toBe(1);
+    expect(res.body.daily[1].totalQuestions).toBe(10);
+    expect(res.body.daily[1].correctRate).toBe(70);
+  });
+
+  it("can filter by ?appId", async () => {
+    const now = Date.now();
+    await request(app).post("/api/game/session").send({
+      childId: "default",
+      appId: "candy-math-island",
+      durationSec: 60,
+      totalQuestions: 10,
+      correctCount: 8,
+      startedAt: now - 30_000,
+      endedAt: now,
+    });
+    await request(app).post("/api/game/session").send({
+      childId: "default",
+      appId: "another-app",
+      durationSec: 60,
+      totalQuestions: 5,
+      correctCount: 5,
+      startedAt: now - 30_000,
+      endedAt: now,
+    });
+
+    const candy = await request(app).get("/api/game/daily?appId=candy-math-island");
+    expect(candy.body.daily[0].totalQuestions).toBe(10);
+
+    const all = await request(app).get("/api/game/daily");
+    expect(all.body.daily[0].totalQuestions).toBe(15);
+  });
+
+  it("returns [] when no sessions exist", async () => {
+    const res = await request(app).get("/api/game/daily");
+    expect(res.body.daily).toEqual([]);
+  });
+
+  it("returns 400 on a non-positive days value", async () => {
+    const res = await request(app).get("/api/game/daily?days=0");
     expect(res.status).toBe(400);
   });
 });

@@ -17,7 +17,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { analyzeMistakeImage, type VisionClient } from "./vision.js";
 import { requestLogger, type Logger, createLogger, stdoutSink } from "./logger.js";
-import { recordGameMistake, getGameWeakTopics } from "./game-sync.js";
+import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -531,6 +531,57 @@ export function createApp(opts: AppOptions): express.Express {
     }
     const topics = await getGameWeakTopics(db, days);
     res.json({ days, weakTopics: topics });
+  });
+
+  // ============== Game session (v0.6 time-mode) ==============
+  // Apps POST a finished time-mode run here for daily aggregation.
+  app.post("/api/game/session", async (req: Request, res: Response) => {
+    const {
+      childId, appId, durationSec,
+      totalQuestions, correctCount,
+      startedAt, endedAt,
+    } = req.body ?? {};
+    if (
+      typeof childId !== "string" ||
+      typeof appId !== "string" ||
+      typeof durationSec !== "number" ||
+      typeof totalQuestions !== "number" ||
+      typeof correctCount !== "number" ||
+      typeof startedAt !== "number" ||
+      typeof endedAt !== "number"
+    ) {
+      return res.status(400).json({ error: "missing or invalid fields" });
+    }
+    try {
+      const id = await recordGameSession(db, outboxPath, {
+        childId, appId, durationSec,
+        totalQuestions, correctCount,
+        startedAt, endedAt,
+      });
+      const correctRate = Math.round((correctCount / totalQuestions) * 100);
+      logger.info("game session recorded", {
+        sessionId: id, appId, totalQuestions, correctCount, correctRate,
+      });
+      res.json({ sessionId: id, correctRate });
+    } catch (e: any) {
+      // 400 for validation errors thrown by recordGameSession (e.g. totalQuestions <= 0);
+      // 500 for anything else.
+      if (/must be/.test(e.message) || /not found/.test(e.message)) {
+        return res.status(400).json({ error: e.message });
+      }
+      logger.error("game session record failed", { error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/game/daily", async (req: Request, res: Response) => {
+    const days = Number(req.query.days ?? 7);
+    if (!Number.isFinite(days) || days <= 0) {
+      return res.status(400).json({ error: "days must be a positive number" });
+    }
+    const appId = typeof req.query.appId === "string" ? req.query.appId : undefined;
+    const daily = await getGameDailyStats(db, days, appId);
+    res.json({ days, appId: appId ?? null, daily });
   });
 
   return app;
