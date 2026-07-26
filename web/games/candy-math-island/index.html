@@ -6,209 +6,151 @@
 <meta name="theme-color" content="#FF8FB1">
 <title>🍭 糖果口算岛 · 60秒挑战</title>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<link rel="stylesheet" href="/shared/theme.css">
 <style>
-  /* ============== 基础重置 ============== */
-  *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
-    background: linear-gradient(135deg, #FFE5EC 0%, #FFF8F0 50%, #E0F4FF 100%);
-    background-attachment: fixed;
-    color: #3D3D5C;
-    overflow-x: hidden;
-    -webkit-tap-highlight-color: transparent;
-    user-select: none;
+  /* ===== Candy theme override (v0.6.6) =====
+   * Inherits the warm theme defaults from /shared/theme.css and overrides
+   * just the colors. Layout, components, iOS fixes all come from shared. */
+  :root {
+    --accent: #FF6B9D;
+    --accent-soft: #FFE5EC;
+    --bg-page-start: #FFE5EC;
+    --bg-page-end: #FFF8F0;
+    --bg-card: rgba(255, 255, 255, 0.85);
+    --bg-input: #FFFAFC;
+    --text-primary: #3D3D5C;
+    --text-secondary: #806478;
+    --text-on-accent: white;
   }
-  button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
-  button:disabled { cursor: not-allowed; opacity: 0.5; }
-  input { font-family: inherit; }
+  body { overflow-x: hidden; }
 
-  /* ============== 容器 + 页面切换 ============== */
-  .app { max-width: 640px; margin: 0 auto; min-height: 100vh; padding: 16px; position: relative; }
-  .page { display: none; animation: fadeIn 220ms ease-out; }
-  .page.active { display: block; }
-  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  /* ===== Layout ===== */
+  .app { max-width: 640px; margin: 0 auto; min-height: 100vh; padding: var(--space-4); position: relative; }
 
-  /* ============== 首页 ============== */
+  /* ===== Home ===== */
   .home { text-align: center; padding-top: 6vh; }
-  .home-title { font-size: 36px; font-weight: 800; color: #FF6B9D; margin-bottom: 6px; }
-  .home-sub { font-size: 16px; color: #806478; margin-bottom: 32px; }
+  .home-title { font-size: var(--text-display); font-weight: 800; color: var(--accent); margin-bottom: var(--space-1); }
+  .home-sub { font-size: var(--text-body); color: var(--text-secondary); margin-bottom: var(--space-6); }
   .start-card {
     background: linear-gradient(135deg, #FFB3D1 0%, #FF8FB1 100%);
     color: white;
     border-radius: 28px;
-    padding: 28px 24px;
+    padding: var(--space-5);
     box-shadow: 0 12px 32px rgba(255, 143, 177, 0.35);
-    margin-bottom: 20px;
+    margin-bottom: var(--space-5);
   }
   .start-card .big { font-size: 60px; font-weight: 900; line-height: 1; letter-spacing: -2px; }
-  .start-card .label { font-size: 18px; margin-top: 6px; opacity: 0.95; }
+  .start-card .label { font-size: var(--text-title); margin-top: var(--space-1); opacity: 0.95; }
   .btn-start {
     background: white;
-    color: #FF6B9D;
+    color: var(--accent);
     font-size: 22px;
     font-weight: 800;
-    border-radius: 999px;
-    padding: 16px 36px;
-    margin-top: 18px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-    transition: transform 0.1s;
-    /* iOS Safari: instant tap on the "开始" button. */
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
+    padding: var(--space-4) var(--space-7);
+    margin-top: var(--space-4);
   }
-  .btn-start:active { transform: scale(0.96); }
   .today-strip {
-    background: rgba(255, 255, 255, 0.7);
+    background: var(--bg-card);
     backdrop-filter: blur(10px);
-    border-radius: 20px;
-    padding: 14px 18px;
-    font-size: 14px;
-    color: #6B5A78;
+    border-radius: var(--radius-card);
+    padding: var(--space-3) var(--space-4);
+    font-size: var(--text-caption);
+    color: var(--text-secondary);
     display: flex;
     justify-content: space-around;
-    gap: 8px;
+    gap: var(--space-2);
   }
-  .today-strip b { color: #FF6B9D; font-size: 18px; }
-  .nav-row { margin-top: 18px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-  .btn-pill {
-    background: rgba(255, 255, 255, 0.7);
-    color: #6B5A78;
-    font-size: 14px;
-    border-radius: 999px;
-    padding: 10px 18px;
-    border: 1px solid rgba(0, 0, 0, 0.05);
-    /* iOS Safari: remove 300ms tap delay on topbar pills (e.g. 🏠 portal,
-     * 结束). Without this, taps feel laggy. */
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
-    text-decoration: none;
-    display: inline-block;
-  }
+  .today-strip b { color: var(--accent); font-size: var(--text-title); }
+  .nav-row { margin-top: var(--space-4); display: flex; gap: var(--space-3); justify-content: center; flex-wrap: wrap; }
 
-  /* ============== 答题页 ============== */
+  /* ===== Quiz topbar (frosted) ===== */
   .quiz-topbar {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: rgba(255, 255, 255, 0.7);
+    background: var(--bg-card);
     backdrop-filter: blur(10px);
-    border-radius: 20px;
-    padding: 12px 18px;
-    margin-bottom: 16px;
+    border-radius: var(--radius-card);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-4);
     font-weight: 700;
   }
-  .quiz-timer { font-size: 26px; color: #FF6B9D; font-variant-numeric: tabular-nums; }
+  .quiz-timer { font-size: 26px; color: var(--accent); font-variant-numeric: tabular-nums; }
   .quiz-timer.warn { color: #FF4757; animation: pulse 1s infinite; }
   @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
-  .quiz-counter { font-size: 16px; color: #6B5A78; }
-  .quiz-counter b { color: #FF6B9D; }
-  .quiz-actions { display: flex; gap: 6px; }
-  .quiz-actions .btn-portal { font-size: 16px; padding: 6px 10px; }
+  .quiz-counter { font-size: var(--text-body); color: var(--text-secondary); }
+  .quiz-counter b { color: var(--accent); }
+  .quiz-actions { display: flex; gap: var(--space-1); }
+  .quiz-actions .btn-pill { font-size: var(--text-caption); padding: var(--space-1) var(--space-3); }
 
+  /* ===== Question card ===== */
   .question-card {
     background: white;
     border-radius: 28px;
-    padding: 32px 24px;
-    box-shadow: 0 8px 28px rgba(113, 78, 30, 0.1);
+    padding: var(--space-6) var(--space-5);
+    box-shadow: var(--shadow-card-lg);
     text-align: center;
-    margin-bottom: 20px;
+    margin-bottom: var(--space-5);
   }
-  .q-text { font-size: 48px; font-weight: 800; color: #3D3D5C; letter-spacing: 2px; user-select: none; -webkit-user-select: none; }
-  .q-scenario { font-size: 16px; color: #806478; margin-bottom: 12px; user-select: none; -webkit-user-select: none; }
+  .q-text { font-size: 48px; font-weight: 800; color: var(--text-primary); letter-spacing: 2px; }
+  .q-scenario { font-size: var(--text-body); color: var(--text-secondary); margin-bottom: var(--space-3); }
+
+  /* ===== Answer input (pink border) ===== */
   .answer-input {
     width: 100%;
     font-size: 32px;
     font-weight: 700;
     text-align: center;
-    padding: 14px;
+    padding: var(--space-3);
     border: 3px solid #FFD1E0;
-    border-radius: 18px;
-    color: #3D3D5C;
-    background: #FFFAFC;
-    outline: none;
-    transition: border-color 0.15s;
-    /* iOS Safari: prevent zoom on input focus, no double-tap zoom. */
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
+    border-radius: var(--radius-input);
+    color: var(--text-primary);
+    background: var(--bg-input);
+    margin-bottom: var(--space-3);
   }
-  .answer-input:focus { border-color: #FF8FB1; }
+  .answer-input:focus { border-color: var(--accent); }
   .answer-input.correct { border-color: #4ECB71; background: #F0FFF4; animation: shake-good 0.3s; }
   .answer-input.wrong { border-color: #FF4757; background: #FFF0F0; animation: shake-bad 0.3s; }
   @keyframes shake-good { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
   @keyframes shake-bad { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
 
-  .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  /* ===== Keypad ===== */
+  .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); }
   .keypad button {
     background: white;
     border-radius: 16px;
-    padding: 18px 0;
+    padding: var(--space-4) 0;
     font-size: 24px;
     font-weight: 700;
-    color: #3D3D5C;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
-    transition: transform 0.08s, background 0.1s;
-    /* iOS Safari touch fixes: remove 300ms tap delay, disable double-tap
-     * zoom on the button. Pinch-zoom still works (parent container
-     * allows it) so parents can zoom in if needed. */
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
+    color: var(--text-primary);
+    box-shadow: var(--shadow-button);
   }
-  .keypad button:active { transform: scale(0.94); background: #FFE5EC; }
-  .keypad .key-w { background: #FFE5EC; color: #FF6B9D; }
+  .keypad button:active { transform: scale(0.94); background: var(--accent-soft); }
+  .keypad .key-w { background: var(--accent-soft); color: var(--accent); }
 
-  /* ============== 结果页 ============== */
+  /* ===== Result ===== */
   .result { text-align: center; padding-top: 4vh; }
-  .result-emoji { font-size: 64px; margin-bottom: 8px; }
-  .result-title { font-size: 28px; font-weight: 800; color: #3D3D5C; margin-bottom: 6px; }
-  .result-rate { font-size: 56px; font-weight: 900; color: #FF6B9D; line-height: 1; }
-  .result-rate-label { font-size: 14px; color: #806478; margin-bottom: 24px; }
-  .stat-card {
-    background: white;
-    border-radius: 20px;
-    padding: 16px 20px;
-    margin-bottom: 14px;
-    text-align: left;
-    box-shadow: 0 4px 14px rgba(113, 78, 30, 0.06);
-  }
-  .stat-card h3 { font-size: 14px; color: #806478; margin-bottom: 8px; font-weight: 600; }
-  .stat-row { display: flex; justify-content: space-between; font-size: 16px; padding: 4px 0; }
-  .stat-row b { color: #FF6B9D; font-variant-numeric: tabular-nums; }
-  .btn-primary, .btn-secondary {
-    border-radius: 999px;
-    padding: 14px 32px;
-    font-size: 18px;
-    font-weight: 700;
-    margin: 6px;
-    transition: transform 0.1s;
-    /* iOS Safari: instant tap response on result-page buttons. */
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
-    text-decoration: none;
-    display: inline-block;
-  }
-  .btn-primary { background: linear-gradient(135deg, #FF8FB1, #FF6B9D); color: white; box-shadow: 0 6px 16px rgba(255, 107, 157, 0.3); }
-  .btn-secondary { background: rgba(255, 255, 255, 0.8); color: #6B5A78; border: 1px solid rgba(0, 0, 0, 0.05); }
-  .btn-primary:active, .btn-secondary:active { transform: scale(0.96); }
+  .result-emoji { font-size: 64px; margin-bottom: var(--space-2); }
+  .result-title { font-size: var(--text-title); font-weight: 800; color: var(--text-primary); margin-bottom: var(--space-1); }
+  .result-rate { font-size: 56px; font-weight: 900; color: var(--accent); line-height: 1; }
+  .result-rate-label { font-size: var(--text-caption); color: var(--text-secondary); margin-bottom: var(--space-5); }
+  .stat-card h3 { font-size: var(--text-caption); color: var(--text-secondary); margin-bottom: var(--space-2); font-weight: 600; }
+  .stat-row { display: flex; justify-content: space-between; font-size: var(--text-body); padding: var(--space-1) 0; }
+  .stat-row b { color: var(--accent); font-variant-numeric: tabular-nums; }
 
-  /* ============== 错题本 + 家长看板 (lite 版) ============== */
-  .panel {
-    background: white;
-    border-radius: 20px;
-    padding: 16px 20px;
-    margin-bottom: 14px;
-    box-shadow: 0 4px 14px rgba(113, 78, 30, 0.06);
-  }
-  .panel h2 { font-size: 18px; margin-bottom: 12px; }
-  .mistake-item { padding: 10px 0; border-bottom: 1px dashed #F0E0E8; font-size: 15px; }
+  /* ===== Mistakes book + Parent dashboard (lite) ===== */
+  .card h2 { font-size: var(--text-title); margin-bottom: var(--space-3); }
+  .mistake-item { padding: var(--space-2) 0; border-bottom: 1px dashed #F0E0E8; font-size: 15px; }
   .mistake-item:last-child { border-bottom: none; }
-  .mistake-item .prob { color: #3D3D5C; font-weight: 600; }
-  .mistake-item .ans { color: #FF6B9D; margin-left: 8px; }
-  .mistake-item .correct { color: #4ECB71; margin-left: 8px; }
-  .empty-state { color: #9A8AA0; font-size: 14px; text-align: center; padding: 20px; }
-  .topbar-nav { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-  .topbar-nav .back { font-size: 18px; color: #6B5A78; padding: 6px 12px; border-radius: 999px; background: rgba(255,255,255,0.6); }
-  .topbar-nav .title { font-size: 18px; font-weight: 700; flex: 1; text-align: center; }
+  .mistake-item .prob { color: var(--text-primary); font-weight: 600; }
+  .mistake-item .ans { color: var(--accent); margin-left: var(--space-2); }
+  .mistake-item .correct { color: #4ECB71; margin-left: var(--space-2); }
+  .empty-state { color: #9A8AA0; font-size: var(--text-caption); text-align: center; padding: var(--space-5); }
+
+  /* Sub-page topbar (mistakes/parent — simpler than the app topbar) */
+  .sub-topbar { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+  .sub-topbar .back { font-size: var(--text-button); color: var(--text-secondary); padding: var(--space-1) var(--space-3); border-radius: var(--radius-pill); background: rgba(255,255,255,0.6); }
+  .sub-topbar .title { font-size: var(--text-title); font-weight: 700; flex: 1; text-align: center; }
 </style>
 </head>
 <body>
@@ -271,7 +213,7 @@
       <div class="result-rate" id="result-rate">0%</div>
       <div class="result-rate-label">正确率</div>
 
-      <div class="stat-card">
+      <div class="card stat-card">
         <h3>本局</h3>
         <div class="stat-row"><span>题目数</span><b id="result-total">0</b></div>
         <div class="stat-row"><span>答对</span><b id="result-correct">0</b></div>
@@ -279,7 +221,7 @@
         <div class="stat-row"><span>平均每题</span><b id="result-avg">0.0 秒</b></div>
       </div>
 
-      <div class="stat-card">
+      <div class="card stat-card">
         <h3>今日累计</h3>
         <div class="stat-row"><span>题目数</span><b id="today-total">0</b></div>
         <div class="stat-row"><span>正确率</span><b id="today-rate">—</b></div>
@@ -296,22 +238,22 @@
 
   <!-- ============== 错题本页 ============== -->
   <div class="page" id="page-mistakes">
-    <div class="topbar-nav">
+    <div class="sub-topbar">
       <button class="back" id="btn-mistakes-back">‹ 返回</button>
       <div class="title">📚 错题本</div>
     </div>
-    <div class="panel" id="mistakes-list">
+    <div class="card" id="mistakes-list">
       <div class="empty-state">还没有错题，快去玩一局吧</div>
     </div>
   </div>
 
   <!-- ============== 家长看板 ============== -->
   <div class="page" id="page-parent">
-    <div class="topbar-nav">
+    <div class="sub-topbar">
       <button class="back" id="btn-parent-back">‹ 返回</button>
       <div class="title">⚙️ 家长看板</div>
     </div>
-    <div class="panel">
+    <div class="card">
       <h2>最近 7 天</h2>
       <div id="daily-stats"></div>
     </div>
