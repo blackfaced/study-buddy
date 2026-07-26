@@ -171,7 +171,11 @@ const statusEl = document.getElementById('status');
 const avatarEl = document.getElementById('avatar');
 
 // v0.6.1: iOS Safari 键盘的语音按钮 (dictation) 会被活动的 getUserMedia
-// 视频流禁用。focus 时停视频流，blur 时恢复。娃现在能在写作业时直接说话。
+// 视频流禁用。focus 时停视频流，blur 时延迟恢复（让 TTS 播完先）。
+//
+// v0.6.2 修正: blur 立刻 openCamera() 会被 iOS 跟正在播放的 TTS 抢音频通道
+// 导致 chat reply 的朗读静默 mute。延迟 2.5 秒再开，TTS 一般已经播完。
+let resumeCameraTimer = null;
 inputEl.addEventListener('focus', () => {
   if (videoStream && videoMode === 'on') {
     videoPausedForInput = true;
@@ -180,14 +184,21 @@ inputEl.addEventListener('focus', () => {
     videoStream = null;
     currentStream = null;
   }
+  // 取消待执行的重启 (娃可能 focus 又 focus 来回切)
+  if (resumeCameraTimer) { clearTimeout(resumeCameraTimer); resumeCameraTimer = null; }
 });
 inputEl.addEventListener('blur', () => {
   if (videoPausedForInput && videoMode === 'on') {
     videoPausedForInput = false;
-    // 重新打开视频流（异步，不 await — input 已经失焦了）
-    openCamera().then(stream => {
-      if (stream) startFrameLoop();
-    }).catch(() => {});
+    // 延迟重启: 让正在播放的 TTS (chat reply) 播完, 否则 iOS 会 mute
+    resumeCameraTimer = setTimeout(() => {
+      resumeCameraTimer = null;
+      // 期间娃可能又 focus 了 input, 跳过
+      if (document.activeElement === inputEl) return;
+      openCamera().then(stream => {
+        if (stream) startFrameLoop();
+      }).catch(() => {});
+    }, 2500);
   }
 });
 let sessionId = null;
