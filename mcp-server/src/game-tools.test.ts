@@ -36,6 +36,7 @@ afterEach(() => {
   unstubFetch();
   db.exec("DELETE FROM mistakes");
   db.exec("DELETE FROM sessions");
+  db.exec("DELETE FROM game_sessions");
 });
 
 describe("get_apps (mcp tool)", () => {
@@ -95,5 +96,44 @@ describe("get_game_weak_topics (mcp tool)", () => {
   it("returns [] when there are no game mistakes", async () => {
     const result = await handleTool("get_game_weak_topics", {});
     expect(result.weakTopics ?? []).toEqual([]);
+  });
+});
+
+describe("get_game_daily_stats (mcp tool)", () => {
+  function seedSession(daysAgo: number, total: number, correct: number, appId = "candy-math-island") {
+    const startedAt = Date.now() - daysAgo * 24 * 3600 * 1000 - 30_000;
+    const endedAt = startedAt + 60_000;
+    db.prepare(
+      `INSERT INTO game_sessions
+         (child_id, app_id, duration_sec, total_questions, correct_count, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run("default", appId, 60, total, correct, startedAt, endedAt);
+  }
+
+  it("returns one row per day with correct rate", async () => {
+    seedSession(0, 12, 9);
+    seedSession(0, 8, 8);
+    seedSession(1, 10, 7);
+    const result = await handleTool("get_game_daily_stats", { childId: "default", days: 7 });
+    expect(result.scope).toBe("game-session");
+    const daily = result.daily ?? [];
+    expect(daily).toHaveLength(2);
+    expect(daily[0].totalQuestions).toBe(20);
+    expect(daily[0].correctCount).toBe(17);
+    expect(daily[0].correctRate).toBe(85);
+  });
+
+  it("returns [] when no sessions exist", async () => {
+    const result = await handleTool("get_game_daily_stats", {});
+    expect(result.daily ?? []).toEqual([]);
+  });
+
+  it("can filter by appId", async () => {
+    seedSession(0, 10, 8, "candy-math-island");
+    seedSession(0, 5, 5, "another-app");
+    const candy = await handleTool("get_game_daily_stats", { appId: "candy-math-island" });
+    const candyDaily = candy.daily ?? [];
+    expect(candyDaily).toHaveLength(1);
+    expect(candyDaily[0].totalQuestions).toBe(10);
   });
 });

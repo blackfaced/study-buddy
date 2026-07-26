@@ -156,6 +156,19 @@ export const TOOLS = [
       },
     },
   },
+  {
+    name: "get_game_daily_stats",
+    description:
+      "孩子最近 N 天的每日口算战报：每天 session 数 / 总题数 / 正确数 / 正确率。Mavis agent 用来给家长展示每日做题量和正确率。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        childId: { type: "string" },
+        days: { type: "number", description: "看最近 N 天，默认 7" },
+        appId: { type: "string", description: "可选，按 app 过滤（默认所有）" },
+      },
+    },
+  },
 ];
 
 export async function handleTool(name: string, args: any) {
@@ -492,6 +505,62 @@ export async function handleTool(name: string, args: any) {
           count: t.count,
           lastAt: t.last_ts,
         })),
+      };
+    }
+
+    case "get_game_daily_stats": {
+      const childId = args.childId || "default";
+      const days = args.days || 7;
+      const since = Date.now() - days * 24 * 60 * 60 * 1000;
+      const appId = typeof args.appId === "string" ? args.appId : null;
+
+      // Mirror server/src/game-sync.ts getGameDailyStats. Use the
+      // server's local date (same SQLite date() semantics).
+      const rows = appId
+        ? (db
+            .prepare(
+              `SELECT
+                  date(started_at/1000, 'unixepoch', 'localtime') AS day,
+                  COUNT(*) AS sessionCount,
+                  SUM(total_questions) AS totalQuestions,
+                  SUM(correct_count) AS correctCount
+                FROM game_sessions
+                WHERE child_id = ? AND started_at >= ? AND app_id = ?
+                GROUP BY day
+                ORDER BY day DESC`
+            )
+            .all(childId, since, appId) as any[])
+        : (db
+            .prepare(
+              `SELECT
+                  date(started_at/1000, 'unixepoch', 'localtime') AS day,
+                  COUNT(*) AS sessionCount,
+                  SUM(total_questions) AS totalQuestions,
+                  SUM(correct_count) AS correctCount
+                FROM game_sessions
+                WHERE child_id = ? AND started_at >= ?
+                GROUP BY day
+                ORDER BY day DESC`
+            )
+            .all(childId, since) as any[]);
+
+      const daily = rows.map((r) => ({
+        date: r.day,
+        sessionCount: r.sessionCount,
+        totalQuestions: r.totalQuestions,
+        correctCount: r.correctCount,
+        correctRate:
+          r.totalQuestions > 0
+            ? Math.round((r.correctCount / r.totalQuestions) * 100)
+            : 0,
+      }));
+
+      return {
+        childId,
+        days,
+        appId,
+        scope: "game-session",
+        daily,
       };
     }
 

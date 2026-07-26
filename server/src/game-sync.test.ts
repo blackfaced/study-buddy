@@ -5,7 +5,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { migrateSchema } from "./db-migrate.js";
 import { appendOutbox, readPendingOutbox } from "./outbox.js";
-import { recordGameMistake, getGameWeakTopics } from "./game-sync.js";
+import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
 
 let db: Database.Database;
 let outboxPath: string;
@@ -173,6 +173,134 @@ describe("getGameWeakTopics", () => {
 
   it("returns [] when no game mistakes exist", async () => {
     expect(await getGameWeakTopics(db, 7)).toEqual([]);
+  });
+});
+
+describe("recordGameSession", () => {
+  it("inserts a row into game_sessions with the summary stats", async () => {
+    const startedAt = Date.now() - 60_000;
+    const endedAt = Date.now();
+    const id = await recordGameSession(db, outboxPath, {
+      childId: "default",
+      appId: "candy-math-island",
+      durationSec: 60,
+      totalQuestions: 12,
+      correctCount: 10,
+      startedAt,
+      endedAt,
+    });
+    expect(id).toBeGreaterThan(0);
+    const row = db
+      .prepare(
+        "SELECT child_id, app_id, duration_sec, total_questions, correct_count, started_at, ended_at FROM game_sessions WHERE id = ?"
+      )
+      .get(id) as any;
+    expect(row.child_id).toBe("default");
+    expect(row.app_id).toBe("candy-math-island");
+    expect(row.duration_sec).toBe(60);
+    expect(row.total_questions).toBe(12);
+    expect(row.correct_count).toBe(10);
+    expect(row.started_at).toBe(startedAt);
+    expect(row.ended_at).toBe(endedAt);
+  });
+
+  it("appends a game-session entry to the outbox for the Nexus worker", async () => {
+    await recordGameSession(db, outboxPath, {
+      childId: "default",
+      appId: "candy-math-island",
+      durationSec: 60,
+      totalQuestions: 5,
+      correctCount: 4,
+      startedAt: Date.now() - 60_000,
+      endedAt: Date.now(),
+    });
+    const pending = await readPendingOutbox(outboxPath);
+    expect(pending).toHaveLength(1);
+    expect(pending[0].kind).toBe("game-session");
+    expect(pending[0].entityId).toBe("child:default");
+    expect((pending[0].payload as any).appId).toBe("candy-math-island");
+    expect((pending[0].payload as any).totalQuestions).toBe(5);
+    expect((pending[0].payload as any).correctCount).toBe(4);
+  });
+
+  it("rejects a session with totalQuestions=0 (nothing to record)", async () => {
+    await expect(
+      recordGameSession(db, outboxPath, {
+        childId: "default",
+        appId: "candy-math-island",
+        durationSec: 60,
+        totalQuestions: 0,
+        correctCount: 0,
+        startedAt: Date.now() - 60_000,
+        endedAt: Date.now(),
+      })
+    ).rejects.toThrow(/totalQuestions/);
+  });
+});
+
+describe("getGameDailyStats", () => {
+  function seedSession(daysAgo: number, total: number, correct: number) {
+    const startedAt = Date.now() - daysAgo * 24 * 3600 * 1000 - 30_000;
+    const endedAt = startedAt + 60_000;
+    db.prepare(
+      `INSERT INTO game_sessions
+         (child_id, app_id, duration_sec, total_questions, correct_count, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run("default", "candy-math-island", 60, total, correct, startedAt, endedAt);
+  }
+
+  it("aggregates by day, returns one row per day with correct rate", async () => {
+    seedSession(0, 12, 9);   // today: 9/12 = 75%
+    seedSession(0, 8, 8);    // today: +8/8 → 17/20 = 85%
+    seedSession(1, 10, 7);   // yesterday: 7/10 = 70%
+
+    const stats = await getGameDailyStats(db, 7);
+    expect(stats).toHaveLength(2);
+    // Today: 17 correct / 20 total, two sessions.
+    const today = stats[0];
+    expect(today.sessionCount).toBe(2);
+    expect(today.totalQuestions).toBe(20);
+    expect(today.correctCount).toBe(17);
+    expect(today.correctRate).toBe(85);
+    // Yesterday: 1 session, 10 questions, 70%.
+    const yesterday = stats[1];
+    expect(yesterday.sessionCount).toBe(1);
+    expect(yesterday.totalQuestions).toBe(10);
+    expect(yesterday.correctCount).toBe(7);
+    expect(yesterday.correctRate).toBe(70);
+  });
+
+  it("returns [] when no game sessions exist", async () => {
+    expect(await getGameDailyStats(db, 7)).toEqual([]);
+  });
+
+  it("respects the days filter", async () => {
+    seedSession(0, 5, 5);
+    seedSession(10, 5, 5); // 10 days ago, out of 7-day window
+    const stats = await getGameDailyStats(db, 7);
+    expect(stats).toHaveLength(1);
+    expect(stats[0].totalQuestions).toBe(5);
+  });
+
+  it("can filter by appId", async () => {
+    // Two apps on the same day
+    const startedAt = Date.now() - 30_000;
+    const endedAt = Date.now();
+    db.prepare(
+      `INSERT INTO game_sessions
+         (child_id, app_id, duration_sec, total_questions, correct_count, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run("default", "candy-math-island", 60, 10, 8, startedAt, endedAt);
+    db.prepare(
+      `INSERT INTO game_sessions
+         (child_id, app_id, duration_sec, total_questions, correct_count, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run("default", "another-app", 60, 5, 5, startedAt, endedAt);
+
+    const candyStats = await getGameDailyStats(db, 7, "candy-math-island");
+    expect(candyStats).toHaveLength(1);
+    expect(candyStats[0].totalQuestions).toBe(10);
+    expect(candyStats[0].correctCount).toBe(8);
   });
 });
 
