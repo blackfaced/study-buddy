@@ -560,17 +560,23 @@ async function toggleVideo() {
 }
 
 async function send() {
-  // iOS Safari: 第一次用户手势立刻解锁 TTS（必须这次，异步后失效）
-  if ('speechSynthesis' in window && !synthUnlocked) {
-    const u = new SpeechSynthesisUtterance(' ');
-    u.volume = 0;
-    speechSynthesis.speak(u);
-    synthUnlocked = true;
-  }
   const text = inputEl.value.trim();
   if (!text) return;
   inputEl.value = '';
   addMsg('child', text);
+
+  // v0.6.4: iOS Safari — 在 user gesture 的同步窗口里先 speak 一个静音
+  // utterance，把 speech engine "暖"起来。await fetch 之后 speak(reply)
+  // 才不会因为 gesture context 过期而静默 fail。
+  // 之前的版本只在第一次 send() 解锁，后续 send() 都不暖，chat reply 就哑。
+  // (v0.6.3 的 2.5s 延迟解决的是 camera 抢音频的问题，跟这个独立。)
+  if ('speechSynthesis' in window) {
+    try {
+      const warmup = new SpeechSynthesisUtterance(' ');
+      warmup.volume = 0;
+      speechSynthesis.speak(warmup);
+    } catch {}
+  }
 
   // done 状态下，孩子说"我要写作业"自动切回 writing 模式
   if (state === 'done' && /我要(写|做)作业|继续写|再写|接着写|想写作业|还要写/i.test(text)) {
