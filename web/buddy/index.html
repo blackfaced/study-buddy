@@ -434,6 +434,18 @@ async function openCamera() {
 
 async function requestPerm() {
   document.getElementById('perm-overlay').style.display = 'none';
+
+  // v0.6.4: 同 send() 的修法 — 在 user gesture 同步窗口里先 speak 静音
+  // utterance。否则 await openCamera() + await fetch 之后 welcome speak
+  // 会因为 gesture 过期静默 fail。
+  if ('speechSynthesis' in window) {
+    try {
+      const warmup = new SpeechSynthesisUtterance(' ');
+      warmup.volume = 0;
+      speechSynthesis.speak(warmup);
+    } catch {}
+  }
+
   await openCamera();
 
   // 开 session
