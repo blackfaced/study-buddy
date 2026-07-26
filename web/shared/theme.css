@@ -1,0 +1,288 @@
+/* ====================================================================
+ * study-buddy — shared theme.css (v0.6.6)
+ *
+ * Single source of truth for visual language across all hung apps.
+ * Loaded by every page via:
+ *   <link rel="stylesheet" href="/shared/theme.css">
+ *
+ * Pages override only :root variables for their theme (candy / warm).
+ * Don't add page-specific component rules here — extend with care.
+ * ==================================================================== */
+
+:root {
+  /* === Fonts === */
+  --font-system: -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+
+  /* === Spacing scale (4px base) === */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* === Type scale === */
+  --text-display: 36px;
+  --text-title: 24px;
+  --text-body: 16px;
+  --text-caption: 14px;
+  --text-button: 16px;
+
+  /* === Radii === */
+  --radius-card: 22px;
+  --radius-input: 18px;
+  --radius-pill: 999px;
+  --radius-button: 18px;
+
+  /* === Shadows === */
+  --shadow-card: 0 4px 14px rgba(113, 78, 30, 0.06);
+  --shadow-card-lg: 0 8px 28px rgba(113, 78, 30, 0.1);
+  --shadow-button: 0 2px 6px rgba(0, 0, 0, 0.08);
+  --shadow-button-accent: 0 4px 12px rgba(255, 143, 177, 0.35);
+
+  /* === Motion === */
+  --duration-fast: 150ms;
+  --duration-normal: 220ms;
+  --duration-slow: 400ms;
+  --ease-default: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* === Default theme: warm (portal + buddy) ===
+   * Override these in <style> to use the candy theme:
+   *   :root { --accent: #FF6B9D; --bg-page-start: #FFE5EC; ... } */
+  --accent: #ffb84d;
+  --accent-soft: #fff0cf;
+  --bg-page-start: #fff9ea;
+  --bg-page-end: #ffe5b4;
+  --bg-card: rgba(255, 255, 255, 0.86);
+  --bg-input: #fffafc;
+  --text-primary: #513a1e;
+  --text-secondary: #806748;
+  --text-on-accent: #ffffff;
+  --border-subtle: rgba(0, 0, 0, 0.05);
+}
+
+/* ===== Reset ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  font-family: var(--font-system);
+  color: var(--text-primary);
+  background: linear-gradient(
+    160deg,
+    var(--bg-page-start) 0%,
+    var(--bg-page-end) 100%
+  );
+  background-attachment: fixed;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+  color: inherit;
+}
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  touch-action: manipulation;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+input,
+textarea {
+  outline: none;
+  touch-action: manipulation;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+img {
+  -webkit-user-drag: none;
+}
+
+/* ===== Components ===== */
+
+/* Card — main content surface. Backdrop blur for warmth. */
+.card {
+  background: var(--bg-card);
+  border-radius: var(--radius-card);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--border-subtle);
+}
+
+/* Buttons — base + variants */
+.btn {
+  display: inline-block;
+  padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-button);
+  font-weight: 700;
+  text-align: center;
+  border: 1px solid var(--border-subtle);
+  transition: transform var(--duration-fast) var(--ease-default);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  text-decoration: none;
+}
+.btn:active {
+  transform: scale(0.96);
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  box-shadow: var(--shadow-button-accent);
+  border: none;
+}
+.btn-secondary {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+.btn-pill {
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: var(--text-caption);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-subtle);
+}
+.btn-pill:active {
+  transform: scale(0.95);
+}
+
+/* Input */
+.input {
+  width: 100%;
+  font-size: var(--text-body);
+  font-weight: 700;
+  text-align: center;
+  padding: var(--space-3);
+  border: 3px solid var(--border-subtle);
+  border-radius: var(--radius-input);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  outline: none;
+  transition: border-color var(--duration-normal) var(--ease-default);
+}
+.input:focus {
+  border-color: var(--accent);
+}
+
+/* App topbar — consistent header across all apps. */
+.app-topbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.app-topbar .back-to-portal {
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: transform var(--duration-fast) var(--ease-default);
+  box-shadow: var(--shadow-button);
+}
+.app-topbar .back-to-portal:active {
+  transform: scale(0.92);
+}
+.app-topbar .app-title {
+  font-size: var(--text-title);
+  font-weight: 800;
+  flex: 1;
+  text-align: center;
+  margin: 0 var(--space-3);
+}
+
+/* Page transition (used by multi-page apps like candy-math-island) */
+.page {
+  display: none;
+  animation: fadeIn var(--duration-normal) var(--ease-default);
+}
+.page.active {
+  display: block;
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Card entry (used by portal for individual entries) */
+.entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  color: inherit;
+  text-decoration: none;
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-card);
+  transition:
+    transform var(--duration-fast) var(--ease-default),
+    box-shadow var(--duration-fast) var(--ease-default);
+}
+.entry:active {
+  transform: scale(0.98);
+  box-shadow: var(--shadow-card);
+}
+.entry .emoji {
+  display: grid;
+  place-items: center;
+  flex: 0 0 54px;
+  height: 54px;
+  border-radius: var(--radius-card);
+  background: var(--accent-soft);
+  font-size: 30px;
+}
+.entry h2 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-title);
+}
+.entry p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-caption);
+  line-height: 1.45;
+}
+.entry .arrow {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 22px;
+}
