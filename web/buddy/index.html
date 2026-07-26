@@ -169,6 +169,27 @@ const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const statusEl = document.getElementById('status');
 const avatarEl = document.getElementById('avatar');
+
+// v0.6.1: iOS Safari 键盘的语音按钮 (dictation) 会被活动的 getUserMedia
+// 视频流禁用。focus 时停视频流，blur 时恢复。娃现在能在写作业时直接说话。
+inputEl.addEventListener('focus', () => {
+  if (videoStream && videoMode === 'on') {
+    videoPausedForInput = true;
+    if (frameLoop) { clearInterval(frameLoop); frameLoop = null; }
+    videoStream.getTracks().forEach(t => t.stop());
+    videoStream = null;
+    currentStream = null;
+  }
+});
+inputEl.addEventListener('blur', () => {
+  if (videoPausedForInput && videoMode === 'on') {
+    videoPausedForInput = false;
+    // 重新打开视频流（异步，不 await — input 已经失焦了）
+    openCamera().then(stream => {
+      if (stream) startFrameLoop();
+    }).catch(() => {});
+  }
+});
 let sessionId = null;
 let state = 'idle'; // idle | writing | done
 let videoMode = 'on'; // on | off — 关掉就不跑 frame loop + 不警告
@@ -177,6 +198,8 @@ let isListening = false;
 let frameLoop = null;
 let videoStream = null; // = currentStream 别名，统一引用
 let currentFacing = 'environment'; // 默认后置（孩子用）
+// v0.6.1: 临时暂停视频流让 iOS 键盘的语音按钮能用。focus 时停，blur 时恢复。
+let videoPausedForInput = false;
 let synthUnlocked = false; // iOS Safari 首次用户手势解锁 TTS
 
 function addMsg(role, text) {
@@ -360,15 +383,18 @@ async function retryDeviceCheck() {
   }
 }
 
-async function requestPerm() {
-  document.getElementById('perm-overlay').style.display = 'none';
-  // 重新检测本机设备（requestPerm 单独调用时不知道 hasAudio）
+/**
+ * Open the camera stream and attach it to the preview element. Reused by
+ * requestPerm() (initial setup) and the input-blur handler (v0.6.1:
+ * restart after focus-pause so the iOS keyboard mic works).
+ *
+ * Returns the stream, or null on failure.
+ */
+async function openCamera() {
   const devices = await navigator.mediaDevices.enumerateDevices();
   const hasVideo = devices.some(d => d.kind === 'videoinput');
-  const hasAudio = devices.some(d => d.kind === 'audioinput');
-
   try {
-    // v0.1：只申请 video（不申请 audio），让麦克风给系统输入法用
+    // 只申请 video（不申请 audio），让麦克风给系统输入法用
     const stream = await navigator.mediaDevices.getUserMedia({
       video: hasVideo ? { width: 320, height: 240, facingMode: currentFacingMode } : false,
     });
@@ -380,7 +406,7 @@ async function requestPerm() {
       if (currentFacingMode === 'user') video.classList.add('mirrored');
       await video.play();
     }
-    // 摄像头就绪：静默，不打扰孩子
+    return stream;
   } catch (e) {
     if (e.name === 'NotFoundError' || e.name === 'OverconstrainedError') {
       addSystem('没找到摄像头/麦克风');
@@ -391,7 +417,13 @@ async function requestPerm() {
     } else {
       addSystem('打开失败：' + e.message);
     }
+    return null;
   }
+}
+
+async function requestPerm() {
+  document.getElementById('perm-overlay').style.display = 'none';
+  await openCamera();
 
   // 开 session
   try {
