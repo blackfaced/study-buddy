@@ -16,6 +16,7 @@ import sharp from "sharp";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { analyzeMistakeImage, type VisionClient } from "./vision.js";
+import { buildSystemPrompt, buildChatPrompt } from "./llm-prompt.js";
 import { requestLogger, type Logger, createLogger, stdoutSink } from "./logger.js";
 import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
 
@@ -323,26 +324,10 @@ export function createApp(opts: AppOptions): express.Express {
     }
   });
 
-  // ============== System Prompt ==============
-  const SYSTEM_PROMPT = `你是"小书童"，陪小学二年级的孩子写作业。
-你只做 3 件事：
-1. 提醒坐姿和专注
-2. 听写、提问、检查作业
-3. 写完作业陪聊跟学习有关的事
-
-绝对规则：
-- 不聊游戏、动画、零食、玩具、电视
-- 不讲与作业/课本/学习无关的故事
-- 孩子跑偏时用一句话拉回："这个我们写完作业再说，先看看这道题？"
-- 语气简短、温暖、不啰嗦，每次回答不超过 2 句话
-- 不直接给答案，只给思路
-- 用 8 岁孩子能听懂的话`;
-
-  const CHAT_PROMPT = `你是"小书童"，孩子刚写完作业，现在是自由陪聊时间。
-你还在陪小学二年级孩子，话题范围仍然限定在学习/学校/书/小知识/小思考。
-绝对不聊：游戏、动画、零食、玩具、电视、明星八卦、社交媒体。
-语气简短、温暖、不啰嗦，每次回答不超过 2 句话。
-孩子跑偏时拉回："这个我们下次再聊吧，你今天想做点什么？"`;
+  // System prompts moved to ./llm-prompt.ts (issue #29: 称谓规则)
+  //  - 可测（vitest require）
+  //  - 接 child.name 注入（默认"小宝"）
+  //  - 加"禁止小朋友/小同学/宝贝/乖乖"规则
 
   // ============== LLM ==============
   async function callMinimax(messages: any[]): Promise<string> {
@@ -391,7 +376,11 @@ export function createApp(opts: AppOptions): express.Express {
     // able to chat right after ending a session.
     const session = getOrCreateActiveSession();
 
-    const systemPrompt = state === "done" ? CHAT_PROMPT : SYSTEM_PROMPT;
+    // Load child for the active session (v0.7: 称谓规则用 child.name 注入 prompt)
+    const child = db.prepare("SELECT * FROM children WHERE id = ?").get(session.child_id) as any;
+    const childName = child?.name || "小宝";
+
+    const systemPrompt = state === "done" ? buildChatPrompt(childName) : buildSystemPrompt(childName);
     const messages = [
       { role: "system", content: systemPrompt },
       { role: "user", content: text },
