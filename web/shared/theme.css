@@ -198,7 +198,8 @@ img {
   padding: var(--space-3) var(--space-4);
   margin-bottom: var(--space-4);
 }
-.app-topbar .back-to-portal {
+/* Back-to-portal — circular home link, used in app topbar, quiz topbar, and result page. */
+.back-to-portal {
   background: var(--bg-card);
   color: var(--text-secondary);
   width: 40px;
@@ -210,10 +211,11 @@ img {
   font-size: 18px;
   line-height: 1;
   flex-shrink: 0;
+  text-decoration: none;
   transition: transform var(--duration-fast) var(--ease-default);
   box-shadow: var(--shadow-button);
 }
-.app-topbar .back-to-portal:active {
+.back-to-portal:active {
   transform: scale(0.92);
 }
 .app-topbar .app-title {
