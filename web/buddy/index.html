@@ -109,13 +109,13 @@
     <input type="text" id="input" placeholder="跟小书童说句话...（点键盘 🎤 直接说话）"
            inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off"
            enterkeyhint="send" />
-    <button id="photo-btn" onclick="captureMistake()" title="拍一下错题">📷</button>
-    <button onclick="send()">发送</button>
+    <button id="photo-btn" onclick="Buddy.voice.captureMistake()" title="拍一下错题">📷</button>
+    <button id="send-btn" onclick="Buddy.chat.send()">发送</button>
   </div>
   <div class="btn-row">
-    <button id="video-toggle" onclick="toggleVideo()" title="开关视频模式">📷 开</button>
-    <button id="flip-btn" onclick="flipCamera()">🔄 翻转</button>
-    <button class="danger" onclick="endSession()">✅ 写完啦</button>
+    <button id="video-toggle" onclick="Buddy.camera.toggleVideo()" title="开关视频模式">📷 开</button>
+    <button id="flip-btn" onclick="Buddy.camera.flipCamera()">🔄 翻转</button>
+    <button class="danger" id="end-btn" onclick="Buddy.chat.endSession()">✅ 写完啦</button>
   </div>
 </div>
 
@@ -126,7 +126,7 @@
   <div class="card">
     <h2>小书童想看你~</h2>
     <p>需要打开摄像头才能陪你写作业哦</p>
-    <button onclick="requestPerm()">好的</button>
+    <button onclick="Buddy.chat.requestPerm()">好的</button>
   </div>
 </div>
 
@@ -139,8 +139,8 @@
       <pre id="device-debug" style="background:#f5f5f5;padding:8px;border-radius:4px;overflow:auto;max-height:240px;margin-top:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;"></pre>
     </details>
     <div style="display:flex;gap:8px;margin-top:12px;">
-      <button onclick="retryDeviceCheck()" style="background:#64b5f6;">重新检测</button>
-      <button onclick="enterTextMode()" style="background:#ffb84d;">文字模式继续</button>
+      <button id="retry-device-btn" onclick="Buddy.chat.retryDeviceCheck()" style="background:#64b5f6;">重新检测</button>
+      <button onclick="Buddy.voice.enterTextMode()" style="background:#ffb84d;">文字模式继续</button>
     </div>
   </div>
 </div>
@@ -158,82 +158,34 @@
   </div>
 </div>
 
+<!-- v0.7: 4-module split (issue #23). Load order: state → camera → chat → voice. -->
+<script src="./state.js"></script>
+<script src="./camera.js"></script>
+<script src="./chat.js"></script>
+<script src="./voice.js"></script>
 <script>
+// ===== Buddy top-level orchestrator =====
+// 4 个 module 干各自的活（state / camera / chat / voice）。
+// 这里只留：DOM 引用、debug 开关、全局错误兜底、start() 入口、键盘 / 拍照事件。
 const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const statusEl = document.getElementById('status');
 const avatarEl = document.getElementById('avatar');
 
-// v0.6.1: iOS Safari 键盘的语音按钮 (dictation) 会被活动的 getUserMedia
-// 视频流禁用。focus 时停视频流，blur 时延迟恢复（让 TTS 播完先）。
-//
-// v0.6.2 修正: blur 立刻 openCamera() 会被 iOS 跟正在播放的 TTS 抢音频通道
-// 导致 chat reply 的朗读静默 mute。延迟 2.5 秒再开，TTS 一般已经播完。
-let resumeCameraTimer = null;
-inputEl.addEventListener('focus', () => {
-  if (videoStream && videoMode === 'on') {
-    videoPausedForInput = true;
-    if (frameLoop) { clearInterval(frameLoop); frameLoop = null; }
-    videoStream.getTracks().forEach(t => t.stop());
-    videoStream = null;
-    currentStream = null;
-  }
-  // 取消待执行的重启 (娃可能 focus 又 focus 来回切)
-  if (resumeCameraTimer) { clearTimeout(resumeCameraTimer); resumeCameraTimer = null; }
-});
-inputEl.addEventListener('blur', () => {
-  if (videoPausedForInput && videoMode === 'on') {
-    videoPausedForInput = false;
-    // 延迟重启: 让正在播放的 TTS (chat reply) 播完, 否则 iOS 会 mute
-    resumeCameraTimer = setTimeout(() => {
-      resumeCameraTimer = null;
-      // 期间娃可能又 focus 了 input, 跳过
-      if (document.activeElement === inputEl) return;
-      openCamera().then(stream => {
-        if (stream) startFrameLoop();
-      }).catch(() => {});
-    }, 2500);
-  }
-});
-let sessionId = null;
-let state = 'idle'; // idle | writing | done
-let videoMode = 'on'; // on | off — 关掉就不跑 frame loop + 不警告
-let recognition = null;
-let isListening = false;
-let frameLoop = null;
-let videoStream = null; // = currentStream 别名，统一引用
-let currentFacing = 'environment'; // 默认后置（孩子用）
-// v0.6.1: 临时暂停视频流让 iOS 键盘的语音按钮能用。focus 时停，blur 时恢复。
-let videoPausedForInput = false;
-let synthUnlocked = false; // iOS Safari 首次用户手势解锁 TTS
-
-function addMsg(role, text) {
-  const div = document.createElement('div');
-  div.className = 'msg msg-' + role;
-  div.textContent = text;
-  chatEl.appendChild(div);
-  chatEl.scrollTop = chatEl.scrollHeight;
-  if (role === 'agent') {
-    avatarEl.classList.add('happy');
-    setTimeout(() => avatarEl.classList.remove('happy'), 500);
-  }
-}
-
-function addSystem(text) {
-  const div = document.createElement('div');
-  div.className = 'msg msg-system';
-  div.textContent = text;
-  chatEl.appendChild(div);
-  chatEl.scrollTop = chatEl.scrollHeight;
-}
-
-// 调试模式：URL 带 ?debug=1 开启，所有诊断信息 + JS 错误会显示在聊天区
+// 调试模式：URL 带 ?debug=1 开启
 const DEBUG_MODE = new URLSearchParams(location.search).get('debug') === '1';
+window.Buddy.debugMode = DEBUG_MODE;
+
+// 注入 chat 模块需要的 DOM 引用
+window.Buddy.chat.init({ chatEl, statusEl, avatarEl, inputEl });
+
+// v0.6.1: input focus/blur 切换摄像头（让 iOS 键盘 mic 能用）
+window.Buddy.camera.attachInputListeners(inputEl);
 
 // 全局错误兜底：开发模式才显示在聊天区（生产只 console）
 window.addEventListener('error', (e) => {
   console.error('[global-error]', e.error || e.message);
-  if (DEBUG_MODE && typeof chatEl !== 'undefined' && chatEl) {
+  if (DEBUG_MODE && chatEl) {
     const div = document.createElement('div');
     div.className = 'msg msg-system';
     div.textContent = '⚠️ ' + (e.message || '未知错误') + (e.filename ? ' @ ' + e.filename.split('/').pop() + ':' + e.lineno : '');
@@ -243,7 +195,7 @@ window.addEventListener('error', (e) => {
 });
 window.addEventListener('unhandledrejection', (e) => {
   console.error('[unhandled-promise]', e.reason);
-  if (DEBUG_MODE && typeof chatEl !== 'undefined' && chatEl) {
+  if (DEBUG_MODE && chatEl) {
     const div = document.createElement('div');
     div.className = 'msg msg-system';
     div.textContent = '⚠️ Promise 错误: ' + (e.reason && e.reason.message || e.reason);
@@ -252,40 +204,10 @@ window.addEventListener('unhandledrejection', (e) => {
   }
 });
 
-function showWarning(text) {
-  const div = document.createElement('div');
-  div.className = 'warning';
-  div.textContent = text;
-  chatEl.appendChild(div);
-  setTimeout(() => div.remove(), 4000);
-  avatarEl.classList.add('happy');
-  setTimeout(() => avatarEl.classList.remove('happy'), 800);
-}
-
-function speak(text) {
-  if (!('speechSynthesis' in window)) return;
-  // iOS Safari: 必须在用户交互后才能 speak。首次解锁 + 静音 utterance 触发 unlock
-  if (synthUnlocked === false) {
-    const u0 = new SpeechSynthesisUtterance('');
-    u0.volume = 0;
-    speechSynthesis.speak(u0);
-    synthUnlocked = true;
-  }
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'zh-CN';
-  u.rate = 0.9;
-  u.pitch = 1.1;
-  // iOS 经常需要先 cancel 再 speak，否则新 utterance 不发声
-  speechSynthesis.cancel();
-  // 偶尔 speak 静默失败，setTimeout 重试一次
-  setTimeout(() => {
-    speechSynthesis.speak(u);
-  }, 50);
-  // iOS 后台被杀恢复后，speak 可能 5 秒后无声音，监听 onend 异常时再试
-  u.onerror = (e) => {
-    console.warn('TTS error:', e);
-  };
-}
+// 键盘 Enter 发消息
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') window.Buddy.chat.send();
+});
 
 async function start() {
   // 1. 先连 server（用当前 URL 的 origin）
@@ -300,613 +222,15 @@ async function start() {
     return;
   }
 
-  // 2. 检测设备（客户端：Mac Pro / 手机 / 任何有摄像头的设备）
-  const deviceInfo = await checkDevices();
+  // 2. 检测设备
+  const deviceInfo = await window.Buddy.chat.checkDevices();
   if (!deviceInfo.hasVideo && !deviceInfo.hasAudio) {
-    showNoDevice(deviceInfo);
+    window.Buddy.chat.showNoDevice(deviceInfo);
     return;
   }
 
   // 3. 有设备 → 弹权限框
   document.getElementById('perm-overlay').style.display = 'flex';
-}
-
-async function checkDevices() {
-  const info = {
-    hasVideo: false,
-    hasAudio: false,
-    apiAvailable: false,
-    devices: [],
-    error: null,
-    userAgent: navigator.userAgent,
-    isSecureContext: window.isSecureContext,
-  };
-  try {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-      info.error = 'mediaDevices API 不可用';
-      return info;
-    }
-    info.apiAvailable = true;
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    info.devices = devices.map(d => ({
-      kind: d.kind,
-      label: d.label || '(无 label — 需要先授权)',
-      deviceId: d.deviceId.slice(0, 8) + '...',
-    }));
-    info.hasVideo = devices.some(d => d.kind === 'videoinput');
-    info.hasAudio = devices.some(d => d.kind === 'audioinput');
-  } catch (e) {
-    info.error = e.name + ': ' + e.message;
-  }
-  return info;
-}
-
-function showNoDevice(info) {
-  document.getElementById('no-device-title').textContent =
-    info.hasVideo || info.hasAudio ? '只有部分设备' : '没检测到摄像头/麦克风';
-
-  // 调试信息
-  const debugEl = document.getElementById('device-debug');
-  debugEl.textContent = JSON.stringify(info, null, 2);
-
-  // 提示
-  const hints = [];
-  if (!info.apiAvailable) {
-    hints.push('❌ 浏览器不支持 mediaDevices API（试试 Chrome / Safari 最新版）');
-  }
-  if (info.error) {
-    hints.push(`❌ 错误：${info.error}`);
-  }
-  if (info.apiAvailable && !info.hasVideo) {
-    hints.push('❌ 没找到摄像头。Mac Pro 没有内置摄像头，需要外接 USB 摄像头或在 iPhone 上打开');
-  }
-  if (info.isSecureContext === false) {
-    hints.push('❌ 不是 secure context（应该用 https:// 或 localhost 或 mac-mini.local）');
-  }
-  if (hints.length === 0 && !info.hasVideo && !info.hasAudio) {
-    hints.push('可能的解决：');
-    hints.push('1. macOS 系统设置 → 隐私与安全性 → 摄像头 → 允许 Chrome');
-    hints.push('2. 系统设置 → 麦克风 → 允许 Chrome');
-    hints.push('3. 摄像头没被其他 App 占用（Zoom / FaceTime / OBS）');
-    hints.push('4. 用孩子的 iPhone / iPad / Android 手机打开（推荐）');
-  }
-
-  document.getElementById('no-device-hint').innerHTML = hints
-    .map(h => `<div style="text-align:left;margin:4px 0;font-size:14px;line-height:1.5;">${h}</div>`)
-    .join('');
-
-  document.getElementById('no-device-overlay').style.display = 'flex';
-}
-
-async function retryDeviceCheck() {
-  document.getElementById('no-device-overlay').style.display = 'none';
-  const info = await checkDevices();
-  if (info.hasVideo || info.hasAudio) {
-    document.getElementById('perm-overlay').style.display = 'flex';
-  } else {
-    showNoDevice(info);
-  }
-}
-
-/**
- * Open the camera stream and attach it to the preview element. Reused by
- * requestPerm() (initial setup) and the input-blur handler (v0.6.1:
- * restart after focus-pause so the iOS keyboard mic works).
- *
- * Returns the stream, or null on failure.
- */
-async function openCamera() {
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  const hasVideo = devices.some(d => d.kind === 'videoinput');
-  try {
-    // 只申请 video（不申请 audio），让麦克风给系统输入法用
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: hasVideo ? { width: 320, height: 240, facingMode: currentFacingMode } : false,
-    });
-    currentStream = stream;
-    videoStream = stream;
-    const video = document.getElementById('cam-preview');
-    if (video) {
-      video.srcObject = stream;
-      if (currentFacingMode === 'user') video.classList.add('mirrored');
-      await video.play();
-    }
-    return stream;
-  } catch (e) {
-    if (e.name === 'NotFoundError' || e.name === 'OverconstrainedError') {
-      addSystem('没找到摄像头/麦克风');
-    } else if (e.name === 'NotAllowedError') {
-      addSystem('权限被拒绝，点地址栏小锁重新允许');
-    } else if (e.name === 'NotReadableError') {
-      addSystem('摄像头被其他 App 占用（关掉 Zoom/FaceTime 再试）');
-    } else {
-      addSystem('打开失败：' + e.message);
-    }
-    return null;
-  }
-}
-
-async function requestPerm() {
-  document.getElementById('perm-overlay').style.display = 'none';
-
-  // v0.6.4: 同 send() 的修法 — 在 user gesture 同步窗口里先 speak 静音
-  // utterance。否则 await openCamera() + await fetch 之后 welcome speak
-  // 会因为 gesture 过期静默 fail。
-  if ('speechSynthesis' in window) {
-    try {
-      const warmup = new SpeechSynthesisUtterance(' ');
-      warmup.volume = 0;
-      speechSynthesis.speak(warmup);
-    } catch {}
-  }
-
-  await openCamera();
-
-  // 开 session
-  try {
-    const r = await fetch('/api/session/start', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ childId: 'default', subject: '作业' })
-    });
-    const data = await r.json();
-    sessionId = data.sessionId;
-    state = 'writing';
-    statusEl.textContent = '写作业中...';
-    addMsg('agent', '你好呀！我是小书童，我们开始写作业吧~');
-    speak('你好呀！我是小书童，我们开始写作业吧');
-  } catch (e) {
-    statusEl.textContent = '会话启动失败';
-    return;
-  }
-
-  // 启动坐姿循环
-  startFrameLoop();
-}
-
-async function startFrameLoop() {
-  const canvas = document.getElementById('canvas');
-  const ctx = canvas.getContext('2d');
-
-  let frameCount = 0;
-  let sendCount = 0;
-  let lastReport = Date.now();
-  let lastReadyState = -1;
-  let lastVideoId = '';
-  let firstError = null;
-
-  // 启动诊断（仅开发模式可见）
-  if (DEBUG_MODE) {
-    setTimeout(() => {
-      const v = document.getElementById('cam-preview');
-      if (v) {
-        addSystem(`📷 视频: srcObject=${!!v.srcObject} readyState=${v.readyState} ${v.videoWidth}x${v.videoHeight}`);
-      } else {
-        addSystem('⚠️ 没找到视频元素');
-      }
-    }, 1000);
-  }
-
-  frameLoop = setInterval(async () => {
-    if (videoMode === 'off') return;  // 视频模式关了：完全不跑
-    const video = document.getElementById('cam-preview');
-    if (!video) return;
-    if (lastVideoId !== video.id) {
-      lastVideoId = video.id;
-      if (DEBUG_MODE) addSystem(`📷 新视频元素 readyState=${video.readyState} ${video.videoWidth}x${video.videoHeight}`);
-    }
-    if (video.readyState < 2) {
-      if (lastReadyState !== video.readyState) {
-        lastReadyState = video.readyState;
-        if (DEBUG_MODE) addSystem(`⏳ 摄像头就绪中（readyState=${video.readyState}）`);
-      }
-      return;
-    }
-    if (video.videoWidth === 0 || video.videoHeight === 0) {
-      // readyState OK 但没实际像素流（静默失败，DEBUG 才显示）
-      if (DEBUG_MODE && !firstError) {
-        firstError = Date.now();
-        addSystem('⚠️ 视频无像素流（videoWidth=0）');
-      }
-      return;
-    }
-    lastReadyState = video.readyState;
-    firstError = null;
-    try {
-      ctx.drawImage(video, 0, 0, 320, 240);
-      const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.5));
-      if (!blob) {
-        console.warn('[frame] toBlob null');
-        return;
-      }
-      if (blob.size < 100) {
-        console.warn('[frame] blob too small:', blob.size);
-        return;
-      }
-      frameCount++;
-      const form = new FormData();
-      form.append('frame', blob);
-      try {
-        const resp = await fetch('/api/frame', { method: 'POST', body: form });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        if (data.warning) {
-          showWarning(data.warning);
-          addMsg('agent', data.warning);
-          speak(data.warning);
-        }
-      } catch (e) {
-        // 静默失败，不打扰孩子
-      }
-    } catch (e) {
-      console.error('[frame] error:', e);
-    }
-  }, 500);
-}
-
-async function toggleVideo() {
-  const btn = document.getElementById('video-toggle');
-  if (videoMode === 'on') {
-    videoMode = 'off';
-    btn.textContent = '📹 关';
-    btn.title = '视频模式已关（点此打开）';
-    // 隐藏摄像头浮窗
-    const cam = document.getElementById('cam-preview');
-    if (cam) cam.style.display = 'none';
-    // 通知 server 不再记 warning
-    try { await fetch('/api/video-mode', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ enabled: false }) }); } catch {}
-  } else {
-    videoMode = 'on';
-    btn.textContent = '📷 开';
-    btn.title = '开关视频模式';
-    const cam = document.getElementById('cam-preview');
-    if (cam) cam.style.display = '';
-    try { await fetch('/api/video-mode', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ enabled: true }) }); } catch {}
-  }
-}
-
-async function send() {
-  const text = inputEl.value.trim();
-  if (!text) return;
-  inputEl.value = '';
-  addMsg('child', text);
-
-  // v0.6.4: iOS Safari — 在 user gesture 的同步窗口里先 speak 一个静音
-  // utterance，把 speech engine "暖"起来。await fetch 之后 speak(reply)
-  // 才不会因为 gesture context 过期而静默 fail。
-  // 之前的版本只在第一次 send() 解锁，后续 send() 都不暖，chat reply 就哑。
-  // (v0.6.3 的 2.5s 延迟解决的是 camera 抢音频的问题，跟这个独立。)
-  if ('speechSynthesis' in window) {
-    try {
-      const warmup = new SpeechSynthesisUtterance(' ');
-      warmup.volume = 0;
-      speechSynthesis.speak(warmup);
-    } catch {}
-  }
-
-  // done 状态下，孩子说"我要写作业"自动切回 writing 模式
-  if (state === 'done' && /我要(写|做)作业|继续写|再写|接着写|想写作业|还要写/i.test(text)) {
-    await startSession();
-    return;
-  }
-
-  try {
-    const r = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text, state })
-    });
-    if (!r.ok) {
-      const errText = await r.text();
-      addSystem('chat HTTP ' + r.status + ': ' + errText.slice(0, 200));
-      addMsg('agent', '网络不好，再说一次？');
-      return;
-    }
-    const { reply } = await r.json();
-    addMsg('agent', reply);
-    speak(reply);
-  } catch (e) {
-    addSystem('chat 失败: ' + e.message);
-    addMsg('agent', '网络不好，再说一次？');
-  }
-}
-
-let micTimeout = null;
-let mediaRecorder = null;
-let audioChunks = [];
-let recordingStartTs = 0;
-
-function stopMic() {
-  if (recognition) {
-    try { recognition.stop(); } catch (e) { /* ignore */ }
-    recognition = null;
-  }
-  isListening = false;
-  const btn = document.getElementById('mic-btn');
-  if (btn) btn.textContent = '🎤 按住说话';
-}
-
-let currentFacingMode = 'environment';  // 'user' 前置 | 'environment' 后置（默认后置，孩子用）
-let currentStream = null;
-
-async function flipCamera() {
-  const newMode = currentFacingMode === 'user' ? 'environment' : 'user';
-
-  // 1. 彻底释放老 stream
-  if (currentStream) {
-    currentStream.getTracks().forEach(t => t.stop());
-    currentStream = null;
-  }
-
-  // 2. 删掉老 video 元素（Android Chrome 上同一元素切换 facingMode 经常失败）
-  const oldVideo = document.getElementById('cam-preview');
-  if (oldVideo && oldVideo.parentNode) {
-    oldVideo.srcObject = null;
-    oldVideo.parentNode.removeChild(oldVideo);
-  }
-
-  // 3. 创建新 video 元素
-  const newVideo = document.createElement('video');
-  newVideo.id = 'cam-preview';
-  newVideo.autoplay = true;
-  newVideo.muted = true;
-  newVideo.playsInline = true;
-  if (newMode === 'user') newVideo.classList.add('mirrored');
-  document.body.appendChild(newVideo);
-
-  // 4. 等 500ms 让硬件释放
-  await new Promise(r => setTimeout(r, 500));
-
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 320 }, height: { ideal: 240 }, facingMode: newMode },
-    });
-    currentStream = stream;
-    videoStream = stream; // 同步
-    newVideo.srcObject = stream;
-    await newVideo.play();
-    currentFacingMode = newMode;
-  } catch (e) {
-    addSystem('切换失败：' + e.message + '（刷新页面重试）');
-  }
-}
-
-async function startRecording(e) {
-  if (e) e.preventDefault();
-  if (isListening) return;
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    addSystem('浏览器不支持录音');
-    return;
-  }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 },
-    });
-    mediaRecorder = new MediaRecorder(stream, {
-      mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm',
-    });
-    audioChunks = [];
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) audioChunks.push(e.data);
-    };
-    mediaRecorder.onstop = async () => {
-      stream.getTracks().forEach(t => t.stop());
-      const duration = Date.now() - recordingStartTs;
-      addSystem(`🎤 录音 ${(duration/1000).toFixed(1)} 秒，发送中...`);
-      const blob = new Blob(audioChunks, { type: 'audio/webm' });
-      const form = new FormData();
-      form.append('audio', blob, 'voice.webm');
-      try {
-        const r = await fetch('/api/voice', { method: 'POST', body: form });
-        const data = await r.json();
-        if (data.text) {
-          addSystem(`识别结果：${data.text}`);
-          inputEl.value = data.text;
-          send();
-        } else if (data.error) {
-          addSystem('识别失败：' + data.error);
-        }
-      } catch (err) {
-        addSystem('发送失败：' + err.message);
-      }
-    };
-    mediaRecorder.start();
-    recordingStartTs = Date.now();
-    isListening = true;
-    const btn = document.getElementById('mic-btn');
-    if (btn) btn.textContent = '🛑 松开发送';
-    addSystem('🎤 录音中...');
-    // 30 秒自动停
-    micTimeout = setTimeout(() => {
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-      }
-    }, 30000);
-  } catch (e) {
-    addSystem('启动录音失败：' + e.name + ' - ' + e.message);
-    if (e.name === 'NotAllowedError') {
-      addSystem('需要麦克风权限，点地址栏小锁重新允许');
-    }
-  }
-}
-
-function stopRecording(e) {
-  if (e) e.preventDefault();
-  if (micTimeout) {
-    clearTimeout(micTimeout);
-    micTimeout = null;
-  }
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-  }
-  stopMic();
-}
-
-async function enterTextMode() {
-  document.getElementById('no-device-overlay').style.display = 'none';
-  statusEl.textContent = '文字模式（无摄像头/麦克风）';
-  // 仍然起 session
-  try {
-    const r = await fetch('/api/session/start', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ childId: 'default', subject: '作业' })
-    });
-    const data = await r.json();
-    sessionId = data.sessionId;
-    addMsg('agent', '你好呀！我是小书童，文字模式陪你写作业~');
-  } catch (e) {
-    if (DEBUG_MODE) addSystem('文字模式启动失败: ' + e.message);
-  }
-}
-
-async function endSession() {
-  if (state !== 'writing') {
-    return;
-  }
-  try {
-    const r = await fetch('/api/session/end', { method: 'POST' });
-    const data = await r.json();
-    addMsg('agent', '写完啦！');
-    speak('写完啦');
-    // 克制的小结：时长 + 专注分 + 警告次数（不评价好坏）
-    if (data.durationMin) {
-      const parts = [`今天写了 ${data.durationMin} 分钟`];
-      if (data.avgFocusScore != null) parts.push(`专注 ${data.avgFocusScore} 分`);
-      if (data.postureWarningCount > 0) parts.push(`${data.postureWarningCount} 次坐姿提醒`);
-      addSystem(parts.join(' · '));
-    }
-    if (frameLoop) { clearInterval(frameLoop); frameLoop = null; }
-    if (videoStream) {
-      videoStream.getTracks().forEach(t => t.stop());
-      videoStream = null;
-    }
-    state = 'done';
-    statusEl.textContent = '写完啦，可以跟小书童聊会儿~';
-  } catch (e) {
-    if (DEBUG_MODE) addSystem('结束失败: ' + e.message);
-  }
-}
-
-async function startSession() {
-  if (state === 'writing') return;
-  try {
-    const r = await fetch('/api/session/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-    const data = await r.json();
-    sessionId = data.sessionId;
-    state = 'writing';
-    if (!frameLoop && videoStream) {
-      // 已经在 idle/done 时保留了 stream？不应该，endSession 已停 stream
-      // 这里重新启动摄像头
-    }
-    // 重新启动摄像头
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      try {
-        videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, facingMode: currentFacing } });
-        const v = document.getElementById('cam-preview');
-        v.srcObject = videoStream;
-        await v.play();
-        startFrameLoop();
-      } catch (e) {
-        // 摄像头开不动（拒绝 / 设备占着），不打扰，进入纯聊天模式
-      }
-    }
-    addMsg('agent', '好嘞，继续写！');
-    speak('好嘞继续写');
-    statusEl.textContent = '写作业中...';
-  } catch (e) {
-    if (DEBUG_MODE) addSystem('启动失败: ' + e.message);
-  }
-}
-
-inputEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') send();
-});
-
-// ============== v0.5: 拍题按钮 ==============
-// v0.5a thin slice: tap 📷 → grab a still from the live cam-preview → POST
-// to /api/mistake-photo → drop the vision reasoning into the chat as an
-// agent reply. No preview, no retake (v0.5b will add a proper modal).
-let photoInFlight = false;
-
-// 拍照完成的视觉反馈：聊天区顶部闪一下 "📷 拍好了" 标记，2 秒淡出
-function showPhotoFlash(text = '📷 拍好了') {
-  const flash = document.createElement('div');
-  flash.className = 'photo-flash';
-  flash.textContent = text;
-  document.body.appendChild(flash);
-  // 强制 reflow 后加 show class 触发过渡
-  void flash.offsetWidth;
-  flash.classList.add('show');
-  setTimeout(() => {
-    flash.classList.remove('show');
-    setTimeout(() => flash.remove(), 400);
-  }, 1800);
-}
-
-function setPhotoBtnState(state) {
-  // state: 'idle' | 'taking' | 'disabled'
-  const btn = document.getElementById('photo-btn');
-  if (!btn) return;
-  if (state === 'taking') {
-    btn.disabled = true;
-    btn.textContent = '拍照中…';
-    btn.style.opacity = '0.6';
-  } else {
-    btn.disabled = false;
-    btn.textContent = '📷';
-    btn.style.opacity = '';
-  }
-}
-
-async function captureMistake() {
-  if (photoInFlight) return;
-  if (!sessionId) {
-    addMsg('agent', '先开始写作业会话再拍题哦～', 'learning', false);
-    return;
-  }
-  const video = document.getElementById('cam-preview');
-  if (!video || !video.videoWidth) {
-    addMsg('agent', '摄像头还没准备好，先等我看到画面再点 📷', 'learning', false);
-    return;
-  }
-  photoInFlight = true;
-  setPhotoBtnState('taking');
-  try {
-    // Snap a still from the live preview into a JPEG blob
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise((resolve, reject) =>
-      canvas.toBlob(b => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/jpeg', 0.85)
-    );
-    const fd = new FormData();
-    fd.append('photo', blob, 'mistake.jpg');
-    const res = await fetch('/api/mistake-photo', { method: 'POST', body: fd });
-    const data = await res.json();
-    if (!res.ok) {
-      // 拍照失败：友好提示 + 按钮恢复
-      const errMsg = data.error ? data.error.slice(0, 80) : `HTTP ${res.status}`;
-      addMsg('agent', '我没看清，再拍一张试试？', 'learning', false);
-      if (DEBUG_MODE) addSystem('photo failed: ' + errMsg);
-      return;
-    }
-    // Show what vision read + the reasoning
-    const problemLine = data.problemText ? `我看到：\n${data.problemText}` : '我没看清题目';
-    const reasoningLine = data.reasoning ? `\n\n我的思路：\n${data.reasoning}` : '';
-    addMsg('agent', problemLine + reasoningLine, 'learning', false);
-    showPhotoFlash('📷 拍好了');
-  } catch (e) {
-    addMsg('agent', '拍照没成功，再试一次？', 'learning', false);
-    if (DEBUG_MODE) addSystem('photo err: ' + e.message);
-  } finally {
-    photoInFlight = false;
-    setPhotoBtnState('idle');
-    // 拍照完自动 focus 到输入框，孩子可以继续问
-    setTimeout(() => inputEl && inputEl.focus(), 300);
-  }
 }
 
 start();
