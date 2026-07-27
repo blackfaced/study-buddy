@@ -21,8 +21,8 @@
 
 | # | 改动 | 估时 | issue |
 |---|------|:---:|------|
-| OPT-S1 🔥 | 称谓修复（叫"小宝"不用"小朋友"） | 1-2h | TBD |
-| OPT-S2 🔥 | 情绪识别 + 通知家长 | 3-4h | TBD |
+| OPT-S1 🔥 | 称谓修复（叫"小宝"不用"小朋友"） | 1-2h | [#29](https://github.com/blackfaced/study-buddy/issues/29) |
+| OPT-S2 🔥 | 情绪识别 + 通知家长 | 3-4h | [#28](https://github.com/blackfaced/study-buddy/issues/28) |
 | OPT-S3 🔥 | 坐姿提醒改视觉/音效 | 2-3h | TBD |
 | OPT-S4 ⚠️ | offtopic 拉回话术变化 | 1h | TBD |
 | OPT-S5 ⚠️ | 数学题难度自适应 | 2-3h | TBD |
