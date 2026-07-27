@@ -136,6 +136,7 @@
   .result-rate-label { font-size: var(--text-caption); color: var(--text-secondary); margin-bottom: var(--space-5); }
   .stat-card h3 { font-size: var(--text-caption); color: var(--text-secondary); margin-bottom: var(--space-2); font-weight: 600; }
   .stat-row { display: flex; justify-content: space-between; font-size: var(--text-body); padding: var(--space-1) 0; }
+  .result-actions { display: flex; gap: var(--space-2); justify-content: center; align-items: center; margin-top: var(--space-3); flex-wrap: wrap; }
   .stat-row b { color: var(--accent); font-variant-numeric: tabular-nums; }
 
   /* ===== Mistakes book + Parent dashboard (lite) ===== */
@@ -158,6 +159,16 @@
 
   <!-- ============== 首页 ============== -->
   <div class="page active" id="page-home">
+    <!-- v0.6.7: 统一 topbar (左: 🏠 回到门户, 右: 错题本 + 家长看板 快捷入口) -->
+    <div class="app-topbar">
+      <a class="back-to-portal" href="/" title="回门户" aria-label="回门户">🏠</a>
+      <div class="app-title">🍭 糖果口算岛</div>
+      <div class="quiz-actions">
+        <a class="btn-pill" id="btn-mistakes-link" href="#mistakes" title="错题本">📚</a>
+        <a class="btn-pill" id="btn-parent-link" href="#parent" title="家长看板">⚙️</a>
+      </div>
+    </div>
+
     <div class="home">
       <div class="home-title">🍭 糖果口算岛</div>
       <div class="home-sub">60 秒能刷多少道？</div>
@@ -173,12 +184,6 @@
         <span>正确率 <b id="home-today-rate">—</b></span>
         <span>连玩 <b id="home-today-sessions">0</b> 次</span>
       </div>
-
-      <div class="nav-row">
-        <button class="btn-pill" id="btn-mistakes">📚 错题本</button>
-        <button class="btn-pill" id="btn-parent">⚙️ 家长看板</button>
-        <a class="btn-pill" href="/">🏠 回门户</a>
-      </div>
     </div>
   </div>
 
@@ -189,7 +194,7 @@
       <div class="quiz-timer" id="quiz-timer">60</div>
       <div class="quiz-actions">
         <button class="btn-pill" id="btn-quit" title="结束本局看战报">结束</button>
-        <a class="btn-pill btn-portal" href="/" title="回门户" aria-label="回门户">🏠</a>
+        <a class="back-to-portal" href="/" title="回门户" aria-label="回门户">🏠</a>
       </div>
     </div>
     <div class="question-card">
@@ -228,10 +233,10 @@
         <div class="stat-row"><span>已玩次数</span><b id="today-sessions">0</b></div>
       </div>
 
-      <div>
+      <div class="result-actions">
         <button class="btn-primary" id="btn-again">再来一次 🔁</button>
         <button class="btn-secondary" id="btn-home">回主页</button>
-        <a class="btn-secondary" href="/">🏠 回门户</a>
+        <a class="back-to-portal" href="/" title="回门户" aria-label="回门户">🏠</a>
       </div>
     </div>
   </div>
@@ -424,8 +429,8 @@ async function loadHomeStats() {
 
 document.getElementById("btn-start").onclick = startQuiz;
 document.getElementById("btn-home").onclick = () => showPage("home");
-document.getElementById("btn-mistakes").onclick = () => showPage("mistakes");
-document.getElementById("btn-parent").onclick = () => showPage("parent");
+document.getElementById("btn-mistakes-link").onclick = (e) => { e.preventDefault(); showPage("mistakes"); };
+document.getElementById("btn-parent-link").onclick = (e) => { e.preventDefault(); showPage("parent"); };
 document.getElementById("btn-mistakes-back").onclick = () => showPage("home");
 document.getElementById("btn-parent-back").onclick = () => showPage("home");
 
