@@ -79,6 +79,34 @@
     .perm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
     .perm-overlay .card { background: white; padding: 24px; border-radius: 16px; max-width: 360px; text-align: center; }
     .perm-overlay button { margin-top: 16px; padding: 12px 32px; font-size: 16px; background: #ffb84d; color: white; border: none; border-radius: 24px; font-weight: bold; }
+
+    /* v0.7: PIN gate (issue #55) — full-screen overlay, chat UI is
+     * hidden until PIN is verified. Z-index higher than perm-overlay
+     * so a permission prompt can't accidentally dismiss the gate. */
+    #pin-overlay { z-index: 200; }
+    #pin-overlay .card { max-width: 320px; }
+    #pin-input {
+      margin-top: 12px;
+      width: 100%;
+      padding: 14px 16px;
+      font-size: 24px;
+      letter-spacing: 8px;
+      text-align: center;
+      border: 2px solid #ffb84d;
+      border-radius: 12px;
+      outline: none;
+      font-family: monospace;
+      -webkit-text-security: disc;  /* hide digits from over-the-shoulder */
+    }
+    #pin-input.shake { animation: shake 0.4s; border-color: #ff6b6b; }
+    #pin-error {
+      color: #d32f2f;
+      font-size: 14px;
+      min-height: 18px;
+      margin-top: 8px;
+    }
+    #pin-overlay .hint { font-size: 12px; color: #888; margin-top: 8px; }
+    .app.hidden { display: none; }
     canvas { display: none; }
     #cam-preview {
       position: fixed; top: 16px; right: 16px;
@@ -93,7 +121,32 @@
   </style>
 </head>
 <body>
-<div class="app">
+<!-- v0.7: PIN gate (issue #55) — full-screen, sits on top of everything.
+     Stays visible until the parent enters the 4-digit BUDDY_PIN. -->
+<div class="perm-overlay" id="pin-overlay">
+  <div class="card">
+    <h2>🔒 大人来</h2>
+    <p style="font-size:14px;color:#666;">这个聊天要大人先开个门</p>
+    <input
+      type="password"
+      id="pin-input"
+      inputmode="numeric"
+      pattern="[0-9]{4}"
+      maxlength="4"
+      autocomplete="off"
+      autocorrect="off"
+      autocapitalize="off"
+      spellcheck="false"
+      placeholder="• • • •"
+      aria-label="4 位密码"
+    />
+    <div id="pin-error" role="alert"></div>
+    <button id="pin-submit" type="button">开门</button>
+    <p class="hint">不知道密码？问问爸爸妈妈</p>
+  </div>
+</div>
+
+<div class="app hidden">
   <div class="header">
     <a class="back-to-portal" href="/" title="回门户" aria-label="回门户">🏠</a>
     <div class="avatar-row">
@@ -209,6 +262,91 @@ inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') window.Buddy.chat.send();
 });
 
+// ===== v0.7: PIN gate (issue #55) =====
+// 全屏 modal 输对前挡着 chat UI；输对后调 start()。状态完全在 tab
+// 内存里，刷新或关 tab 都要重新输。
+const pinOverlay = document.getElementById('pin-overlay');
+const pinInput = document.getElementById('pin-input');
+const pinSubmit = document.getElementById('pin-submit');
+const pinError = document.getElementById('pin-error');
+
+let pinUnlocked = false;
+let pinSubmitting = false;
+
+function unlockBuddyUI() {
+  pinUnlocked = true;
+  pinOverlay.style.display = 'none';
+  document.querySelector('.app').classList.remove('hidden');
+}
+
+function lockBuddyUI() {
+  pinUnlocked = false;
+  pinOverlay.style.display = 'flex';
+  document.querySelector('.app').classList.add('hidden');
+  setTimeout(() => pinInput.focus(), 0);  // iOS Safari 需要异步 focus
+}
+
+async function submitPin() {
+  if (pinSubmitting || pinUnlocked) return;
+  const pin = pinInput.value;
+  if (!/^\d{4}$/.test(pin)) {
+    // 用户按了"开门"但没输够 4 位 — 不调 server，提示一下
+    pinError.textContent = '请输 4 位数字';
+    pinInput.classList.add('shake');
+    setTimeout(() => pinInput.classList.remove('shake'), 400);
+    return;
+  }
+  pinSubmitting = true;
+  pinSubmit.disabled = true;
+  pinError.textContent = '';
+  try {
+    const r = await fetch('/api/buddy/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin }),
+    });
+    if (r.status === 200) {
+      unlockBuddyUI();
+      // 解锁后启动 chat 流程
+      start();
+    } else if (r.status === 401) {
+      pinError.textContent = '密码不对，再试一次';
+      pinInput.value = '';
+      pinInput.classList.add('shake');
+      setTimeout(() => pinInput.classList.remove('shake'), 400);
+      pinInput.focus();
+    } else if (r.status === 429) {
+      const data = await r.json().catch(() => ({}));
+      const sec = data.retryAfterSec || 300;
+      const min = Math.ceil(sec / 60);
+      pinError.textContent = `太多次啦，等 ${min} 分钟再试`;
+      pinInput.disabled = true;
+      pinSubmit.disabled = true;
+    } else {
+      pinError.textContent = '出错了，请重试';
+    }
+  } catch (e) {
+    pinError.textContent = '连不上服务器';
+  } finally {
+    pinSubmitting = false;
+    if (pinInput.disabled === false) pinSubmit.disabled = false;
+  }
+}
+
+pinSubmit.addEventListener('click', submitPin);
+// Enter 自动提交（4 位都输完也可自动 submit）
+pinInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') submitPin();
+});
+// iOS Safari: 输完 4 位自动 focus "开门"按钮，方便用外接键盘
+pinInput.addEventListener('input', () => {
+  pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 4);
+  if (pinInput.value.length === 4 && !pinSubmitting) {
+    // 给个 100ms 延迟，让最后一位的视觉效果先出来
+    setTimeout(submitPin, 100);
+  }
+});
+
 async function start() {
   // 1. 先连 server（用当前 URL 的 origin）
   try {
@@ -233,7 +371,9 @@ async function start() {
   document.getElementById('perm-overlay').style.display = 'flex';
 }
 
-start();
+// 注意：不直接调 start()，等 PIN 解锁后再调（见 submitPin 200 分支）
+// 但如果用户刷页面、modal 又出现，自动 focus 输入框
+lockBuddyUI();
 </script>
 </body>
 </html>
