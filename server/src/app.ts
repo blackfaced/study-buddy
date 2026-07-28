@@ -18,8 +18,10 @@ import { randomUUID } from "node:crypto";
 import { analyzeMistakeImage, type VisionClient } from "./vision.js";
 import { buildSystemPrompt, buildChatPrompt } from "./llm-prompt.js";
 import { detectNameChange } from "./child-name.js";
+import { parseEmotionTag, detectLoopFromTexts, NOTIFIABLE_EMOTIONS } from "./chat-signal.js";
 import { requestLogger, type Logger, createLogger, stdoutSink } from "./logger.js";
 import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
+import { appendOutbox } from "./outbox.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -407,10 +409,26 @@ export function createApp(opts: AppOptions): express.Express {
     }
 
     const systemPrompt = state === "done" ? buildChatPrompt(childName) : buildSystemPrompt(childName);
-    const messages = [
+
+    // W1 hotfix #28 + #46 #4：循环检测 → 让 LLM 知道该收手了
+    // 拉最近 5 轮 child 消息（按时间正序），检测是否僵持同一话题
+    const recentChildRows = db.prepare(
+      "SELECT content FROM chat_turns WHERE session_id = ? AND role = 'child' ORDER BY id DESC LIMIT 5"
+    ).all(session.id) as Array<{ content: string }>;
+    const recentChildTexts = recentChildRows.map(r => r.content).reverse();  // 反转成正序（早→晚）
+    const isLoop = detectLoopFromTexts(recentChildTexts);
+
+    const messages: any[] = [
       { role: "system", content: systemPrompt },
-      { role: "user", content: text },
     ];
+    if (isLoop) {
+      // 注入僵持升级提示 — LLM 看到后应该说"让爸爸妈妈看看"
+      messages.push({
+        role: "system",
+        content: `[SYSTEM 提示] ${childName} 已经连续 ${recentChildTexts.length} 轮在同一个话题上反复。**不要再尝试回答这个问题**，直接说"让爸爸妈妈看看好不好？"。`,
+      });
+    }
+    messages.push({ role: "user", content: text });
 
     let reply: string;
     try {
@@ -419,8 +437,12 @@ export function createApp(opts: AppOptions): express.Express {
       reply = "嗯... 我想一下，我们先看看这道题好不好？";
     }
 
+    // W1 hotfix #28：解析 LLM 回复末尾的情绪标签
+    const { cleanReply, emotion } = parseEmotionTag(reply);
+    const displayReply = cleanReply || reply;  // 兜底用原 reply
+
     const topic = classifyTopic(text);
-    const replyTopic = classifyTopic(reply);
+    const replyTopic = classifyTopic(displayReply);
     const redirected = topic === "offtopic" && replyTopic !== "offtopic" ? 1 : 0;
     const chatState = state === "done" ? "freechat" : "writing";
 
@@ -430,9 +452,57 @@ export function createApp(opts: AppOptions): express.Express {
 
     db.prepare(
       "INSERT INTO chat_turns (session_id, role, content, topic, redirected, state) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(session.id, "agent", reply, replyTopic, 0, chatState);
+    ).run(session.id, "agent", displayReply, replyTopic, 0, chatState);
 
-    res.json({ reply, topic, replyTopic, redirected: !!redirected });
+    // W1 hotfix #28 + #46 #5：写 outbox 通知家长
+    // 触发条件：情绪重要（sad/angry/fearful/anxious）或僵持升级
+    const notifyReasons: Array<{ reason: string; summary: string }> = [];
+    if (NOTIFIABLE_EMOTIONS.has(emotion)) {
+      notifyReasons.push({
+        reason: 'emotion',
+        summary: `${childName} 情绪是"${emotion}"，刚说："${text.slice(0, 80)}"，小书童回复："${displayReply.slice(0, 80)}"`,
+      });
+    }
+    if (isLoop) {
+      notifyReasons.push({
+        reason: 'loop',
+        summary: `${childName} 在同一话题僵持了 ${recentChildTexts.length} 轮，建议家长介入`,
+      });
+    }
+    if (notifyReasons.length > 0) {
+      try {
+        const ts = Date.now();
+        const id = `e_${crypto.randomUUID()}`;
+        await appendOutbox(outboxPath, [{
+          id,
+          ts,
+          kind: 'parent_notify',
+          entityId: `child:${session.child_id}`,
+          content: notifyReasons.map(r => `[${r.reason}] ${r.summary}`).join('\n'),
+          payload: {
+            sessionId: session.id,
+            childId: session.child_id,
+            childName,
+            reasons: notifyReasons,
+            lastChildText: text,
+            lastAgentText: displayReply,
+            ts,
+          },
+        }]);
+        logger.info("parent notify queued", { id, childId: session.child_id, reasons: notifyReasons.map(r => r.reason) });
+      } catch (e: any) {
+        logger.error("failed to queue parent notify", { error: e?.message });
+      }
+    }
+
+    res.json({
+      reply: displayReply,
+      topic,
+      replyTopic,
+      redirected: !!redirected,
+      emotion,
+      isLoop,
+    });
   });
 
   // ============== 语音（v0.1 占位） ==============

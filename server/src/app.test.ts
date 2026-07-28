@@ -1,21 +1,29 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import Database from "better-sqlite3";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
 
 let db: Database.Database;
 let app: ReturnType<typeof createApp>;
+let tmpDir: string;
+let outboxPath: string;
 
 beforeAll(() => {
   db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   migrateSchema(db);
-  app = createApp({ db, httpsPort: 3000 });
+  tmpDir = mkdtempSync(join(tmpdir(), "study-buddy-test-"));
+  outboxPath = join(tmpDir, "outbox.jsonl");
+  app = createApp({ db, httpsPort: 3000, outboxPath });
 });
 
 afterAll(() => {
   db.close();
+  if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe("GET /api/health", () => {
@@ -205,6 +213,106 @@ describe("POST /api/chat auto-detects name change (W1 hotfix #2)", () => {
 
     const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
     expect(child.name).toBe("小宝");
+  });
+});
+
+// W1 hotfix（issue #28 + #46 #4 + #46 #5）：
+// - emotion 标签从 LLM 回复解析，命中重要情绪时写 outbox
+// - loop 检测：最近 5 轮 child 短回复 / 对不循环 → 引导家长介入
+// - 重要事件写 outbox（kind: 'parent_notify'）
+describe("POST /api/chat (W1 hotfix: loop detection + parent notify outbox)", () => {
+  beforeEach(() => {
+    // 清 outbox + child 名字
+    if (outboxPath) {
+      try { rmSync(outboxPath, { force: true }); } catch {}
+    }
+    db.exec("UPDATE sessions SET ended_at = strftime('%s','now')*1000 WHERE ended_at IS NULL");
+    db.prepare("UPDATE children SET name = ? WHERE id = 'default'").run("小宝");
+  });
+
+  it("5 个短 yes/no child 消息 → 第 6 轮 isLoop = true + 写 outbox", async () => {
+    // 预填 5 轮短 yes/no（不调 LLM，直接写 DB）
+    const session = await request(app).post("/api/session/start").send({});
+    const sessionId = session.body.sessionId;
+    const insertTurn = db.prepare(
+      "INSERT INTO chat_turns (session_id, role, content, topic, redirected, state) VALUES (?, ?, ?, ?, ?, ?)"
+    );
+    for (const t of ["是", "不对", "是", "才不是", "不是"]) {
+      insertTurn.run(sessionId, "child", t, "learning", 0, "writing");
+    }
+
+    // 第 6 轮发新消息 — 应该触发 loop detection
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "什么啊", state: "writing" });
+    expect(res.status).toBe(200);
+    expect(res.body.isLoop).toBe(true);
+
+    // outbox 应该有 parent_notify 记录
+    const outboxContent = readFileSync(outboxPath, "utf8");
+    const lines = outboxContent.trim().split("\n").filter(Boolean);
+    expect(lines.length).toBeGreaterThanOrEqual(1);
+    const entry = JSON.parse(lines[lines.length - 1]);
+    expect(entry.kind).toBe("parent_notify");
+    expect(entry.entityId).toBe("child:default");
+    expect(entry.content).toContain("loop");
+    expect(entry.payload.reasons).toBeDefined();
+    expect(entry.payload.reasons.length).toBeGreaterThan(0);
+    expect(entry.payload.reasons[0].reason).toBe("loop");
+  });
+
+  it("5 个正常长消息 → 第 6 轮 isLoop = false + 不写 outbox", async () => {
+    const session = await request(app).post("/api/session/start").send({});
+    const sessionId = session.body.sessionId;
+    const insertTurn = db.prepare(
+      "INSERT INTO chat_turns (session_id, role, content, topic, redirected, state) VALUES (?, ?, ?, ?, ?, ?)"
+    );
+    for (const t of [
+      "今天数学写完了",
+      "接下来写语文",
+      "这首诗有点难",
+      "拼音我会读",
+      "我想看一会儿书",
+    ]) {
+      insertTurn.run(sessionId, "child", t, "learning", 0, "writing");
+    }
+
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "我休息一下", state: "writing" });
+    expect(res.status).toBe(200);
+    expect(res.body.isLoop).toBe(false);
+
+    // outbox 应该是空的（happy/neutral 情绪不触发，loop 不触发）
+    try {
+      const outboxContent = readFileSync(outboxPath, "utf8");
+      const lines = outboxContent.trim().split("\n").filter(Boolean);
+      expect(lines.length).toBe(0);
+    } catch (e: any) {
+      // 文件不存在 = 没有写 outbox = OK
+      expect(e?.code).toBe("ENOENT");
+    }
+  });
+
+  it("LLM 回复末尾的情绪标签被剥离（reply 不含 ::emotion::）", async () => {
+    // 没有 API key 时走 fallback（不含 emotion 标签）— emotion 应是 neutral
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "我今天不太开心", state: "writing" });
+    expect(res.status).toBe(200);
+    expect(res.body.emotion).toBe("neutral");  // fallback 没标签
+    expect(res.body.reply).not.toContain("::emotion::");
+  });
+
+  it("response.json 包含 emotion 字段（默认 neutral）", async () => {
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "你好", state: "writing" });
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("emotion");
+    expect(res.body).toHaveProperty("isLoop");
+    expect(typeof res.body.emotion).toBe("string");
+    expect(typeof res.body.isLoop).toBe("boolean");
   });
 });
 
