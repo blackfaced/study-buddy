@@ -17,6 +17,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { analyzeMistakeImage, type VisionClient } from "./vision.js";
 import { buildSystemPrompt, buildChatPrompt } from "./llm-prompt.js";
+import { detectNameChange } from "./child-name.js";
 import { requestLogger, type Logger, createLogger, stdoutSink } from "./logger.js";
 import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
 
@@ -134,6 +135,22 @@ export function createApp(opts: AppOptions): express.Express {
       // Bug 1 fix: was `${PORT}` (undefined) — now uses httpsPort.
       serverUrl: `${req.protocol}://${req.hostname}:${httpsPort}`,
     });
+  });
+
+  // ============== 改名（手动）==============
+  // W1 hotfix #2：父母或 buddy 页面也可以直接改名（不依赖 chat 自动检测）
+  // Body: { childId?: string, name: string }
+  app.post("/api/child/rename", (req: Request, res: Response) => {
+    const childId = (req.body?.childId as string) || "default";
+    const name = (req.body?.name as string)?.trim();
+    if (!name || name.length < 1 || name.length > 10) {
+      return res.status(400).json({ error: "name must be 1-10 chars" });
+    }
+    const child = db.prepare("SELECT * FROM children WHERE id = ?").get(childId) as any;
+    if (!child) return res.status(404).json({ error: "child not found" });
+    db.prepare("UPDATE children SET name = ? WHERE id = ?").run(name, childId);
+    logger.info("child name changed via /api/child/rename", { childId, newName: name });
+    res.json({ childId, name });
   });
 
   // ============== 当前活跃 session ==============
@@ -378,7 +395,16 @@ export function createApp(opts: AppOptions): express.Express {
 
     // Load child for the active session (v0.7: 称谓规则用 child.name 注入 prompt)
     const child = db.prepare("SELECT * FROM children WHERE id = ?").get(session.child_id) as any;
-    const childName = child?.name || "小宝";
+    let childName = child?.name || "小宝";
+
+    // W1 hotfix #2（issue #46）：孩子说"我叫X" / "叫我X" → 自动改名字
+    // 7/28 糖糖说"我叫糖糖" 30 次都记不住，这个 fix 让 LLM 之外也兜底
+    const nameChange = detectNameChange(text);
+    if (nameChange && nameChange !== childName) {
+      db.prepare("UPDATE children SET name = ? WHERE id = ?").run(nameChange, session.child_id);
+      childName = nameChange;
+      logger.info("child name changed", { childId: session.child_id, newName: nameChange });
+    }
 
     const systemPrompt = state === "done" ? buildChatPrompt(childName) : buildSystemPrompt(childName);
     const messages = [
