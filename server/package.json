@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "test": "vitest run",
+    "test": "vitest run && node --test ../web/games/candy-math-island/pick-gen.test.js",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },

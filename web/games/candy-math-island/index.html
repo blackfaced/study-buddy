@@ -276,73 +276,140 @@ const API_BASE = "";      // 同源
 function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 function shuffle(arr) { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
-// ============== 题目生成器 (从老版本迁入，按等级混合) ==============
-// Level 1: 20 以内不进位/不退位
-function genL1() {
+// ============== 题目生成器 (按 errorType + level 拆细粒度) ==============
+// v0.7 (#16): each generator declares its errorType so pickGenWithBias
+// can bias toward the kid's recent weak topics. We replaced the old
+// 3-generator L1/L2/L3 model with 7 sub-generators grouped by
+// (errorType, level). The adaptive ladder (state.level) is still
+// honored — pickGen filters to that level's items first, then biases.
+
+// L1: 20 以内不进位/不退位
+function genAddCompute() {  // 3+5, 个位相加 < 10
   const a = randInt(1, 9), b = randInt(1, 9);
-  const isAdd = Math.random() < 0.5;
-  return { display: isAdd ? `${a} + ${b} = ?` : `${Math.max(a,b)} - ${Math.min(a,b)} = ?`, answer: isAdd ? a + b : Math.max(a, b) - Math.min(a, b) };
+  return { display: `${a} + ${b} = ?`, answer: a + b, errorType: "compute", level: 1 };
 }
-// Level 2: 100 以内进位/退位（口算重点）
-function genL2() {
-  const a = randInt(10, 89), b = randInt(1, 99 - a);
-  const isAdd = Math.random() < 0.5;
-  if (isAdd) return { display: `${a} + ${b} = ?`, answer: a + b };
-  // 退位: a > b 且 a - b 仍 >= 10
-  const big = randInt(20, 99), small = randInt(1, big - 10);
-  return { display: `${big} - ${small} = ?`, answer: big - small };
+function genSubCompute() {  // 15-7, 不退位
+  const big = randInt(10, 18), small = randInt(1, big % 10 || 1);
+  // 强制不退位: 个位被减 >= 个位减
+  let s = small;
+  while ((big % 10) < (s % 10) && s > 1) s--;
+  return { display: `${big} - ${s} = ?`, answer: big - s, errorType: "compute", level: 1 };
 }
-// Level 3: 表内乘法 / 简单应用
-function genL3() {
-  if (Math.random() < 0.6) {
-    const a = randInt(2, 9), b = randInt(2, 9);
-    return { display: `${a} × ${b} = ?`, answer: a * b };
+function genAddCarryEasy() {  // 8+5, 个位相加 >= 10 (简单进位)
+  // 强制产生进位: 至少一个数 ≥ 5
+  const a = randInt(5, 9), b = randInt(2, 9);
+  // 个位相加必须 >= 10
+  while ((a % 10) + (b % 10) < 10) {
+    return genAddCarryEasy();
   }
-  // 应用题：几个几
-  const groups = randInt(2, 9), each = randInt(2, 9);
-  return { display: `${groups} 个 ${each}，一共多少？`, answer: groups * each, scenario: true };
+  return { display: `${a} + ${b} = ?`, answer: a + b, errorType: "carry", level: 1 };
+}
+function genSubBorrowEasy() {  // 15-7, 简单退位（个位被减 < 个位减）
+  // 强制退位: 个位被减 < 个位减
+  let big = randInt(11, 18), small = randInt(2, 9);
+  while ((big % 10) >= (small % 10)) {
+    return genSubBorrowEasy();
+  }
+  return { display: `${big} - ${small} = ?`, answer: big - small, errorType: "borrow", level: 1 };
 }
 
-const GENERATORS = [genL1, genL2, genL3];
+// L2: 100 以内进位加/退位减（口算重点）
+function genAddCarry() {  // 27+35, 100 内进位加
+  // 强制进位: 个位相加 >= 10
+  let a = randInt(11, 89), b = randInt(2, 99 - a);
+  while ((a % 10) + (b % 10) < 10) {
+    a = randInt(11, 89);
+    b = randInt(2, 99 - a);
+  }
+  return { display: `${a} + ${b} = ?`, answer: a + b, errorType: "carry", level: 2 };
+}
+function genSubBorrow() {  // 53-28, 100 内退位减
+  // 强制退位: 个位被减 < 个位减
+  let big = randInt(20, 99), small = randInt(2, big - 10);
+  while ((big % 10) >= (small % 10) && small < big - 10) small++;
+  return { display: `${big} - ${small} = ?`, answer: big - small, errorType: "borrow", level: 2 };
+}
 
-// v0.6.1: pickGen now uses the adaptive level. 80% from the current
-// level, 20% from the others (so the kid isn't exclusively stuck on
-// one tier). When state.level is undefined (first call before any
-// answer), fall back to L1 (level 1, the easiest tier).
+// L3: 表内乘法 / 简单应用
+function genMultiply() {  // 7×8, 2-9 × 2-9
+  const a = randInt(2, 9), b = randInt(2, 9);
+  return { display: `${a} × ${b} = ?`, answer: a * b, errorType: "multiply", level: 3 };
+}
+function genScenarioMultiply() {  // 几个几应用题
+  const groups = randInt(2, 9), each = randInt(2, 9);
+  return { display: `${groups} 个 ${each}，一共多少？`, answer: groups * each, errorType: "multiply", level: 3, scenario: true };
+}
+
+// pickGenWithBias + buildBiasFromWeakTopics (imported as ES module below).
+// Note: we deliberately don't bundle pickGenWithBias inline because the
+// same module is unit-tested in pick-gen.test.js and reused by any
+// future game app.
+let _pickGenWithBias, _buildBiasFromWeakTopics;
+async function loadPickGenModule() {
+  if (_pickGenWithBias) return;
+  const mod = await import("./pick-gen.js");
+  _pickGenWithBias = mod.pickGenWithBias;
+  _buildBiasFromWeakTopics = mod.buildBiasFromWeakTopics;
+}
+
+const QUIZ_ITEMS = [
+  { errorType: "compute",  level: 1, gen: genAddCompute },
+  { errorType: "compute",  level: 1, gen: genSubCompute },
+  { errorType: "carry",    level: 1, gen: genAddCarryEasy },
+  { errorType: "borrow",   level: 1, gen: genSubBorrowEasy },
+  { errorType: "carry",    level: 2, gen: genAddCarry },
+  { errorType: "borrow",   level: 2, gen: genSubBorrow },
+  { errorType: "multiply", level: 3, gen: genMultiply },
+  { errorType: "multiply", level: 3, gen: genScenarioMultiply },
+];
+
+/** Fetch recent weak topics and convert to an errorType bias map.
+ *  Returns the default-balanced bias if the request fails or there
+ *  is no data. Safe to call repeatedly — caches nothing. */
+async function fetchErrorTypeBias() {
+  await loadPickGenModule();
+  try {
+    const res = await fetch(API_BASE + "/api/game/weak-topics?days=7");
+    if (!res.ok) return _buildBiasFromWeakTopics([]);
+    const data = await res.json();
+    return _buildBiasFromWeakTopics(data.weakTopics || []);
+  } catch {
+    return _buildBiasFromWeakTopics([]);
+  }
+}
+
+// v0.7 (#16): pickGen now uses the adaptive level *and* the errorType
+// bias from the server's weak-topics report. 80% from the current
+// level, 20% from a lower level (so a weak topic at L2 doesn't get
+// crowded out by L3 multiplication drills); within the chosen level,
+// weighted by errorTypeBias. Falls back to a flat per-level choice
+// if no bias is set (e.g. first call before startQuiz fetched anything).
 function pickGen() {
+  if (!_pickGenWithBias) {
+    // pickGen called before module loaded — degrade to the old
+    // per-level flat picker so the UI doesn't crash.
+    return QUIZ_ITEMS.filter(it => it.level === (state.level ?? 1))[0]?.gen
+      ?? QUIZ_ITEMS[0].gen;
+  }
   const lvl = state.level ?? 1;
   const r = Math.random();
+  let levels;
   if (r < ADAPTIVE.CURRENT_LEVEL_WEIGHT) {
-    return GENERATORS[lvl - 1];
+    levels = [lvl];
+  } else {
+    // 20% "explore" — only downgrade, never upgrade. Rationale: if
+    // borrow is the weak topic at L2, jumping to L3 multiply would
+    // burn question slots on a topic the kid isn't weak in. Picking
+    // L1 keeps the bias meaningful; on L1 we degrade to current level
+    // (no lower to go).
+    const downgrades = [1, 2, 3].filter(n => n < lvl);
+    levels = downgrades.length > 0
+      ? [downgrades[Math.floor(Math.random() * downgrades.length)]]
+      : [lvl];
   }
-  // Pick a different level uniformly at random.
-  const others = [0, 1, 2].filter(i => i !== lvl - 1);
-  return GENERATORS[others[Math.floor(Math.random() * others.length)]];
-}
-
-// ============== 错题类型检测 ==============
-function detectErrorType(q) {
-  // 简单规则: 从题目里提取运算类型
-  if (q.display.includes("×") || q.display.includes("个")) return "multiply";
-  if (q.display.includes("+")) {
-    const m = q.display.match(/(\d+)\s*\+\s*(\d+)/);
-    if (m) {
-      const a = +m[1], b = +m[2];
-      // 进位：个位相加 >= 10
-      if ((a % 10) + (b % 10) >= 10) return "carry";
-    }
-    return "compute";
-  }
-  if (q.display.includes("-")) {
-    const m = q.display.match(/(\d+)\s*-\s*(\d+)/);
-    if (m) {
-      const a = +m[1], b = +m[2];
-      // 退位：个位被减 < 减
-      if ((a % 10) < (b % 10)) return "borrow";
-    }
-    return "compute";
-  }
-  return "compute";
+  const bias = state.errorTypeBias || { carry: 0.25, borrow: 0.15, multiply: 0.1, compute: 0.5 };
+  const pick = _pickGenWithBias(QUIZ_ITEMS, bias, Math.random, { levels });
+  return pick();
 }
 
 // ============== 状态 ==============
@@ -433,7 +500,7 @@ document.getElementById("btn-mistakes-back").onclick = () => showPage("home");
 document.getElementById("btn-parent-back").onclick = () => showPage("home");
 
 // ============== 答题循环 ==============
-function startQuiz() {
+async function startQuiz() {
   state.remainingMs = state.durationMs;
   state.totalQuestions = 0;
   state.correctCount = 0;
@@ -443,6 +510,14 @@ function startQuiz() {
   state.level = 1;
   state.streak = 0;
   state.wrongStreak = 0;
+  // v0.7 (#16): fetch recent weak topics to bias question generation.
+  // The fetch runs in parallel with the page transition; the first
+  // question will use whatever bias is ready by the time nextQuestion()
+  // runs (or the default-balanced bias if the fetch is still in flight,
+  // since pickGen has a fallback). If the server is unreachable we
+  // silently fall back to the default bias — kid should never see an
+  // error for a "nice to have" optimization.
+  state.errorTypeBias = await fetchErrorTypeBias();
   updateLevelBadge(state.level);
   showPage("quiz");
   nextQuestion();
@@ -470,7 +545,7 @@ function flashLevelEvent(event) {
 }
 
 function nextQuestion() {
-  state.currentQuestion = pickGen()();
+  state.currentQuestion = pickGen();
   state.currentAnswer = "";
   state.questionStartedAt = Date.now();
   const el = document.getElementById("q-text");
@@ -519,10 +594,10 @@ function submitAnswer() {
     state.pendingMistakes.push({
       subject: "math",
       problem: state.currentQuestion.display,
-      errorType: detectErrorType(state.currentQuestion),
+      errorType: state.currentQuestion.errorType,  // v0.7 (#16): declared by the generator
       userAnswer: user,
       correctAnswer: correct,
-      level: state.currentQuestion.display.includes("×") ? 3 : (state.currentQuestion.display.includes("+") || state.currentQuestion.display.includes("-")) && /\d{2}/.test(state.currentQuestion.display) ? 2 : 1,
+      level: state.currentQuestion.level,           // v0.7 (#16): also declared
       syncedToServer: false,
       ts: Date.now(),
     });
