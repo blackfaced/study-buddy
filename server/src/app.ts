@@ -22,6 +22,7 @@ import { parseEmotionTag, detectLoopFromTexts, NOTIFIABLE_EMOTIONS } from "./cha
 import { requestLogger, type Logger, createLogger, stdoutSink } from "./logger.js";
 import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
 import { appendOutbox } from "./outbox.js";
+import { BuddyLock } from "./buddy-lock.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -40,6 +41,8 @@ export interface AppOptions {
   outboxPath?: string;
   /** Logger used for request access logs and event logs. Defaults to a stdout logger. */
   logger?: Logger;
+  /** Override the 4-digit PIN for /api/buddy/unlock. Defaults to env BUDDY_PIN. Empty/null = unlocked. */
+  buddyPin?: string | null;
 }
 
 const OFFTOPIC_KEYWORDS = [
@@ -77,6 +80,18 @@ export function createApp(opts: AppOptions): express.Express {
   const logger: Logger = opts.logger ?? createLogger({ level: "info", sinks: [stdoutSink] });
   const outboxPath =
     opts.outboxPath ?? resolve(process.cwd(), "data/nexus-outbox.jsonl");
+
+  // 4-digit PIN gate for /buddy/ chat (issue #55). When BUDDY_PIN is
+  // unset, the lock is open (dev mode); log a single warning so the
+  // deploy is loud, not silent.
+  const buddyPinEnv = process.env.BUDDY_PIN ?? "";
+  const buddyPin = opts.buddyPin !== undefined ? opts.buddyPin : buddyPinEnv;
+  // Normalize: empty string is the "unset" signal, same as null.
+  const effectivePin = (buddyPin === null || buddyPin === "") ? null : buddyPin;
+  if (effectivePin === null) {
+    logger.warn("BUDDY_PIN not set, /buddy/ chat is unlocked (development mode)");
+  }
+  const buddyLock = new BuddyLock({ pin: effectivePin });
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
@@ -125,6 +140,28 @@ export function createApp(opts: AppOptions): express.Express {
       childrenCount: children.c,
       sessionsCount: sessions.c,
     });
+  });
+
+  // ============== Buddy PIN gate (issue #55) ==============
+  // Per-IP rate limit: 5 wrong → 5-min lockout. State is in-memory;
+  // a server restart clears it (intentional — recoverable by restart).
+  app.post("/api/buddy/unlock", (req: Request, res: Response) => {
+    const { pin } = req.body ?? {};
+    if (typeof pin !== "string") {
+      return res.status(400).json({ error: "pin must be a string" });
+    }
+    const ip = req.ip ?? "unknown";
+    const result = buddyLock.tryUnlock({ ip, pin });
+    if (result.ok) {
+      return res.json({ ok: true });
+    }
+    if (result.reason === "wrong") {
+      return res.status(401).json({ error: "wrong" });
+    }
+    // Locked out — also surface Retry-After so well-behaved clients
+    // can back off automatically.
+    res.setHeader("Retry-After", String(result.retryAfterSec));
+    return res.status(429).json({ error: "locked", retryAfterSec: result.retryAfterSec });
   });
 
   // ============== 配对 ==============

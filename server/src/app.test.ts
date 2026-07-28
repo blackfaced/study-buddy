@@ -316,3 +316,61 @@ describe("POST /api/chat (W1 hotfix: loop detection + parent notify outbox)", ()
   });
 });
 
+describe("POST /api/buddy/unlock (issue #55: PIN gate)", () => {
+  // BuddyLock has in-memory state per app instance; each describe below
+  // builds its own app to keep state isolated. Each app also gets its
+  // own temp outbox dir for hygiene.
+  function makeApp(pin: string | null) {
+    const outbox = join(mkdtempSync(join(tmpdir(), "study-buddy-buddylock-")), "outbox.jsonl");
+    return createApp({
+      db,
+      httpsPort: 3000,
+      outboxPath: outbox,
+      buddyPin: pin,
+    });
+  }
+
+  it("200 on correct PIN", async () => {
+    const app = makeApp("8864");
+    const res = await request(app).post("/api/buddy/unlock").send({ pin: "8864" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+  });
+
+  it("401 on wrong PIN", async () => {
+    const app = makeApp("8864");
+    const res = await request(app).post("/api/buddy/unlock").send({ pin: "0000" });
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "wrong" });
+  });
+
+  it("429 with Retry-After after 5 wrong attempts from same IP", async () => {
+    const app = makeApp("8864");
+    for (let i = 0; i < 5; i++) {
+      await request(app).post("/api/buddy/unlock").send({ pin: "0000" });
+    }
+    const res = await request(app).post("/api/buddy/unlock").send({ pin: "8864" });
+    expect(res.status).toBe(429);
+    expect(res.body.error).toBe("locked");
+    expect(typeof res.body.retryAfterSec).toBe("number");
+    expect(res.body.retryAfterSec).toBeGreaterThan(290);
+    expect(res.body.retryAfterSec).toBeLessThanOrEqual(300);
+    expect(res.headers["retry-after"]).toBeDefined();
+  });
+
+  it("null PIN (BUDDY_PIN unset) → all requests return 200", async () => {
+    const app = makeApp(null);
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app).post("/api/buddy/unlock").send({ pin: "0000" });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
+    }
+  });
+
+  it("400 when pin is not a string", async () => {
+    const app = makeApp("8864");
+    const res = await request(app).post("/api/buddy/unlock").send({ pin: 1234 });
+    expect(res.status).toBe(400);
+  });
+});
+
