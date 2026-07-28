@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import Database from "better-sqlite3";
 import { createApp } from "./app.js";
@@ -124,6 +124,87 @@ describe("POST /api/chat (v0.6.1: auto-start session when none active)", () => {
       .post("/api/chat")
       .send({ text: "又来了", state: "writing" });
     expect(res.status).toBe(200);
+  });
+});
+
+// W1 hotfix #2 (issue #46): 孩子可以改名字
+// 7/28 糖糖说"我叫糖糖" 30 次，LLM 都记不住
+// 这个 fix 让 server 端兜底：检测 "我叫X" → update children.name
+describe("POST /api/child/rename (W1 hotfix #2)", () => {
+  it("returns 200 and updates children.name", async () => {
+    const res = await request(app)
+      .post("/api/child/rename")
+      .send({ name: "糖糖" });
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe("糖糖");
+
+    const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
+    expect(child.name).toBe("糖糖");
+
+    // 还原回"小宝"避免影响其他测试
+    db.prepare("UPDATE children SET name = ? WHERE id = 'default'").run("小宝");
+  });
+
+  it("rejects empty name", async () => {
+    const res = await request(app)
+      .post("/api/child/rename")
+      .send({ name: "" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects too-long name (>10 chars)", async () => {
+    const res = await request(app)
+      .post("/api/child/rename")
+      .send({ name: "abcdefghijklmnop" });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/chat auto-detects name change (W1 hotfix #2)", () => {
+  beforeEach(() => {
+    // 还原默认 child name
+    db.prepare("UPDATE children SET name = ? WHERE id = 'default'").run("小宝");
+    db.exec("UPDATE sessions SET ended_at = strftime('%s','now')*1000 WHERE ended_at IS NULL");
+  });
+
+  it("'我的小名叫糖糖' → 自动改 children.name 为 '糖糖'", async () => {
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "我的小名叫糖糖", state: "writing" });
+    expect(res.status).toBe(200);
+
+    const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
+    expect(child.name).toBe("糖糖");
+  });
+
+  it("'我叫糖糖' → 改名为 '糖糖'", async () => {
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "我叫糖糖", state: "writing" });
+    expect(res.status).toBe(200);
+
+    const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
+    expect(child.name).toBe("糖糖");
+  });
+
+  it("'今天吃了糖糖' → 不改名字（不是名字变更意图）", async () => {
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "今天吃了糖糖", state: "writing" });
+    expect(res.status).toBe(200);
+
+    const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
+    expect(child.name).toBe("小宝");  // 默认值
+  });
+
+  it("'写作业' → 不改名字", async () => {
+    const res = await request(app)
+      .post("/api/chat")
+      .send({ text: "写作业", state: "writing" });
+    expect(res.status).toBe(200);
+
+    const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
+    expect(child.name).toBe("小宝");
   });
 });
 
