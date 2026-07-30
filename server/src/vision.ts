@@ -115,3 +115,65 @@ export async function analyzeMistakeImage(
     raw,
   };
 }
+
+// v0.7 (issue #57 v0.2): extract individual CJK characters from a photo
+// (e.g. a textbook page or a handwritten word list). Different from
+// analyzeMistakeImage in that the output is a flat list, no reasoning.
+//
+// The user (parent) confirms the list with the agent before any of
+// these characters are added to the word library — see the
+// add-words-from-photo Mavis skill for the confirmation flow.
+const CHARS_SYSTEM_PROMPT = `你是一个图片转文字助手。给你一张图片（课本/默写纸/生字表/字帖），请提取图片里所有**独立的单个汉字**。
+
+严格遵守：
+- 只输出汉字（CJK 统一汉字 U+4E00–U+9FFF）
+- 忽略标点符号、拼音、阿拉伯数字、英文字母、连字符、空格
+- 每个字只输出一次（去重），按图片里出现的顺序排列
+- 字与字之间用一个空格分隔
+- 如果图片里没有汉字，只回一个空字符串
+
+不要加任何解释、前缀或后缀。只回汉字列表。`;
+
+export function buildCharsPrompt(): { system: string; user: string } {
+  return {
+    system: CHARS_SYSTEM_PROMPT,
+    user: "请提取这张图片里的所有汉字。",
+  };
+}
+
+/**
+ * Parse the model's reply into a deduplicated, in-order list of CJK
+ * characters. Tolerant of:
+ *   - extra whitespace, newlines, commas
+ *   - non-CJK characters mixed in (silently dropped)
+ *   - duplicate occurrences (first one wins, preserves order)
+ */
+export function parseCharsResponse(content: string): string[] {
+  if (!content) return [];
+  // Drop everything that isn't a CJK char, then dedupe while
+  // preserving the order in which the model emitted them.
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const ch of content) {
+    if (!/^[\u4E00-\u9FFF]$/.test(ch)) continue;
+    if (seen.has(ch)) continue;
+    seen.add(ch);
+    out.push(ch);
+  }
+  return out;
+}
+
+export interface CharsExtraction {
+  words: string[];
+  raw: unknown;
+}
+
+export async function extractCharsImage(
+  client: VisionClient,
+  imageBase64: string,
+): Promise<CharsExtraction> {
+  const { system, user } = buildCharsPrompt();
+  const { content, raw } = await client.chat({ system, user, imageBase64 });
+  const words = parseCharsResponse(content);
+  return { words, raw };
+}
