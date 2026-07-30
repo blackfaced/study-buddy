@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#ffb84d">
+  <title>写字练字 · v0.7</title>
+  <link rel="stylesheet" href="/shared/theme.css">
+  <!-- Hanzi Writer: open-source JS lib for stroke order animations + SVG
+       glyphs. Loaded from CDN to keep our bundle small. -->
+  <script src="https://cdn.jsdelivr.net/npm/hanzi-writer@3.5/dist/hanzi-writer.min.js"></script>
+  <style>
+    /* ===== Write app — iPad-first (横屏 friendly) ===== */
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body {
+      background: linear-gradient(180deg, var(--bg-page-start) 0%, var(--bg-page-end) 100%);
+      color: var(--text-primary);
+      font-family: -apple-system, "PingFang SC", sans-serif;
+    }
+    .app { max-width: 720px; margin: 0 auto; height: 100%; display: flex; flex-direction: column; padding: 16px; box-sizing: border-box; }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    header h1 { font-size: 22px; margin: 0; }
+    .back-to-portal { font-size: 24px; text-decoration: none; color: inherit; }
+
+    /* ===== Home view (manual word entry) ===== */
+    .home { display: flex; flex-direction: column; gap: 12px; flex: 1; overflow: hidden; }
+    .entry-row { display: flex; gap: 8px; }
+    .entry-row input { flex: 1; padding: 10px 12px; font-size: 18px; border: 2px solid var(--accent); border-radius: 12px; }
+    .entry-row button { padding: 10px 16px; font-size: 16px; background: var(--accent); color: white; border: none; border-radius: 12px; font-weight: bold; }
+    .entry-row button:active { background: #ff9500; }
+    .word-list { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 8px; padding: 4px; }
+    .word-cell { position: relative; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; font-size: 28px; background: white; border: 1px solid #e0d6c8; border-radius: 8px; }
+    .word-cell button { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; font-size: 12px; background: #ff8a65; color: white; border: none; border-radius: 50%; cursor: pointer; }
+    .word-cell .attempts { position: absolute; bottom: 2px; right: 4px; font-size: 10px; color: #999; }
+    .word-list:empty::before { content: "字库是空的。在上面输入字（可以一次贴一段）然后点「加进去」"; display: block; color: #999; padding: 24px; text-align: center; }
+    .start-btn { padding: 14px 20px; font-size: 18px; background: var(--accent); color: white; border: none; border-radius: 16px; font-weight: bold; }
+    .start-btn:disabled { background: #ccc; }
+    .error-msg { color: #d32f2f; font-size: 14px; min-height: 18px; }
+
+    /* ===== Practice view (Apple Pencil + Hanzi Writer) ===== */
+    .practice { display: none; flex: 1; flex-direction: column; align-items: center; gap: 12px; }
+    .practice.active { display: flex; }
+    .home.hidden { display: none; }
+    .practice-stage { position: relative; width: min(560px, 92vw); aspect-ratio: 1; background: white; border: 2px solid var(--accent); border-radius: 12px; touch-action: none; }
+    .practice-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .practice-stage svg.interactive { pointer-events: auto; touch-action: none; cursor: crosshair; }
+    .grid-overlay { position: absolute; inset: 0; pointer-events: none; }
+    .grid-overlay::before, .grid-overlay::after,
+    .grid-overlay > .diagonal {
+      content: ''; position: absolute; background: rgba(23, 88, 200, 0.18);
+    }
+    .grid-overlay::before { left: 50%; top: 0; bottom: 0; width: 1px; transform: translateX(-0.5px); }
+    .grid-overlay::after { top: 50%; left: 0; right: 0; height: 1px; transform: translateY(-0.5px); }
+    .grid-overlay > .diagonal { width: 1px; height: 141.4%; top: 0; left: 0; transform-origin: 0 0; transform: rotate(45deg); }
+    .grid-overlay > .diag2 { width: 1px; height: 141.4%; top: 0; right: 0; transform-origin: 100% 0; transform: rotate(-45deg); }
+    .practice-controls { display: flex; gap: 8px; align-items: center; }
+    .practice-controls button { padding: 10px 16px; font-size: 14px; border: none; border-radius: 12px; background: var(--accent); color: white; font-weight: bold; }
+    .practice-controls button.secondary { background: #64b5f6; }
+    .practice-controls button.danger { background: #ff8a65; }
+    .practice-controls .status { font-size: 14px; color: #555; margin-left: auto; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <a class="back-to-portal" href="/" title="回门户" aria-label="回门户">🏠</a>
+    <h1>✍️ 写字练字</h1>
+    <div style="width: 24px"></div>
+  </header>
+
+  <!-- ============== Home view ============== -->
+  <section class="home" id="home-view">
+    <div class="entry-row">
+      <input id="chars-input" type="text" placeholder="贴上要练的字，比如 一二三上口" inputmode="text" autocomplete="off" />
+      <button id="add-btn" type="button">加进去</button>
+    </div>
+    <div class="error-msg" id="home-error"></div>
+    <div class="word-list" id="word-list"></div>
+    <button class="start-btn" id="start-btn" type="button" disabled>开始练 ✍️</button>
+  </section>
+
+  <!-- ============== Practice view ============== -->
+  <section class="practice" id="practice-view">
+    <div class="practice-stage" id="stage">
+      <div class="grid-overlay"><div class="diagonal"></div><div class="diag2"></div></div>
+      <!-- Hanzi Writer mounts here; kid's strokes layer on top. -->
+      <div id="hanzi-target" style="position:absolute; inset:0;"></div>
+      <svg id="kid-svg" class="interactive" viewBox="0 0 600 600" preserveAspectRatio="xMidYMid meet" aria-label="孩子写字区"></svg>
+    </div>
+    <div class="practice-controls">
+      <button id="again-btn" type="button" class="secondary">笔顺重放</button>
+      <button id="next-btn" type="button" class="secondary">下一字</button>
+      <button id="exit-btn" type="button" class="danger">退出</button>
+      <span class="status" id="status">看 3 秒后字会消失，凭记忆写</span>
+    </div>
+  </section>
+</div>
+
+<script type="module" src="./client.js"></script>
+</body>
+</html>
