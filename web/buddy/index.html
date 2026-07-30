@@ -212,6 +212,7 @@
 </div>
 
 <!-- v0.7: 4-module split (issue #23). Load order: state → camera → chat → voice. -->
+<script src="/shared/app.js"></script>
 <script src="./state.js"></script>
 <script src="./camera.js"></script>
 <script src="./chat.js"></script>
@@ -300,33 +301,37 @@ async function submitPin() {
   pinSubmit.disabled = true;
   pinError.textContent = '';
   try {
-    const r = await fetch('/api/buddy/unlock', {
+    // v0.7 (issue #21): use shared fetch. 200 = success, 401 = wrong
+    // pin, 429 = locked out, anything else = generic error. Non-2xx
+    // throws so we branch on err.status in the catch.
+    await window.StudyBuddy.fetch('/api/buddy/unlock', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pin }),
+      body: { pin },
     });
-    if (r.status === 200) {
-      unlockBuddyUI();
-      // 解锁后启动 chat 流程
-      start();
-    } else if (r.status === 401) {
+    unlockBuddyUI();
+    // 解锁后启动 chat 流程
+    start();
+  } catch (err) {
+    if (err && err.status === 401) {
       pinError.textContent = '密码不对，再试一次';
       pinInput.value = '';
       pinInput.classList.add('shake');
       setTimeout(() => pinInput.classList.remove('shake'), 400);
       pinInput.focus();
-    } else if (r.status === 429) {
-      const data = await r.json().catch(() => ({}));
-      const sec = data.retryAfterSec || 300;
+    } else if (err && err.status === 429) {
+      // shared fetch throws before parsing — try to parse err.text as JSON
+      let sec = 300;
+      try {
+        const data = err.text ? JSON.parse(err.text) : {};
+        if (data.retryAfterSec) sec = data.retryAfterSec;
+      } catch { /* fall back to 300 */ }
       const min = Math.ceil(sec / 60);
       pinError.textContent = `太多次啦，等 ${min} 分钟再试`;
       pinInput.disabled = true;
       pinSubmit.disabled = true;
     } else {
-      pinError.textContent = '出错了，请重试';
+      pinError.textContent = '连不上服务器';
     }
-  } catch (e) {
-    pinError.textContent = '连不上服务器';
   } finally {
     pinSubmitting = false;
     if (pinInput.disabled === false) pinSubmit.disabled = false;
@@ -350,9 +355,8 @@ pinInput.addEventListener('input', () => {
 async function start() {
   // 1. 先连 server（用当前 URL 的 origin）
   try {
-    const r = await fetch('/api/health');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
+    // v0.7 (issue #21): use shared fetch.
+    const data = await window.StudyBuddy.fetch('/api/health');
     statusEl.textContent = `连上服务器（v${data.version}）`;
   } catch (e) {
     statusEl.textContent = '服务器连不上';

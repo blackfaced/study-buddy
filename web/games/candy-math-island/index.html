@@ -264,6 +264,7 @@
 
 </div>
 
+<script src="/shared/app.js"></script>
 <script>
 "use strict";
 
@@ -369,9 +370,8 @@ const QUIZ_ITEMS = [
 async function fetchErrorTypeBias() {
   await loadPickGenModule();
   try {
-    const res = await fetch(API_BASE + "/api/game/weak-topics?days=7");
-    if (!res.ok) return _buildBiasFromWeakTopics([]);
-    const data = await res.json();
+    // v0.7 (issue #21): use shared fetch.
+    const data = await StudyBuddy.fetch(API_BASE + "/api/game/weak-topics?days=7");
     return _buildBiasFromWeakTopics(data.weakTopics || []);
   } catch {
     return _buildBiasFromWeakTopics([]);
@@ -480,9 +480,8 @@ function showPage(id) {
 // ============== 首页 ==============
 async function loadHomeStats() {
   try {
-    const res = await fetch(API_BASE + "/api/game/daily?days=1&appId=" + APP_ID);
-    if (!res.ok) return;
-    const data = await res.json();
+    // v0.7 (issue #21): use shared fetch.
+    const data = await StudyBuddy.fetch(API_BASE + "/api/game/daily?days=1&appId=" + APP_ID);
     const today = (data.daily || [])[0];
     if (today) {
       document.getElementById("home-today-q").textContent = today.totalQuestions;
@@ -665,10 +664,11 @@ async function syncToServer() {
   for (const m of state.pendingMistakes) {
     if (m.syncedToServer) continue;
     try {
-      const res = await fetch(API_BASE + "/api/game/mistake", {
+      // v0.7 (issue #21): use shared fetch (auto-serialises body, sets
+      // Content-Type, throws on non-2xx).
+      await StudyBuddy.fetch(API_BASE + "/api/game/mistake", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: {
           childId: "default",
           subject: m.subject,
           problem: m.problem,
@@ -676,13 +676,13 @@ async function syncToServer() {
           userAnswer: m.userAnswer,
           correctAnswer: m.correctAnswer,
           level: m.level,
-        }),
+        },
       });
-      if (res.ok) m.syncedToServer = true;
-      // 4xx/5xx 也标记，避免无限重试
-      if (res.status >= 400) m.syncedToServer = true;
-    } catch {
-      /* network error — keep unsynced, retry on next page load */
+      m.syncedToServer = true;
+    } catch (e) {
+      // 4xx/5xx (e.status set): 标记为 synced, 避免无限重试.
+      // network error (no e.status): 保留 unsynced, 下次重试.
+      if (e && e.status) m.syncedToServer = true;
     }
   }
   // 持久化到 localStorage（包括已同步的，给错题本用）
@@ -704,10 +704,10 @@ async function syncToServer() {
 
 async function recordSession() {
   try {
-    await fetch(API_BASE + "/api/game/session", {
+    // v0.7 (issue #21): use shared fetch.
+    await StudyBuddy.fetch(API_BASE + "/api/game/session", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: {
         childId: "default",
         appId: APP_ID,
         durationSec: Math.round((state.endedAt - state.startedAt) / 1000),
@@ -715,7 +715,7 @@ async function recordSession() {
         correctCount: state.correctCount,
         startedAt: state.startedAt,
         endedAt: state.endedAt,
-      }),
+      },
     });
   } catch { /* 静默失败；server 端无记录 */ }
 }
@@ -736,15 +736,13 @@ async function showResult() {
 
   // 拉今日累计
   try {
-    const res = await fetch(API_BASE + "/api/game/daily?days=1&appId=" + APP_ID);
-    if (res.ok) {
-      const data = await res.json();
-      const today = (data.daily || [])[0];
-      if (today) {
-        document.getElementById("today-total").textContent = today.totalQuestions;
-        document.getElementById("today-rate").textContent = today.correctRate + "%";
-        document.getElementById("today-sessions").textContent = today.sessionCount;
-      }
+    // v0.7 (issue #21): use shared fetch.
+    const data = await StudyBuddy.fetch(API_BASE + "/api/game/daily?days=1&appId=" + APP_ID);
+    const today = (data.daily || [])[0];
+    if (today) {
+      document.getElementById("today-total").textContent = today.totalQuestions;
+      document.getElementById("today-rate").textContent = today.correctRate + "%";
+      document.getElementById("today-sessions").textContent = today.sessionCount;
     }
   } catch {}
 }
@@ -775,9 +773,8 @@ async function loadParentStats() {
   const el = document.getElementById("daily-stats");
   el.innerHTML = '<div class="empty-state">加载中…</div>';
   try {
-    const res = await fetch(API_BASE + "/api/game/daily?days=7&appId=" + APP_ID);
-    if (!res.ok) throw new Error("http " + res.status);
-    const data = await res.json();
+    // v0.7 (issue #21): use shared fetch.
+    const data = await StudyBuddy.fetch(API_BASE + "/api/game/daily?days=7&appId=" + APP_ID);
     const days = data.daily || [];
     if (days.length === 0) {
       el.innerHTML = '<div class="empty-state">最近 7 天还没有记录</div>';

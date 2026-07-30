@@ -49,14 +49,15 @@ let sessionIdx = 0;
 // ===========================================================================
 
 async function loadLibrary() {
-  const res = await fetch(API + "/words");
-  if (!res.ok) {
+  try {
+    // v0.7 (issue #21): use shared fetch (auto-parses JSON, throws on
+    // non-2xx so the catch below can surface a clean error message).
+    const data = await window.StudyBuddy.fetch(API + "/words");
+    library = data.words || [];
+    renderLibrary();
+  } catch {
     homeError.textContent = "加载字库失败";
-    return;
   }
-  const data = await res.json();
-  library = data.words || [];
-  renderLibrary();
 }
 
 function renderLibrary() {
@@ -79,7 +80,10 @@ function renderLibrary() {
     del.title = `删 "${w.char}"`;
     del.onclick = async () => {
       if (!confirm(`确定删 "${w.char}" 吗？历史练习也会一起删。`)) return;
-      await fetch(API + "/words/" + encodeURIComponent(w.char), { method: "DELETE" });
+      try {
+        // v0.7 (issue #21): use shared fetch.
+        await window.StudyBuddy.fetch(API + "/words/" + encodeURIComponent(w.char), { method: "DELETE" });
+      } catch { /* ignore — loadLibrary will re-render anyway */ }
       await loadLibrary();
     };
     cell.appendChild(del);
@@ -95,23 +99,22 @@ async function addChars() {
     homeError.textContent = "请输入要练的字";
     return;
   }
-  const res = await fetch(API + "/words", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chars, addedBy: "parent" }),
-  });
-  if (!res.ok) {
+  try {
+    // v0.7 (issue #21): use shared fetch.
+    const r = await window.StudyBuddy.fetch(API + "/words", {
+      method: "POST",
+      body: { chars, addedBy: "parent" },
+    });
+    charsInput.value = "";
+    if (r.added === 0) {
+      homeError.textContent = "没有新增（可能都是重复字或非汉字）";
+    } else if (r.skipped > 0) {
+      homeError.textContent = `新增 ${r.added} 个，跳过 ${r.skipped} 个重复`;
+    }
+    await loadLibrary();
+  } catch {
     homeError.textContent = "添加失败";
-    return;
   }
-  const r = await res.json();
-  charsInput.value = "";
-  if (r.added === 0) {
-    homeError.textContent = "没有新增（可能都是重复字或非汉字）";
-  } else if (r.skipped > 0) {
-    homeError.textContent = `新增 ${r.added} 个，跳过 ${r.skipped} 个重复`;
-  }
-  await loadLibrary();
 }
 
 addBtn.onclick = addChars;
@@ -263,10 +266,10 @@ function enableKidInput() {
 
 async function submitAttempt(item, kidPath) {
   try {
-    await fetch(API + "/attempts", {
+    // v0.7 (issue #21): use shared fetch.
+    await window.StudyBuddy.fetch(API + "/attempts", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ char: item.char, level: item.opacity, strokePath: kidPath }),
+      body: { char: item.char, level: item.opacity, strokePath: kidPath },
     });
   } catch (e) {
     console.error("[write] submitAttempt failed", e);

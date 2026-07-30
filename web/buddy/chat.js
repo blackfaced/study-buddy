@@ -80,9 +80,8 @@
   speak(text) {
     if (!('speechSynthesis' in window)) return;
     if (S.synthUnlocked === false) {
-      const u0 = new SpeechSynthesisUtterance('');
-      u0.volume = 0;
-      speechSynthesis.speak(u0);
+      // v0.7 (issue #21): central warmup so every app gets the same fix.
+      window.StudyBuddy.warmupTTS();
       S.synthUnlocked = true;
     }
     const u = new SpeechSynthesisUtterance(text);
@@ -111,13 +110,8 @@
     // v0.6.4: iOS Safari — 在 user gesture 的同步窗口里先 speak 一个静音
     // utterance，把 speech engine "暖"起来。await fetch 之后 speak(reply)
     // 才不会因为 gesture context 过期而静默 fail。
-    if ('speechSynthesis' in window) {
-      try {
-        const warmup = new SpeechSynthesisUtterance(' ');
-        warmup.volume = 0;
-        speechSynthesis.speak(warmup);
-      } catch {}
-    }
+    // v0.7 (issue #21): extracted to web/shared/app.js.
+    window.StudyBuddy.warmupTTS();
 
     // done 状态下，孩子说"我要写作业"自动切回 writing 模式
     if (S.state === 'done' && /我要(写|做)作业|继续写|再写|接着写|想写作业|还要写/i.test(text)) {
@@ -126,18 +120,12 @@
     }
 
     try {
-      const r = await fetch('/api/chat', {
+      // v0.7 (issue #21): use shared fetch (sets Content-Type + parses JSON,
+      // throws on non-2xx so we can rely on `e.status`).
+      const { reply } = await window.StudyBuddy.fetch('/api/chat', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text, state: S.state })
+        body: { text, state: S.state }
       });
-      if (!r.ok) {
-        const errText = await r.text();
-        this.addSystem('chat HTTP ' + r.status + ': ' + errText.slice(0, 200));
-        this.addMsg('agent', '网络不好，再说一次？');
-        return;
-      }
-      const { reply } = await r.json();
       this.addMsg('agent', reply);
       this.speak(reply);
     } catch (e) {
@@ -234,24 +222,18 @@
     // v0.6.4: 同 send() 的修法 — 在 user gesture 同步窗口里先 speak 静音
     // utterance。否则 await openCamera() + await fetch 之后 welcome speak
     // 会因为 gesture 过期静默 fail。
-    if ('speechSynthesis' in window) {
-      try {
-        const warmup = new SpeechSynthesisUtterance(' ');
-        warmup.volume = 0;
-        speechSynthesis.speak(warmup);
-      } catch {}
-    }
+    // v0.7 (issue #21): extracted to web/shared/app.js.
+    window.StudyBuddy.warmupTTS();
 
     await window.Buddy.camera.openCamera();
 
     // 开 session
     try {
-      const r = await fetch('/api/session/start', {
+      // v0.7 (issue #21): use shared fetch.
+      const data = await window.StudyBuddy.fetch('/api/session/start', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ childId: 'default', subject: '作业' })
+        body: { childId: 'default', subject: '作业' }
       });
-      const data = await r.json();
       S.sessionId = data.sessionId;
       S.state = window.Buddy.state.nextState(S.state, 'start');
       if (_statusEl) _statusEl.textContent = '写作业中...';
@@ -269,8 +251,8 @@
   async startSession() {
     if (S.state === 'writing') return;
     try {
-      const r = await fetch('/api/session/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-      const data = await r.json();
+      // v0.7 (issue #21): use shared fetch.
+      const data = await window.StudyBuddy.fetch('/api/session/start', { method: 'POST' });
       S.sessionId = data.sessionId;
       S.state = window.Buddy.state.nextState(S.state, 'start');
       if (!S.frameLoop && S.videoStream) {
@@ -302,8 +284,8 @@
       return;
     }
     try {
-      const r = await fetch('/api/session/end', { method: 'POST' });
-      const data = await r.json();
+      // v0.7 (issue #21): use shared fetch.
+      const data = await window.StudyBuddy.fetch('/api/session/end', { method: 'POST' });
       this.addMsg('agent', '写完啦！');
       this.speak('写完啦');
       // 克制的小结：时长 + 专注分 + 警告次数（不评价好坏）
