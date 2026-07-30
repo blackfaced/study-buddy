@@ -47,7 +47,7 @@ describe("get_apps (mcp tool)", () => {
         headers: { "content-type": "application/json" },
       });
     });
-    const result = await handleTool("get_apps", {});
+    const result = (await handleTool("get_apps", {})) as any;
     expect(result.source).toBe("server");
     expect(result.apps).toEqual([{ id: "x", name: "X" }]);
   });
@@ -56,7 +56,7 @@ describe("get_apps (mcp tool)", () => {
     stubFetch(async () => {
       throw new Error("ECONNREFUSED");
     });
-    const result = await handleTool("get_apps", {});
+    const result = (await handleTool("get_apps", {})) as any;
     expect(result.source).toBe("static-fallback");
     expect(result.apps!.length).toBeGreaterThan(0);
     expect(result.apps!.find((a: any) => a.id === "candy-math-island")).toBeDefined();
@@ -66,7 +66,7 @@ describe("get_apps (mcp tool)", () => {
     stubFetch(async () => {
       return new Response("boom", { status: 500 });
     });
-    const result = await handleTool("get_apps", {});
+    const result = (await handleTool("get_apps", {})) as any;
     expect(result.source).toBe("static-fallback");
   });
 });
@@ -85,7 +85,7 @@ describe("get_game_weak_topics (mcp tool)", () => {
       "INSERT INTO mistakes (session_id, subject, problem, error_type, source) VALUES (?, ?, ?, ?, 'study-buddy')"
     ).run("s1", "math", "vision-only", "carry");
 
-    const result = await handleTool("get_game_weak_topics", { childId: "default", days: 7 });
+    const result = (await handleTool("get_game_weak_topics", { childId: "default", days: 7 })) as any;
     expect(result.scope).toBe("game");
     const topics = result.weakTopics ?? [];
     const carry = topics.find((t: any) => t.errorType === "carry");
@@ -94,7 +94,7 @@ describe("get_game_weak_topics (mcp tool)", () => {
   });
 
   it("returns [] when there are no game mistakes", async () => {
-    const result = await handleTool("get_game_weak_topics", {});
+    const result = (await handleTool("get_game_weak_topics", {})) as any;
     expect(result.weakTopics ?? []).toEqual([]);
   });
 });
@@ -114,7 +114,7 @@ describe("get_game_daily_stats (mcp tool)", () => {
     seedSession(0, 12, 9);
     seedSession(0, 8, 8);
     seedSession(1, 10, 7);
-    const result = await handleTool("get_game_daily_stats", { childId: "default", days: 7 });
+    const result = (await handleTool("get_game_daily_stats", { childId: "default", days: 7 })) as any;
     expect(result.scope).toBe("game-session");
     const daily = result.daily ?? [];
     expect(daily).toHaveLength(2);
@@ -124,14 +124,14 @@ describe("get_game_daily_stats (mcp tool)", () => {
   });
 
   it("returns [] when no sessions exist", async () => {
-    const result = await handleTool("get_game_daily_stats", {});
+    const result = (await handleTool("get_game_daily_stats", {})) as any;
     expect(result.daily ?? []).toEqual([]);
   });
 
   it("can filter by appId", async () => {
     seedSession(0, 10, 8, "candy-math-island");
     seedSession(0, 5, 5, "another-app");
-    const candy = await handleTool("get_game_daily_stats", { appId: "candy-math-island" });
+    const candy = (await handleTool("get_game_daily_stats", { appId: "candy-math-island" })) as any;
     const candyDaily = candy.daily ?? [];
     expect(candyDaily).toHaveLength(1);
     expect(candyDaily[0].totalQuestions).toBe(10);

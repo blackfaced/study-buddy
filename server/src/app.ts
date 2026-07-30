@@ -30,6 +30,8 @@ import {
   listWritingWords,
   recordWritingAttempt,
 } from "./write-sync.js";
+import { extractCharsImage } from "./vision.js";
+
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -800,6 +802,28 @@ export function createApp(opts: AppOptions): express.Express {
       res.status(400).json({ error: e.message });
     }
   });
+
+  // v0.7 (issue #57 v0.2): extract CJK characters from a photo.
+  // Powers the Mavis agent's "look at this textbook" workflow.
+  app.post(
+    "/api/write/extract-words",
+    upload.single("image"),
+    async (req: Request, res: Response) => {
+      if (!visionClient) {
+        return res.status(503).json({
+          error: "vision not configured (MINIMAX_API_KEY not set on the server)",
+        });
+      }
+      if (!req.file) return res.status(400).json({ error: "no image" });
+      const base64 = req.file.buffer.toString("base64");
+      try {
+        const result = await extractCharsImage(visionClient, base64);
+        res.json({ words: result.words, model: "MiniMax-M3" });
+      } catch (e: any) {
+        res.status(502).json({ error: `vision failed: ${e.message}` });
+      }
+    },
+  );
 
   return app;
 }
