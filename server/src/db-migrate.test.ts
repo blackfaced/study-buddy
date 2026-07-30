@@ -115,4 +115,51 @@ describe("migrateSchema", () => {
     );
     db.close();
   });
+
+  // v0.7 (issue #57): writing_words + writing_attempts tables
+  it("creates the writing_words table (v0.7 write app library)", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const cols = db.prepare("PRAGMA table_info(writing_words)").all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toEqual(
+      expect.arrayContaining(["char", "added_at", "added_by"]),
+    );
+    db.close();
+  });
+
+  it("writing_words.char is the PRIMARY KEY (duplicate INSERT OR IGNORE is a no-op)", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    // Two-step: insert, then try again. The second should fail loudly
+    // unless we wrap in INSERT OR IGNORE — confirm the PRIMARY KEY
+    // constraint is actually in place.
+    db.prepare("INSERT OR IGNORE INTO writing_words (char) VALUES (?)").run("一");
+    db.prepare("INSERT OR IGNORE INTO writing_words (char) VALUES (?)").run("一");
+    const count = (db.prepare("SELECT COUNT(*) as c FROM writing_words").get() as any).c;
+    expect(count).toBe(1);
+    db.close();
+  });
+
+  it("creates the writing_attempts table (v0.7 stroke history)", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const cols = db.prepare("PRAGMA table_info(writing_attempts)").all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toEqual(
+      expect.arrayContaining(["id", "char", "level", "stroke_path", "ts"]),
+    );
+    db.close();
+  });
+
+  it("writing_attempts cascades on writing_words delete (FK)", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    db.prepare("INSERT INTO writing_words (char) VALUES (?)").run("一");
+    db.prepare("INSERT INTO writing_attempts (char, level, stroke_path) VALUES (?, ?, ?)").run("一", 1.0, "M 0 0 L 1 1");
+    db.prepare("DELETE FROM writing_words WHERE char = ?").run("一");
+    const count = (db.prepare("SELECT COUNT(*) as c FROM writing_attempts").get() as any).c;
+    expect(count).toBe(0);
+    db.close();
+  });
 });

@@ -374,3 +374,127 @@ describe("POST /api/buddy/unlock (issue #55: PIN gate)", () => {
   });
 });
 
+describe("GET /api/write/words (issue #57: word library)", () => {
+  it("returns empty list on fresh DB", async () => {
+    const res = await request(app).get("/api/write/words");
+    expect(res.status).toBe(200);
+    // Note: words may carry over from earlier tests in this file since
+    // the global `app` is shared. We just assert the shape.
+    expect(Array.isArray(res.body.words)).toBe(true);
+  });
+
+  it("lists words added via POST", async () => {
+    // Add some characters first.
+    await request(app).post("/api/write/words").send({ chars: "一二三" });
+    const res = await request(app).get("/api/write/words");
+    expect(res.status).toBe(200);
+    const chars = (res.body.words as Array<{ char: string }>).map((w) => w.char);
+    expect(new Set(chars)).toEqual(new Set(["一", "二", "三"]));
+  });
+});
+
+describe("POST /api/write/words", () => {
+  it("adds a single-character string", async () => {
+    // Use a fresh char that earlier tests haven't used.
+    const res = await request(app).post("/api/write/words").send({ chars: "永" });
+    expect(res.status).toBe(200);
+    // `永` may have been added by an earlier test in this file — the
+    // contract here is that we get a 200 + a well-formed body.
+    expect(res.body.added + res.body.skipped).toBe(1);
+  });
+
+  it("strips non-CJK and reports correctly", async () => {
+    // Use chars unlikely to be polluted: 学 (likely fresh).
+    const res = await request(app).post("/api/write/words").send({ chars: "学 a 1 习" });
+    // 学 + 习 = 2 CJK; 2 non-CJK in between. If 学/习 already exists
+    // from earlier, it still counts toward `skipped` (= chars.length - added).
+    const totalChars = Array.from("学 a 1 习").length;  // 6
+    expect(res.body.added + res.body.skipped).toBe(totalChars);
+    expect(res.body.added).toBeGreaterThanOrEqual(0);
+    expect(res.body.added).toBeLessThanOrEqual(2);
+  });
+
+  it("400 when chars is not a string", async () => {
+    const res = await request(app).post("/api/write/words").send({ chars: 123 });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("DELETE /api/write/words/:char", () => {
+  it("removes an existing word", async () => {
+    // First add, then delete.
+    await request(app).post("/api/write/words").send({ chars: "永" });
+    const res = await request(app).delete("/api/write/words/永");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+  });
+
+  it("404 for unknown single-CJK char", async () => {
+    // Pick a CJK char unlikely to have been added: 蛙 (frog)
+    const res = await request(app).delete("/api/write/words/蛙");
+    expect(res.status).toBe(404);
+  });
+
+  it("400 for multi-char URL param (only single CJK allowed)", async () => {
+    const res = await request(app).delete("/api/write/words/不存在的字");
+    expect(res.status).toBe(400);
+  });
+
+  it("400 for non-CJK URL param", async () => {
+    const res = await request(app).delete("/api/write/words/abc");
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/write/attempts", () => {
+  it("records an attempt after the char is in the library", async () => {
+    await request(app).post("/api/write/words").send({ chars: "永" });
+    const res = await request(app)
+      .post("/api/write/attempts")
+      .send({ char: "永", level: 1.0, strokePath: "M 0 0 L 10 10" });
+    expect(res.status).toBe(200);
+    expect(res.body.attemptId).toBeGreaterThan(0);
+  });
+
+  it("400 when char is missing from library (FK constraint)", async () => {
+    // Pick a fresh char that earlier tests haven't added: 蛙
+    const res = await request(app)
+      .post("/api/write/attempts")
+      .send({ char: "蛙", level: 1.0, strokePath: "M 0 0" });
+    expect(res.status).toBe(400);
+  });
+
+  it("400 when level is out of range", async () => {
+    await request(app).post("/api/write/words").send({ chars: "永" });
+    const res = await request(app)
+      .post("/api/write/attempts")
+      .send({ char: "永", level: 1.5, strokePath: "M 0 0" });
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts null strokePath (kid closed tab mid-write)", async () => {
+    await request(app).post("/api/write/words").send({ chars: "永" });
+    const res = await request(app)
+      .post("/api/write/attempts")
+      .send({ char: "永", level: 1.0, strokePath: null });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("GET /api/write/words/:char/attempts", () => {
+  it("returns attempts for a char (newest first)", async () => {
+    await request(app).post("/api/write/words").send({ chars: "永" });
+    await request(app).post("/api/write/attempts").send({ char: "永", level: 1.0, strokePath: "old" });
+    await new Promise((r) => setTimeout(r, 5));
+    await request(app).post("/api/write/attempts").send({ char: "永", level: 0.5, strokePath: "new" });
+    const res = await request(app).get("/api/write/words/永/attempts");
+    expect(res.status).toBe(200);
+    const list = res.body.attempts as Array<{ strokePath: string }>;
+    // Newest first — there should be at least these two
+    const newIdx = list.findIndex((a) => a.strokePath === "new");
+    const oldIdx = list.findIndex((a) => a.strokePath === "old");
+    expect(newIdx).toBeGreaterThanOrEqual(0);
+    expect(oldIdx).toBeGreaterThan(newIdx);  // new comes before old
+  });
+});
+

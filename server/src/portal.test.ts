@@ -44,4 +44,19 @@ describe("platform entry routes", () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, service: "study-buddy" });
   });
+
+  it("serves the write app at /write/", async () => {
+    const res = await request(app).get("/write/");
+    expect(res.status).toBe(200);
+  });
+
+  it("write app appears in /api/apps registry (issue #57)", async () => {
+    const res = await request(app).get("/api/apps");
+    expect(res.status).toBe(200);
+    const write = (res.body.apps as Array<{ id: string; name: string; url: string; emoji: string }>)
+      .find((a) => a.id === "write");
+    expect(write).toBeDefined();
+    expect(write?.name).toBe("写字练字");
+    expect(write?.url).toBe("/write/");
+  });
 });

@@ -133,11 +133,32 @@ export function migrateSchema(db: Database.Database): void {
       FOREIGN KEY (child_id) REFERENCES children(id)
     );
 
+    -- v0.7 (issue #57): write-app library + attempt history.
+    -- writing_words is the kid's per-character word library.
+    -- char is the PRIMARY KEY so duplicates are silently rejected on
+    -- INSERT OR IGNORE below. writing_attempts stores the SVG stroke
+    -- path the kid actually drew, so v0.2+ can analyze patterns.
+    CREATE TABLE IF NOT EXISTS writing_words (
+      char TEXT PRIMARY KEY,
+      added_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      added_by TEXT DEFAULT 'parent'
+    );
+
+    CREATE TABLE IF NOT EXISTS writing_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      char TEXT NOT NULL,
+      level REAL NOT NULL,
+      stroke_path TEXT,
+      ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      FOREIGN KEY (char) REFERENCES writing_words(char) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sessions_child ON sessions(child_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posture_session ON posture_events(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_turns(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_mistakes_session ON mistakes(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_game_sessions_child ON game_sessions(child_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
   `);
 
   // 首次启动：建一个默认孩子
