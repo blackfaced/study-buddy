@@ -115,9 +115,9 @@ window.Buddy.camera = {
         const form = new FormData();
         form.append('frame', blob);
         try {
-          const resp = await fetch('/api/frame', { method: 'POST', body: form });
-          if (!resp.ok) return;
-          const data = await resp.json();
+          // v0.7 (issue #21): use shared fetch. FormData is left alone
+          // (no Content-Type header so the browser sets the boundary).
+          const data = await window.StudyBuddy.fetch('/api/frame', { method: 'POST', body: form });
           if (data.warning) {
             window.Buddy.chat.showWarning(data.warning);
             window.Buddy.chat.addMsg('agent', data.warning);
@@ -142,14 +142,14 @@ window.Buddy.camera = {
       const cam = document.getElementById('cam-preview');
       if (cam) cam.style.display = 'none';
       // 通知 server 不再记 warning
-      try { await fetch('/api/video-mode', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); } catch {}
+      try { await window.StudyBuddy.fetch('/api/video-mode', { method: 'POST', body: { enabled: false } }); } catch {}
     } else {
       S.videoMode = 'on';
       btn.textContent = '📷 开';
       btn.title = '开关视频模式';
       const cam = document.getElementById('cam-preview');
       if (cam) cam.style.display = '';
-      try { await fetch('/api/video-mode', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }); } catch {}
+      try { await window.StudyBuddy.fetch('/api/video-mode', { method: 'POST', body: { enabled: true } }); } catch {}
     }
   },
 
@@ -199,35 +199,31 @@ window.Buddy.camera = {
    * v0.6.1 + v0.6.3: 让 iOS 键盘的语音按钮 (dictation) 能用。
    * focus → 停视频流；blur → 延迟 2.5s 重启（让 TTS 播完，避免 iOS 抢音频通道）。
    *
+   * v0.7 (issue #21): the focus/blur + delayed-resume pattern moved
+   * into web/shared/app.js — `StudyBuddy.cameraPause`. We just adapt
+   * the buddy-specific side effects here.
+   *
    * 必须在 inputEl 拿到后调用。
    */
   attachInputListeners(inputEl) {
-    // v0.6.2 修正: blur 立刻 openCamera() 会被 iOS 跟正在播放的 TTS 抢音频通道
-    // 导致 chat reply 的朗读静默 mute。延迟 2.5 秒再开，TTS 一般已经播完。
-    inputEl.addEventListener('focus', () => {
-      if (S.videoStream && S.videoMode === 'on') {
+    window.StudyBuddy.cameraPause({
+      triggerEl: inputEl,
+      // The stream to stop on focus. Only pause if video mode is on
+      // (otherwise there's nothing to stop).
+      getStream: () => (S.videoMode === 'on' ? S.videoStream : null),
+      // After the delay, get a fresh stream.
+      openCamera: () => this.openCamera(),
+      onPause: () => {
         S.videoPausedForInput = true;
         if (S.frameLoop) { clearInterval(S.frameLoop); S.frameLoop = null; }
-        S.videoStream.getTracks().forEach(t => t.stop());
         S.videoStream = null;
         S.currentStream = null;
-      }
-      // 取消待执行的重启 (娃可能 focus 又 focus 来回切)
-      if (S.resumeCameraTimer) { clearTimeout(S.resumeCameraTimer); S.resumeCameraTimer = null; }
-    });
-    inputEl.addEventListener('blur', () => {
-      if (S.videoPausedForInput && S.videoMode === 'on') {
+      },
+      onResume: () => {
         S.videoPausedForInput = false;
-        // 延迟重启: 让正在播放的 TTS (chat reply) 播完, 否则 iOS 会 mute
-        S.resumeCameraTimer = setTimeout(() => {
-          S.resumeCameraTimer = null;
-          // 期间娃可能又 focus 了 input, 跳过
-          if (document.activeElement === inputEl) return;
-          window.Buddy.camera.openCamera().then(stream => {
-            if (stream) window.Buddy.camera.startFrameLoop();
-          }).catch(() => {});
-        }, 2500);
-      }
+        this.startFrameLoop();
+      },
+      resumeDelayMs: 2500,
     });
   },
 };

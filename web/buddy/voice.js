@@ -57,8 +57,8 @@
         const form = new FormData();
         form.append('audio', blob, 'voice.webm');
         try {
-          const r = await fetch('/api/voice', { method: 'POST', body: form });
-          const data = await r.json();
+          // v0.7 (issue #21): use shared fetch (FormData preserved).
+          const data = await window.StudyBuddy.fetch('/api/voice', { method: 'POST', body: form });
           if (data.text) {
             window.Buddy.chat.addSystem(`识别结果：${data.text}`);
             const inputEl = document.getElementById('input');
@@ -111,12 +111,11 @@
     if (statusEl) statusEl.textContent = '文字模式（无摄像头/麦克风）';
     // 仍然起 session
     try {
-      const r = await fetch('/api/session/start', {
+      // v0.7 (issue #21): use shared fetch.
+      const data = await window.StudyBuddy.fetch('/api/session/start', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ childId: 'default', subject: '作业' })
+        body: { childId: 'default', subject: '作业' }
       });
-      const data = await r.json();
       S.sessionId = data.sessionId;
       window.Buddy.chat.addMsg('agent', '你好呀！我是小书童，文字模式陪你写作业~');
     } catch (e) {
@@ -151,19 +150,24 @@
       );
       const fd = new FormData();
       fd.append('photo', blob, 'mistake.jpg');
-      const res = await fetch('/api/mistake-photo', { method: 'POST', body: fd });
-      const data = await res.json();
-      if (!res.ok) {
-        const errMsg = data.error ? data.error.slice(0, 80) : `HTTP ${res.status}`;
+      try {
+        // v0.7 (issue #21): use shared fetch. FormData is left alone
+        // so the browser sets the multipart boundary. Non-2xx throws.
+        const data = await window.StudyBuddy.fetch('/api/mistake-photo', { method: 'POST', body: fd });
+        // Show what vision read + the reasoning
+        const problemLine = data.problemText ? `我看到：\n${data.problemText}` : '我没看清题目';
+        const reasoningLine = data.reasoning ? `\n\n我的思路：\n${data.reasoning}` : '';
+        window.Buddy.chat.addMsg('agent', problemLine + reasoningLine);
+        this.showPhotoFlash('📷 拍好了');
+      } catch (err) {
+        const errMsg = (err && err.text)
+          ? err.text.slice(0, 80)
+          : (err && err.status)
+            ? `HTTP ${err.status}`
+            : (err && err.message) || 'network error';
         window.Buddy.chat.addMsg('agent', '我没看清，再拍一张试试？');
         if (window.Buddy.debugMode) window.Buddy.chat.addSystem('photo failed: ' + errMsg);
-        return;
       }
-      // Show what vision read + the reasoning
-      const problemLine = data.problemText ? `我看到：\n${data.problemText}` : '我没看清题目';
-      const reasoningLine = data.reasoning ? `\n\n我的思路：\n${data.reasoning}` : '';
-      window.Buddy.chat.addMsg('agent', problemLine + reasoningLine);
-      this.showPhotoFlash('📷 拍好了');
     } catch (e) {
       window.Buddy.chat.addMsg('agent', '拍照没成功，再试一次？');
       if (window.Buddy.debugMode) window.Buddy.chat.addSystem('photo err: ' + e.message);
