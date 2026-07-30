@@ -169,6 +169,42 @@ export const TOOLS = [
       },
     },
   },
+
+  // ---- v0.7 (issue #57 v0.2): write-app photo-to-library ----
+  {
+    name: "extract_words_from_image",
+    description:
+      "从照片（课本/默写纸/字帖）里提取所有单个汉字，返 dedupe 的 CJK 列表。调用 MiniMax M3 vision，server 端会过滤非汉字、拼音、标点。返回后必须跟用户确认再 add_words。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        imagePath: {
+          type: "string",
+          description: "本地图片文件绝对路径（agent 通过 user 上传获取）",
+        },
+      },
+      required: ["imagePath"],
+    },
+  },
+  {
+    name: "add_words",
+    description:
+      "把一组汉字加进写字 app 字库。重复字 server 端 PRIMARY KEY 自动去重，返 {added, skipped}。添加前必须先经用户确认。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chars: {
+          type: "string",
+          description: "要加的字，可以是字符串（含连续多个字）",
+        },
+        addedBy: {
+          type: "string",
+          description: "可选，标记来源（默认 'parent'，agent 调用传 'agent-vision'）",
+        },
+      },
+      required: ["chars"],
+    },
+  },
 ];
 
 export async function handleTool(name: string, args: any) {
@@ -562,6 +598,56 @@ export async function handleTool(name: string, args: any) {
         scope: "game-session",
         daily,
       };
+    }
+
+    // ---- v0.7 (issue #57 v0.2): write app — photo-to-library workflow ----
+    case "extract_words_from_image": {
+      // Reads a local image file (imagePath) and POSTs it as multipart
+      // to study-buddy server's /api/write/extract-words. Server runs
+      // vision + returns a deduplicated CJK list.
+      const { readFile } = await import("node:fs/promises");
+      const { basename } = await import("node:path");
+      const imagePath = String(args.imagePath ?? "");
+      if (!imagePath) throw new Error("extract_words_from_image: imagePath is required");
+      let buf: Buffer;
+      try {
+        buf = await readFile(imagePath);
+      } catch (e: any) {
+        throw new Error(`extract_words_from_image: cannot read ${imagePath}: ${e.message}`);
+      }
+      const filename = basename(imagePath);
+      const form = new FormData();
+      form.append("image", new Blob([new Uint8Array(buf)]), filename);
+      const resp = await fetch(`${STUDY_BUDDY_BASE}/api/write/extract-words`, {
+        method: "POST",
+        body: form,
+        signal: AbortSignal.timeout(20_000),  // vision call can take a few seconds
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`extract_words_from_image: server returned ${resp.status}: ${text}`);
+      }
+      return await resp.json() as { words: string[]; model: string };
+    }
+
+    case "add_words": {
+      // Adds a list of CJK characters to the write app's word library.
+      // Server silently dedupes via the PRIMARY KEY char.
+      const chars = typeof args.chars === "string" ? args.chars : "";
+      if (!chars) throw new Error("add_words: chars is required (string)");
+      const body: Record<string, unknown> = { chars };
+      if (typeof args.addedBy === "string") body.addedBy = args.addedBy;
+      const resp = await fetch(`${STUDY_BUDDY_BASE}/api/write/words`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`add_words: server returned ${resp.status}: ${text}`);
+      }
+      return await resp.json() as { added: number; skipped: number };
     }
 
     default:
