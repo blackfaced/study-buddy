@@ -15,6 +15,10 @@
     h1 { margin: 0; font-size: var(--text-display); }
     header p { margin: var(--space-2) 0 0; color: var(--text-secondary); }
     .entries { display: grid; gap: var(--space-3); }
+    /* v0.7 (issue #64): the JS-injected apps also need to stack with
+       the same gap as the static .entry above. Without this, candy +
+       write ended up glued together because they live in a plain div. */
+    #apps { display: grid; gap: var(--space-3); }
 
     /* Today strip (subtle candy-tinted callout) */
     .game-strip { width: min(100%, 560px); margin: var(--space-5) auto 0; }

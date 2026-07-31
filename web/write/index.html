@@ -65,6 +65,17 @@
     .practice-controls button { padding: 10px 16px; font-size: 14px; border: none; border-radius: 12px; background: var(--accent); color: white; font-weight: bold; }
     .practice-controls button.secondary { background: #64b5f6; }
     .practice-controls button.danger { background: #ff8a65; }
+    /* v0.7 (issue #64): pulse the "下一字" button when the kid finishes
+       a character and is waiting to advance. Old behaviour was a silent
+       setTimeout(2500) that auto-jumped — kids missed the compare step. */
+    .practice-controls button.cta {
+      background: #4caf50;
+      animation: cta-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes cta-pulse {
+      0%, 100% { transform: scale(1); }
+      50%      { transform: scale(1.06); }
+    }
     .practice-controls .status { font-size: 14px; color: #555; margin-left: auto; }
   </style>
 </head>

@@ -186,7 +186,21 @@
       hints.push('❌ 没找到摄像头。Mac Pro 没有内置摄像头，需要外接 USB 摄像头或在 iPhone 上打开');
     }
     if (info.isSecureContext === false) {
-      hints.push('❌ 不是 secure context（应该用 https:// 或 localhost 或 mac-mini.local）');
+      // v0.7 (issue #64): give a concrete fix when the user is hitting
+      // us via the LAN IP. Browsers don't count 192.168.x.x as a secure
+      // context, so navigator.mediaDevices is undefined. Two ways out:
+      //   1. mac-mini.local (mDNS) — Safari treats this as secure.
+      //   2. Add the LAN host to Chrome's unsafe-origins allowlist.
+      const isLocalIp = /^https?:\/\/(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\/?$/.test(location.origin);
+      const isLocalhost = /^(?:https?:\/\/localhost|127\.0\.0\.1)/.test(location.origin);
+      if (isLocalIp) {
+        const swap = `${location.protocol}//mac-mini.local:${location.port || (location.protocol === 'https:' ? 3000 : 80)}/buddy/`;
+        hints.push('❌ 当前用 IP 访问，浏览器不认作 secure context → 摄像头/麦克风 API 被屏蔽');
+        hints.push(`✅ 改用 mDNS 名字：<a href="${swap}" style="color:#1976d2;text-decoration:underline;">${swap}</a>`);
+        hints.push('（如果上面链接打不开，把 iPad/iPhone 跟 Mac mini 接到同一个 WiFi）');
+      } else if (!isLocalhost) {
+        hints.push('❌ 不是 secure context（应该用 https:// 或 localhost 或 mac-mini.local）');
+      }
     }
     if (hints.length === 0 && !info.hasVideo && !info.hasAudio) {
       hints.push('可能的解决：');
