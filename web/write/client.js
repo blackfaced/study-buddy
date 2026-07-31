@@ -147,7 +147,11 @@ function presentCurrent() {
     return;
   }
   const item = session[sessionIdx];
-  statusEl.textContent = `第 ${sessionIdx + 1} / ${session.length} 字 — ${item.char}`;
+  // v0.7 (issue #63): em-dash "—" rendered as a Chinese-glyph in some
+  // mobile fonts, making the status read "第 1/5 字 — 一" like "字 一 一"
+  // (the dash looked like another character). "·" middle dot is much
+  // safer across Edge / Safari / system Chinese fonts.
+  statusEl.textContent = `第 ${sessionIdx + 1} / ${session.length} 字 · ${item.char}`;
   startWord(item);
 }
 
@@ -157,12 +161,18 @@ async function startWord(item) {
   kidSvg.innerHTML = "";
   // Build HanziWriter instance. width/height = STAGE_SIZE so it fills
   // the stage box. showCharacter: true (we manage opacity ourselves).
+  // v0.7 (issue #63): explicit strokeColor + radicalColor — without these
+  // HanziWriter falls back to #555 dark gray, which clashes with the
+  // 田字格 cross/diagonals (kid reads "broken grid" instead of "my
+  // writing"). Green is the spec'd "绿底原字" colour from the PRD.
   const writer = HanziWriter.create(hanziTarget, item.char, {
     width: STAGE_SIZE,
     height: STAGE_SIZE,
     padding: 5,
     showCharacter: true,
     showOutline: false,
+    strokeColor: "#4caf50",
+    radicalColor: "#388e3c",
     strokeAnimationSpeed: 1,
     delayBetweenStrokes: 200,
   });
