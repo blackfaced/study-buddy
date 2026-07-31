@@ -265,12 +265,14 @@ function enableKidInput() {
       session[sessionIdx].writer.showCharacter();
       applyCharacterOpacity(1.0);
     }
-    statusEl.textContent = "原字 + 你写的 (绿底是原字，红笔是你写的)";
-    // Wait a moment for the kid to see, then advance.
-    setTimeout(() => {
-      sessionIdx++;
-      presentCurrent();
-    }, 2500);
+    // v0.7 (issue #64): the user wants the kid to look at the compare
+    // overlay for as long as they want, then explicitly tap "下一字"
+    // to advance. The old setTimeout(2500) was auto-jumping before
+    // some kids could see the difference, and got especially messy if
+    // the kid kept drawing more strokes on top.
+    statusEl.textContent = "对比看完了？点「下一字」继续";
+    // Highlight the next button so the kid (or parent) sees the cue.
+    nextBtn.classList.add("cta");
   };
 }
 
@@ -293,6 +295,9 @@ againBtn.onclick = () => {
 };
 
 nextBtn.onclick = () => {
+  // v0.7 (issue #64): clear the compare-mode highlight so the next char
+  // starts in the clean "see for 3s then write" state.
+  nextBtn.classList.remove("cta");
   sessionIdx++;
   presentCurrent();
 };
