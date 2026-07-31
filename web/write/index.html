@@ -61,7 +61,7 @@
     .grid-overlay::after { top: 50%; left: 0; right: 0; height: 1px; transform: translateY(-0.5px); }
     .grid-overlay > .diagonal { width: 1px; height: 141.4%; top: 0; left: 0; transform-origin: 0 0; transform: rotate(45deg); }
     .grid-overlay > .diag2 { width: 1px; height: 141.4%; top: 0; right: 0; transform-origin: 100% 0; transform: rotate(-45deg); }
-    .practice-controls { display: flex; gap: 8px; align-items: center; }
+    .practice-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .practice-controls button { padding: 10px 16px; font-size: 14px; border: none; border-radius: 12px; background: var(--accent); color: white; font-weight: bold; }
     .practice-controls button.secondary { background: #64b5f6; }
     .practice-controls button.danger { background: #ff8a65; }
@@ -77,6 +77,14 @@
       50%      { transform: scale(1.06); }
     }
     .practice-controls .status { font-size: 14px; color: #555; margin-left: auto; }
+    .score-line {
+      text-align: center;
+      font-size: 22px;
+      color: #ff9800;
+      font-weight: bold;
+      padding: 6px 12px;
+      letter-spacing: 4px;
+    }
   </style>
 </head>
 <body>
@@ -108,10 +116,14 @@
     </div>
     <div class="practice-controls">
       <button id="again-btn" type="button" class="secondary">笔顺重放</button>
-      <button id="next-btn" type="button" class="secondary">下一字</button>
+      <button id="undo-btn" type="button" class="secondary" style="display:none;">撤销</button>
+      <button id="submit-btn" type="button" class="secondary" style="display:none;">提交</button>
+      <button id="retry-btn" type="button" class="secondary" style="display:none;">重练</button>
+      <button id="next-btn" type="button" class="secondary" style="display:none;">下一题</button>
       <button id="exit-btn" type="button" class="danger">退出</button>
       <span class="status" id="status">看 3 秒后字会消失，凭记忆写</span>
     </div>
+    <div class="score-line" id="score" style="display:none;"></div>
   </section>
 </div>
 
