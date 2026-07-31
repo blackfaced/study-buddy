@@ -43,9 +43,16 @@
     .practice.active { display: flex; }
     .home.hidden { display: none; }
     .practice-stage { position: relative; width: min(560px, 92vw); aspect-ratio: 1; background: white; border: 2px solid var(--accent); border-radius: 12px; touch-action: none; }
-    .practice-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    /* v0.7 (issue #63): keep 田字格 lines above the HanziWriter reference.
+       HanziWriter's reference stroke is 200 units in a 600 viewBox, so it
+       ends up ~33% of the stage width and visually overwrites the
+       cross + diagonals unless we explicitly layer the grid on top. */
+    .practice-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
     .practice-stage svg.interactive { pointer-events: auto; touch-action: none; cursor: crosshair; }
-    .grid-overlay { position: absolute; inset: 0; pointer-events: none; }
+    /* v0.7 (issue #63): grid sits above the reference SVG, and we clip
+       the rotated 141.4%-tall diagonals so they don't bleed outside the
+       stage box once the z-index promotes them. */
+    .grid-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; }
     .grid-overlay::before, .grid-overlay::after,
     .grid-overlay > .diagonal {
       content: ''; position: absolute; background: rgba(23, 88, 200, 0.18);
