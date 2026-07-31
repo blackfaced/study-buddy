@@ -1,17 +1,25 @@
 // web/write/client.js
 //
-// Client logic for the write app (issue #57). Split from index.html
-// for the same reasons the buddy chat refactor used modules — easier
-// to read, no `const S` collisions, room to grow.
+// Client logic for the write app (issue #57 + v0.8 flow rewrite).
 //
-// Three views, toggled by toggling .hidden on the home / practice
-// sections:
-// - home:    word library management (manual entry, list, delete)
-// - practice: Apple Pencil + Hanzi Writer overlay (the actual "training")
+// Practice-view state machine (issue #65):
+//
+//   animating   → 笔顺重放 (animateCharacter, 一次 ~2.5s)
+//     ↓
+//   showing     → reference 完整显示, 倒计时 SHOW_MS=3s
+//     ↓
+//   writing     → 字消失, kid 用手指/pen 写, 支持撤销
+//     ↓ (kid 点「提交」)
+//   submitted   → compare mode (绿字 + 红笔) + 打分 (1-3 ⭐)
+//                 出「重练」/「下一题」按钮
+//     ↓
+//     ├── 重练 → 清空 strokes, 回到 animating (同一字, 不前进 sessionIdx)
+//     └── 下一题 → sessionIdx++, presentCurrent (下一字)
 //
 // Hanzi Writer is loaded as a global from the CDN <script> tag in
 // index.html, so we read it from window.HanziWriter.
 import { computeDisplayLevel } from "./grade.js";
+import { scoreStrokes } from "./score.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -35,14 +43,20 @@ const stage = document.getElementById("stage");
 const hanziTarget = document.getElementById("hanzi-target");
 const kidSvg = document.getElementById("kid-svg");
 const againBtn = document.getElementById("again-btn");
+const undoBtn = document.getElementById("undo-btn");
+const submitBtn = document.getElementById("submit-btn");
+const retryBtn = document.getElementById("retry-btn");
 const nextBtn = document.getElementById("next-btn");
 const exitBtn = document.getElementById("exit-btn");
 const statusEl = document.getElementById("status");
+const scoreEl = document.getElementById("score");
 
 // ----- Session state -----
 let library = [];   // [{ char, addedAt, addedBy, attemptCount }] from server
-let session = [];   // [{ char, opacity, hanziWriterInstance, kidPath, startedAt }] for current session
+let session = [];   // current 5-char session
 let sessionIdx = 0;
+let phase = null;   // 'animating' | 'showing' | 'writing' | 'submitted'
+let pendingTimers = [];  // {kind: 'showing'|'animate', timer} so we can cancel on retry
 
 // ===========================================================================
 //  Home view — load + render library
@@ -50,8 +64,7 @@ let sessionIdx = 0;
 
 async function loadLibrary() {
   try {
-    // v0.7 (issue #21): use shared fetch (auto-parses JSON, throws on
-    // non-2xx so the catch below can surface a clean error message).
+    // v0.7 (issue #21): use shared fetch.
     const data = await window.StudyBuddy.fetch(API + "/words");
     library = data.words || [];
     renderLibrary();
@@ -81,7 +94,6 @@ function renderLibrary() {
     del.onclick = async () => {
       if (!confirm(`确定删 "${w.char}" 吗？历史练习也会一起删。`)) return;
       try {
-        // v0.7 (issue #21): use shared fetch.
         await window.StudyBuddy.fetch(API + "/words/" + encodeURIComponent(w.char), { method: "DELETE" });
       } catch { /* ignore — loadLibrary will re-render anyway */ }
       await loadLibrary();
@@ -100,7 +112,6 @@ async function addChars() {
     return;
   }
   try {
-    // v0.7 (issue #21): use shared fetch.
     const r = await window.StudyBuddy.fetch(API + "/words", {
       method: "POST",
       body: { chars, addedBy: "parent" },
@@ -124,7 +135,6 @@ charsInput.addEventListener("keydown", (e) => {
 
 startBtn.onclick = () => {
   if (library.length === 0) return;
-  // Build a 5-char session from the library (round-robin if fewer).
   session = [];
   for (let i = 0; i < 5; i++) {
     const w = library[i % library.length];
@@ -140,31 +150,82 @@ startBtn.onclick = () => {
 //  Practice view — Apple Pencil + Hanzi Writer
 // ===========================================================================
 
+function clearPendingTimers() {
+  for (const t of pendingTimers) clearTimeout(t.timer);
+  pendingTimers = [];
+}
+
 function presentCurrent() {
   if (sessionIdx >= session.length) {
     statusEl.textContent = "本轮结束，回主页";
+    setPhase("done");
     setTimeout(exitToHome, 1500);
     return;
   }
   const item = session[sessionIdx];
   // v0.7 (issue #63): em-dash "—" rendered as a Chinese-glyph in some
-  // mobile fonts, making the status read "第 1/5 字 — 一" like "字 一 一"
-  // (the dash looked like another character). "·" middle dot is much
-  // safer across Edge / Safari / system Chinese fonts.
+  // mobile fonts, making the status read "第 1/5 字 — 一" like "字 一 一".
+  // "·" middle dot is much safer.
   statusEl.textContent = `第 ${sessionIdx + 1} / ${session.length} 字 · ${item.char}`;
   startWord(item);
 }
 
+/** Centralised phase transition so buttons + timer handlers stay in sync. */
+function setPhase(next) {
+  phase = next;
+  // Default button visibility per phase. Most start hidden and only
+  // show for the relevant phase. `again` (笔顺重放) is the exception
+  // — the kid can re-trigger it any time after the initial animation.
+  againBtn.style.display = "";
+  undoBtn.style.display = "none";
+  submitBtn.style.display = "none";
+  retryBtn.style.display = "none";
+  nextBtn.style.display = "none";
+  submitBtn.classList.remove("cta");
+  retryBtn.classList.remove("cta");
+  nextBtn.classList.remove("cta");
+  // Note: we deliberately don't reset scoreEl.display here — the
+  // submit handler sets it AFTER calling setPhase, and resetting
+  // here would clobber the freshly-shown score. Clear it only on
+  // entering animating/showing/writing (i.e. the start of a new
+  // attempt, where old score should be gone).
+  if (next !== "submitted" && scoreEl) {
+    scoreEl.style.display = "none";
+    scoreEl.textContent = "";
+  }
+
+  if (next === "animating" || next === "showing") {
+    againBtn.textContent = "笔顺重放";
+    submitBtn.textContent = "提交";
+  } else if (next === "writing") {
+    againBtn.textContent = "笔顺重放";
+    undoBtn.style.display = "";
+    submitBtn.style.display = "";
+    submitBtn.classList.add("cta");   // prompt the kid to submit
+  } else if (next === "submitted") {
+    againBtn.style.display = "none";
+    undoBtn.style.display = "none";
+    submitBtn.style.display = "none";
+    retryBtn.style.display = "";
+    nextBtn.style.display = "";
+    retryBtn.classList.add("cta");
+  } else if (next === "done") {
+    againBtn.style.display = "none";
+    undoBtn.style.display = "none";
+    submitBtn.style.display = "none";
+    retryBtn.style.display = "none";
+    nextBtn.style.display = "none";
+  }
+}
+
 async function startWord(item) {
+  clearPendingTimers();
   // Clear previous instance + kid's strokes
   hanziTarget.innerHTML = "";
   kidSvg.innerHTML = "";
-  // Build HanziWriter instance. width/height = STAGE_SIZE so it fills
-  // the stage box. showCharacter: true (we manage opacity ourselves).
-  // v0.7 (issue #63): explicit strokeColor + radicalColor — without these
-  // HanziWriter falls back to #555 dark gray, which clashes with the
-  // 田字格 cross/diagonals (kid reads "broken grid" instead of "my
-  // writing"). Green is the spec'd "绿底原字" colour from the PRD.
+  if (scoreEl) { scoreEl.textContent = ""; scoreEl.style.display = "none"; }
+  item.strokes = [];   // [{pathEl, d}] for the current attempt
+
   const writer = HanziWriter.create(hanziTarget, item.char, {
     width: STAGE_SIZE,
     height: STAGE_SIZE,
@@ -178,7 +239,7 @@ async function startWord(item) {
   });
   item.writer = writer;
 
-  // Decide opacity: see how many times this char was attempted before
+  // Decided opacity from grade.js
   const now = Date.now();
   const level = computeDisplayLevel({
     attemptCount: item.attemptCount,
@@ -188,36 +249,52 @@ async function startWord(item) {
   });
   item.opacity = level;
   item.startedAt = now;
-  // HanziWriter doesn't have a direct opacity API for showCharacter, so
-  // we re-render via quiz() with the right number of strokes shown.
-  // Simpler: show the full character at the computed opacity, hide via CSS.
-  applyCharacterOpacity(level);
-
-  // Show reference for SHOW_MS, then hide it and let kid write.
-  setTimeout(() => {
-    if (item.writer) item.writer.hideCharacter();
-    statusEl.textContent = "字消失啦，开始写 ↓";
-    enableKidInput();
-  }, SHOW_MS);
-
-  // Record lastShownAt for the next attempt's cooldown calc.
   item.lastShownAt = now;
   item.shownOpacity = level;
+  applyCharacterOpacity(level);
+
+  // v0.8 (issue #65): always auto-animate on entering a new char, then
+  // show the static reference for SHOW_MS, then hide so the kid writes.
+  setPhase("animating");
+  statusEl.textContent = "看笔顺 ↓";
+  // Re-show the character at full opacity for the animation, then
+  // settle to the per-attempt level (could be 0.5/0 for re-attempts).
+  applyCharacterOpacity(1.0);
+  const animDone = new Promise((resolve) => {
+    writer.animateCharacter({
+      onComplete: () => resolve(),
+    });
+  });
+  const t1 = setTimeout(() => {
+    applyCharacterOpacity(level);
+    setPhase("showing");
+    statusEl.textContent = "看 3 秒后字会消失";
+    const t2 = setTimeout(() => {
+      if (phase !== "showing") return; // user already advanced/retryed
+      writer.hideCharacter();
+      statusEl.textContent = "字消失啦，开始写 ↓";
+      setPhase("writing");
+    }, SHOW_MS);
+    pendingTimers.push({ kind: "showing", timer: t2 });
+  }, 100);  // give HanziWriter 100ms to start
+  pendingTimers.push({ kind: "animating", timer: t1 });
+  // Keep animDone around to avoid unhandled-rejection warnings if we
+  // never await it (e.g. user navigates away mid-animate).
+  animDone.catch(() => {});
 }
 
 function applyCharacterOpacity(opacity) {
-  // HanziWriter renders into hanziTarget. Find the rendered <svg> and
-  // set opacity on its character path group. Falls back to inline style.
   const svg = hanziTarget.querySelector("svg");
   if (!svg) return;
   svg.style.opacity = String(opacity);
   svg.style.transition = "opacity 0.3s";
 }
 
+// ===========================================================================
+//  Kid input — pointer events, one SVG path per pointerdown-up
+// ===========================================================================
+
 function enableKidInput() {
-  // Apple Pencil via Pointer Events. iOS Safari fires pointer events
-  // for both touch and pen. We collect (x, y) per stroke into an SVG
-  // path element. pressure info is available but we ignore for v0.1.
   let activePath = null;
   let activeD = "";
 
@@ -229,6 +306,7 @@ function enableKidInput() {
   }
 
   kidSvg.onpointerdown = (e) => {
+    if (phase !== "writing") return;
     e.preventDefault();
     kidSvg.setPointerCapture(e.pointerId);
     const p = getPos(e);
@@ -242,6 +320,7 @@ function enableKidInput() {
     activePath.setAttribute("fill", "none");
     kidSvg.appendChild(activePath);
   };
+
   kidSvg.onpointermove = (e) => {
     if (!activePath) return;
     e.preventDefault();
@@ -249,67 +328,196 @@ function enableKidInput() {
     activeD += ` L ${p.x} ${p.y}`;
     activePath.setAttribute("d", activeD);
   };
-  kidSvg.onpointerup = async (e) => {
+
+  kidSvg.onpointerup = (e) => {
     if (!activePath) return;
     e.preventDefault();
-    const finishedPath = activeD;
-    const finishedEl = activePath;
+    const item = session[sessionIdx];
+    item.strokes.push({ pathEl: activePath, d: activeD });
+    activePath.setAttribute("opacity", "0.85");
     activePath = null;
-    finishedEl.setAttribute("opacity", "0.85");
-    // Submit this attempt to the server.
-    await submitAttempt(session[sessionIdx], finishedPath);
-    // Show visual comparison: re-display the reference character (full
-    // opacity this time, since we're now in "compare" mode, not
-    // "training" mode).
-    if (session[sessionIdx].writer) {
-      session[sessionIdx].writer.showCharacter();
-      applyCharacterOpacity(1.0);
+    activeD = "";
+  };
+
+  kidSvg.onpointercancel = () => {
+    // Treat cancel like a stroke-end so the kid doesn't lose ink if
+    // their palm briefly leaves the surface.
+    if (activePath) {
+      const item = session[sessionIdx];
+      item.strokes.push({ pathEl: activePath, d: activeD });
+      activePath.setAttribute("opacity", "0.85");
+      activePath = null;
+      activeD = "";
     }
-    // v0.7 (issue #64): the user wants the kid to look at the compare
-    // overlay for as long as they want, then explicitly tap "下一字"
-    // to advance. The old setTimeout(2500) was auto-jumping before
-    // some kids could see the difference, and got especially messy if
-    // the kid kept drawing more strokes on top.
-    statusEl.textContent = "对比看完了？点「下一字」继续";
-    // Highlight the next button so the kid (or parent) sees the cue.
-    nextBtn.classList.add("cta");
   };
 }
 
-async function submitAttempt(item, kidPath) {
-  try {
-    // v0.7 (issue #21): use shared fetch.
-    await window.StudyBuddy.fetch(API + "/attempts", {
-      method: "POST",
-      body: { char: item.char, level: item.opacity, strokePath: kidPath },
-    });
-  } catch (e) {
-    console.error("[write] submitAttempt failed", e);
-  }
+function disableKidInput() {
+  kidSvg.onpointerdown = null;
+  kidSvg.onpointermove = null;
+  kidSvg.onpointerup = null;
+  kidSvg.onpointercancel = null;
 }
 
-againBtn.onclick = () => {
+// ===========================================================================
+//  Submit / Undo / Score
+// ===========================================================================
+
+function undoLastStroke() {
   const item = session[sessionIdx];
-  if (!item || !item.writer) return;
-  item.writer.animateCharacter();
+  if (!item || !item.strokes || item.strokes.length === 0) return;
+  const last = item.strokes.pop();
+  if (last && last.pathEl && last.pathEl.parentNode === kidSvg) {
+    kidSvg.removeChild(last.pathEl);
+  }
+  // No redo, by user request. State change is one-way.
+}
+
+async function submitCurrent() {
+  const item = session[sessionIdx];
+  if (!item) return;
+  const strokes = item.strokes || [];
+  // Concatenate all stroke d-strings into one path the server can
+  // accept (we use SVG's M..L space — multiple subpaths work).
+  const combined = strokes.map((s) => s.d).join(" ");
+
+  // 1. Compute the score client-side. We do this in the client because
+  //    the bbox math needs the rendered SVG (HanziWriter's bbox is in
+  //    its own SVG node, not exposed via the server).
+  const kidBboxes = strokes
+    .map((s) => s.pathEl.getBBox())
+    .filter((b) => b && b.width > 0 && b.height > 0)
+    .map((b) => ({ x: b.x, y: b.y, w: b.width, h: b.height }));
+  // Reference bbox: HanziWriter renders the character at full viewBox
+  // when showCharacter=true. We can ask the writer for the character's
+  // intrinsic bbox via quiz/options, but the simplest reliable read is
+  // the union of the rendered stroke paths in the writer's SVG.
+  let refBbox = null;
+  let refStrokes = 0;
+  if (item.writer) {
+    const refSvg = hanziTarget.querySelector("svg");
+    if (refSvg) {
+      const paths = refSvg.querySelectorAll("path");
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      paths.forEach((p) => {
+        try {
+          const b = p.getBBox();
+          if (b.width <= 0 || b.height <= 0) return;
+          if (b.x < minX) minX = b.x;
+          if (b.y < minY) minY = b.y;
+          if (b.x + b.width > maxX) maxX = b.x + b.width;
+          if (b.y + b.height > maxY) maxY = b.y + b.height;
+          refStrokes++;
+        } catch { /* getBBox can throw on detached nodes */ }
+      });
+      if (isFinite(minX)) {
+        refBbox = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+      }
+    }
+  }
+
+  const { stars, breakdown } = scoreStrokes({
+    kidStrokes: strokes.length,
+    refStrokes: Math.max(refStrokes, 1),  // if writer gave 0, pretend 1 so 0 kid → 0 score
+    kidBboxes,
+    refBbox,
+  });
+  showScore(stars, breakdown);
+
+  // 2. Submit the attempt to the server. Best-effort — a server
+  //    failure shouldn't block the visual compare flow.
+  try {
+    await window.StudyBuddy.fetch(API + "/attempts", {
+      method: "POST",
+      body: { char: item.char, level: item.opacity, strokePath: combined },
+    });
+  } catch (e) {
+    console.error("[write] submitCurrent: attempt POST failed", e);
+  }
+
+  // 3. Compare mode: re-show the reference at full opacity next to
+  //    the kid's strokes. Disable further input.
+  if (item.writer) {
+    item.writer.showCharacter();
+    applyCharacterOpacity(1.0);
+  }
+  disableKidInput();
+  setPhase("submitted");
+  statusEl.textContent = `对比看完了？点「重练」或「下一题」`;
+}
+
+function showScore(stars, breakdown) {
+  if (!scoreEl) return;
+  scoreEl.style.display = "";
+  const star = "★";
+  const empty = "☆";
+  scoreEl.textContent = `${star.repeat(stars)}${empty.repeat(3 - stars)}  ${(breakdown.total * 100).toFixed(0)} 分`;
+  scoreEl.title = `笔画数 ${(breakdown.strokes * 100).toFixed(0)} · 重合度 ${(breakdown.overlap * 100).toFixed(0)}`;
+}
+
+// ===========================================================================
+//  Button wiring
+// ===========================================================================
+
+againBtn.onclick = () => {
+  // "笔顺重放" — re-animate the current character on demand.
+  if (phase === "writing" || phase === "animating" || phase === "showing" || phase === "submitted") {
+    const item = session[sessionIdx];
+    if (item && item.writer) {
+      // Re-show reference at full opacity during the replay, then drop
+      // back to opacity 0 so the kid can keep writing.
+      applyCharacterOpacity(1.0);
+      item.writer.animateCharacter();
+      // If the kid was already writing, drop the reference again
+      // after the animation so they can continue.
+      if (phase === "writing" || phase === "animating" || phase === "showing") {
+        // best-effort: the user can keep writing over the animation.
+      }
+    }
+  }
+};
+
+undoBtn.onclick = () => {
+  if (phase !== "writing") return;
+  undoLastStroke();
+};
+
+submitBtn.onclick = () => {
+  if (phase !== "writing") return;
+  submitCurrent();
+};
+
+retryBtn.onclick = () => {
+  // "重练" — clear kid strokes, restart the same char (no advance).
+  if (phase !== "submitted") return;
+  const item = session[sessionIdx];
+  if (item) item.attemptCount = (item.attemptCount || 0) + 1;  // attempts++; opacity goes down next time
+  enableKidInput();
+  startWord(item);
 };
 
 nextBtn.onclick = () => {
-  // v0.7 (issue #64): clear the compare-mode highlight so the next char
-  // starts in the clean "see for 3s then write" state.
-  nextBtn.classList.remove("cta");
+  if (phase !== "submitted") return;
   sessionIdx++;
+  enableKidInput();
   presentCurrent();
 };
 
-exitBtn.onclick = exitToHome;
+exitBtn.onclick = () => {
+  clearPendingTimers();
+  exitToHome();
+};
 
 function exitToHome() {
+  clearPendingTimers();
+  disableKidInput();
   practiceView.classList.remove("active");
   homeView.classList.remove("hidden");
-  // Re-fetch library to update attempt counts
   loadLibrary();
 }
 
 // ----- Boot -----
+enableKidInput();   // attach the input handlers; the phase check
+                    // (`if (phase !== "writing") return;`) keeps them
+                    // inert until the kid is allowed to draw.
 loadLibrary();
