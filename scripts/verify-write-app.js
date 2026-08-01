@@ -87,10 +87,19 @@ const URL = process.env.TEST_URL || "https://localhost:3000/write/";
     console.log("WARN: no SVG rendered by HanziWriter — maybe CDN issue");
   }
 
-  // 6. Status text mentions 第 1 字
+  // 6. Status text in v0.8 flow has different values per phase
+  // (issue #65): "看笔顺 ↓" during animating, "看 3 秒后字会消失"
+  // during showing, "字消失啦，开始写 ↓" during writing. We just
+  // check that we're in one of those valid phases — the per-phase
+  // timing is covered by verify-write-v08-flow.js and
+  // verify-write-v082-fix.js.
   const status = await page.textContent("#status");
   console.log(`step 6: status = "${status}"`);
-  if (!status.includes("第 1")) { console.log("FAIL: status should mention 第 1 /"); process.exit(1); }
+  const validStatuses = ["看笔顺 ↓", "看 3 秒后字会消失", "字消失啦，开始写 ↓"];
+  if (!validStatuses.some((s) => status.includes(s))) {
+    console.log(`FAIL: status "${status}" not in v0.8 valid phases`);
+    process.exit(1);
+  }
 
   if (consoleMsgs.filter((m) => m.startsWith("[error]") && !m.includes("favicon")).length > 0) {
     console.log("--- browser console (errors only) ---");

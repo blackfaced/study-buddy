@@ -20,6 +20,8 @@
 // index.html, so we read it from window.HanziWriter.
 import { computeDisplayLevel } from "./grade.js";
 import { scoreStrokes } from "./score.js";
+import { paintPathsToCanvas, parseCTMString } from "./rasterize.js";
+import { runShowFlow } from "./show-flow.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -151,7 +153,10 @@ startBtn.onclick = () => {
 // ===========================================================================
 
 function clearPendingTimers() {
-  for (const t of pendingTimers) clearTimeout(t.timer);
+  for (const t of pendingTimers) {
+    if (typeof t.cancel === "function") t.cancel();
+    else if (t.timer) clearTimeout(t.timer);
+  }
   pendingTimers = [];
 }
 
@@ -260,31 +265,35 @@ async function startWord(item) {
   item.shownOpacity = level;
   applyCharacterOpacity(level);
 
-  // v0.8 (issue #65): always auto-animate on entering a new char, then
-  // show the static reference for SHOW_MS, then hide so the kid writes.
+  // v0.8.2 (issue #68): replace the inline setTimeout(100) hack with
+  // runShowFlow. The v0.8.1 timing fired "showing" 100ms after
+  // startWord was called, regardless of whether animateCharacter
+  // had finished — on a 2.5s animation the kid saw the character
+  // flicker because the show window was opening while strokes were
+  // still being drawn. runShowFlow drives transitions off the
+  // animDone promise, so the show window starts only when the
+  // character is actually static. Tested in show-flow.test.js.
   setPhase("animating");
   statusEl.textContent = "看笔顺 ↓";
-  // Re-show the character at full opacity for the animation, then
-  // settle to the per-attempt level (could be 0.5/0 for re-attempts).
-  applyCharacterOpacity(1.0);
+  applyCharacterOpacity(1.0);  // start fully visible during animation
   const animDone = new Promise((resolve) => {
-    writer.animateCharacter({
-      onComplete: () => resolve(),
-    });
+    writer.animateCharacter({ onComplete: () => resolve() });
   });
-  const t1 = setTimeout(() => {
-    applyCharacterOpacity(level);
-    setPhase("showing");
-    statusEl.textContent = "看 3 秒后字会消失";
-    const t2 = setTimeout(() => {
-      if (phase !== "showing") return; // user already advanced/retryed
-      writer.hideCharacter();
-      statusEl.textContent = "字消失啦，开始写 ↓";
-      setPhase("writing");
-    }, SHOW_MS);
-    pendingTimers.push({ kind: "showing", timer: t2 });
-  }, 100);  // give HanziWriter 100ms to start
-  pendingTimers.push({ kind: "animating", timer: t1 });
+  const cancel = runShowFlow({
+    writer,
+    animDone,
+    level,
+    showMs: SHOW_MS,
+    onPhase: (next) => {
+      setPhase(next);
+      if (next === "showing") statusEl.textContent = "看 3 秒后字会消失";
+      else if (next === "writing") {
+        statusEl.textContent = "字消失啦，开始写 ↓";
+      }
+    },
+    onOpacity: (op) => applyCharacterOpacity(op),
+  });
+  pendingTimers.push({ kind: "showflow", cancel });
   // Keep animDone around to avoid unhandled-rejection warnings if we
   // never await it (e.g. user navigates away mid-animate).
   animDone.catch(() => {});
@@ -405,51 +414,51 @@ async function rasterizeStrokes(strokes, item) {
   // d-strings themselves encode where ink goes.
   const scale = SIZE / STAGE_SIZE;
 
-  // 1. Kid strokes — read d-strings from the live SVG, paint with
-  //    Path2D. The kid-svg's own paint already happened, but the
-  //    colours are red and the stroke-width is 6 in 600 viewBox; we
-  //    want a clean black-on-transparent mask at the same scale.
+  // 1. Kid strokes. kid-svg is in the DOM with paths drawn by
+  //    onpointerup. We re-rasterise from the d-strings so the
+  //    bitmap is in the same coordinate system (600 viewBox) as
+  //    the ref (after scale = 1/6). No CTM — the kid's paths are
+  //    written in canvas coordinates directly.
   ctx.save();
   ctx.scale(scale, scale);
   ctx.strokeStyle = "#000";
   ctx.fillStyle = "#000";
-  ctx.lineWidth = 6;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  for (const s of strokes) {
-    const d = s.pathEl.getAttribute("d");
-    if (!d) continue;
-    try {
-      ctx.stroke(new Path2D(d));
-    } catch (e) { /* malformed d, skip */ }
-  }
+  const kidDs = strokes.map((s) => s.pathEl.getAttribute("d")).filter(Boolean);
+  paintPathsToCanvas(ctx, kidDs, null, 6);
   ctx.restore();
   const kidBitmap = bitmapFromCanvas(ctx, SIZE);
 
-  // 2. Ref strokes. Read the d-strings directly from HanziWriter's
-  //    paths (the clone + drawImage approach failed on iOS Safari
-  //    with "value is not of type SVGImageElement"). The HanziWriter
-  //    paths are inside <g transform="translate(...) scale(...)">,
-  //    so the raw d values are in unscaled SVG coordinates — we
-  //    apply the same ctx.scale above, and that nests with the
-  //    transform group, producing the same visual.
+  // 2. Ref strokes. v0.8.2 (issue #68): HanziWriter nests its paths
+  //    inside <g transform="translate(...) scale(...)">. The raw d
+  //    values are in unscaled SVG coordinates — without applying
+  //    the transform, the bitmap lands at the wrong place and IoU
+  //    is ~0 (the "score is always 0" bug the user caught on the
+  //    iPad). We parse the transform string and apply it via
+  //    ctx.transform. (Real <g>.getCTM() works in chromium but
+  //    not in some mobile browsers, so we read the attribute and
+  //    compute the matrix ourselves — this is what rasterize.js
+  //    test-cases pin down.)
   ctx.clearRect(0, 0, SIZE, SIZE);
   let refStrokes = 0;
   const refSvg = hanziTarget ? hanziTarget.querySelector("svg") : null;
   if (refSvg) {
     refStrokes = refSvg.querySelectorAll("path").length;
+    // Find the first <g> with a transform attribute; that's the
+    // HanziWriter's glyph group. We compose any chained transforms.
+    const g = refSvg.querySelector("g[transform]");
+    const ctm = g ? parseCTMString(g.getAttribute("transform")) : null;
     ctx.save();
     ctx.scale(scale, scale);
     ctx.strokeStyle = "#000";
     ctx.fillStyle = "#000";
-    ctx.lineWidth = 6;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    refSvg.querySelectorAll("path").forEach((p) => {
-      const d = p.getAttribute("d");
-      if (!d) return;
-      try { ctx.stroke(new Path2D(d)); } catch (e) { /* skip */ }
-    });
+    const refDs = Array.from(refSvg.querySelectorAll("path"))
+      .map((p) => p.getAttribute("d"))
+      .filter(Boolean);
+    paintPathsToCanvas(ctx, refDs, ctm, 6);
     ctx.restore();
   }
   const refBitmap = bitmapFromCanvas(ctx, SIZE);

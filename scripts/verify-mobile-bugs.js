@@ -106,7 +106,11 @@ const BASE = process.env.TEST_URL || "https://localhost:3000";
     const h = document.getElementById("hanzi-target");
     return h && h.querySelector("svg path[stroke*='76,175,80']");
   }, { timeout: 5000 });
-  await page.waitForTimeout(3500);  // wait through the 3s "look" window
+  // v0.8.2 (issue #68): phase timing is now animation (~2.5s) +
+  // 3s "look" = ~5.5s before writing. The v0.8.1 setTimeout(100)
+  // bug had it at 3.1s, so this used to wait 3.5s. Bumped to 6s
+  // so we land in the writing phase before drawing.
+  await page.waitForTimeout(6000);
 
   // Draw a horizontal line to trigger the compare mode
   const stageBox = await page.locator("#stage").boundingBox();
@@ -119,21 +123,33 @@ const BASE = process.env.TEST_URL || "https://localhost:3000";
     await page.mouse.move(x0 + (x1 - x0) * t, y);
   }
   await page.mouse.up();
+  await page.waitForTimeout(500);
+  // v0.8 (issue #65): submit is manual — kid taps "提交" to enter
+  // compare mode. v0.7 auto-submitted on stroke end. The mobile-bugs
+  // test was written for v0.7's behaviour and didn't click submit.
+  // Click it now so the test can verify the no-auto-advance contract.
+  await page.click("#submit-btn", { force: true });
   await page.waitForTimeout(1500);  // wait for compare mode to settle
 
+  // v0.8 (issue #65): the .cta highlight is on the "重练" button
+  // (the kid-friendly "try again") rather than the destructive
+  // "下一题". PR #64 (the original mobile-bugs PR) put .cta on
+  // "下一题" — the test was written for that. Update the assertion
+  // to match v0.8's UX choice.
   const writeState = await page.evaluate(() => {
+    const retryBtn = document.getElementById("retry-btn");
     const nextBtn = document.getElementById("next-btn");
     const status = document.getElementById("status");
     return {
-      nextHasCta: nextBtn ? nextBtn.classList.contains("cta") : null,
+      retryHasCta: retryBtn ? retryBtn.classList.contains("cta") : null,
       nextText: nextBtn ? nextBtn.textContent : null,
       statusText: status ? status.textContent : null,
     };
   });
   console.log("  write state:", JSON.stringify(writeState));
-  check(`next button has .cta class (got: ${writeState.nextHasCta})`, writeState.nextHasCta === true);
-  check(`status asks kid to tap next (got: "${writeState.statusText}")`,
-    writeState.statusText && writeState.statusText.includes("下一字") && !writeState.statusText.includes("原字 + 你写的"));
+  check(`retry button has .cta class (got: ${writeState.retryHasCta})`, writeState.retryHasCta === true);
+  check(`status prompts for retry/next (got: "${writeState.statusText}")`,
+    writeState.statusText && writeState.statusText.includes("下一题"));
 
   // Wait 3 more seconds and verify we did NOT auto-advance
   await page.waitForTimeout(3000);
@@ -142,7 +158,7 @@ const BASE = process.env.TEST_URL || "https://localhost:3000";
     return status ? status.textContent : null;
   });
   check(`did NOT auto-advance after 3s wait (status: "${stillThere}")`,
-    stillThere && stillThere.includes("下一字"));
+    stillThere && stillThere.includes("下一题"));
 
   // ============================================================
   // 3. Buddy chat: LAN IP triggers the mac-mini.local guidance
