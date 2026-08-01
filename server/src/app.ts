@@ -23,6 +23,7 @@ import { registerSessionRoutes } from "./routes/session.js";
 import { registerChatRoutes, defaultCallMinimax, classifyTopic } from "./routes/chat.js";
 import { registerGameRoutes } from "./routes/game.js";
 import { registerWriteRoutes } from "./routes/write.js";
+import { registerWhoamiRoutes } from "./routes/whoami.js";
 
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
@@ -120,6 +121,7 @@ export function createApp(opts: AppOptions): express.Express {
     mistakesDir,
     visionClient: opts.visionClient === undefined ? null : opts.visionClient,
   });
+  registerWhoamiRoutes(app, { db, version: "0.1.0" });
 
   return app;
 }
