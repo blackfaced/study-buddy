@@ -38,9 +38,29 @@ const URL = process.env.TEST_URL || "https://localhost:3000/write/";
   console.log(`step 1: home view visible = ${homeVisible}`);
   if (!homeVisible) { console.log("FAIL: home view not visible"); process.exit(1); }
 
+  // ----- 0. Regression: opening /write/ on a non-empty library
+  // must render one .word-cell per char. The PR #70 refactor of
+  // renderLibrary built plain {tagName, className, ...} literals
+  // and called wordList.appendChild, which throws on the real DOM
+  // ("parameter 1 is not of type 'Node'") and the catch in
+  // loadLibrary swallowed the error to "加载字库失败". This step
+  // reads the API directly and asserts the rendered count matches
+  // before any wipe / add, so the bug can't sneak back in. -----
+  console.log("step 0: pre-existing library must render the right number of cells");
+  const apiWords = await page.evaluate(async () => {
+    const r = await fetch("/api/write/words").then((r) => r.json());
+    return r.words;
+  });
+  const renderedBefore = await page.$$eval(".word-cell", (els) => els.length);
+  console.log(`  api says ${apiWords.length} chars, DOM shows ${renderedBefore} cells`);
+  if (apiWords.length > 0 && renderedBefore !== apiWords.length) {
+    console.log(`FAIL: API has ${apiWords.length} chars but DOM rendered ${renderedBefore} cells (regression of PR #70 plain-object bug)`);
+    process.exit(1);
+  }
+
   // 1a. Wipe any pre-existing library (smoke test runs against a
   // shared dev DB; previous runs may have left chars behind).
-  const existing = await page.$$eval(".word-cell", (els) => els.length);
+  const existing = renderedBefore;
   if (existing > 0) {
     console.log(`step 1a: pre-existing library has ${existing} chars; wiping...`);
     const chars = await page.$$eval(".word-cell span:first-child", (els) => els.map((e) => e.textContent));
