@@ -1,0 +1,19 @@
+{
+  "name": "study-buddy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Study Buddy — root workspace marker for pre-commit hooks",
+  "scripts": {
+    "prepare": "husky || true"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "lint-staged": "^17.3.0",
+    "prettier": "^3.9.6"
+  },
+  "lint-staged": {
+    "*.{ts,js,mjs,json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  }
+}

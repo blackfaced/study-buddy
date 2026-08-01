@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# Pre-commit hook: run lint-staged on staged files.
+# This catches trivial lint/format issues before they reach CI.
+npx --no-install lint-staged
