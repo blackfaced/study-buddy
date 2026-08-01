@@ -20,3 +20,6 @@ server.key
 
 # Git worktrees (feature/fix branches live here, not in main checkout)
 .worktrees/
+
+# Coverage output
+coverage/
