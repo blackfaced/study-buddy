@@ -34,6 +34,7 @@ import { extractCharsImage } from "./vision.js";
 import { registerPortalRoutes } from "./routes/portal.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerBuddyRoutes } from "./routes/buddy.js";
+import { registerSessionRoutes, getOrCreateActiveSession } from "./routes/session.js";
 
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
@@ -116,108 +117,15 @@ export function createApp(opts: AppOptions): express.Express {
     limits: { fileSize: 500 * 1024 },
   });
 
-  // Portal + system + buddy routes (refactor PR 1 + 2: extracted
-  // from app.ts into ./routes/ so the rest of app.ts can stay
-  // focused on chat / game / write / session logic).
+  // Portal + system + buddy + session routes (refactor PR 1 + 2 + 3).
+  // The rest of app.ts can stay focused on chat / game / write /
+  // frame / mistake / extract logic. getOrCreateActiveSession is
+  // re-exported from session.ts and re-used by the chat / frame /
+  // mistake handlers below.
   registerPortalRoutes(app, WEB_DIR);
   registerSystemRoutes(app, db);
   registerBuddyRoutes(app, { db, httpsPort, lock: buddyLock, logger });
-
-  // ============== 当前活跃 session ==============
-  function getActiveSession() {
-    return db
-      .prepare(
-        "SELECT id, child_id FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
-      )
-      .get() as any;
-  }
-
-  /**
-   * Get the active session, or auto-create one for the default child if
-   * none exists. Lets the kid keep chatting / logging events after a
-   * previous session was ended (e.g. after "写完啦"), instead of getting
-   * 400 "no active session".
-   *
-   * Mirrors the `ensureActiveSession` pattern used by recordGameMistake
-   * in game-sync.ts. Session stays open until a real /api/session/end
-   * call.
-   */
-  function getOrCreateActiveSession() {
-    const existing = getActiveSession();
-    if (existing) return existing;
-    const id = crypto.randomUUID();
-    db.prepare(
-      "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)"
-    ).run(id, "default", null);
-    return { id, child_id: "default" } as any;
-  }
-
-  // ============== 开始会话 ==============
-  app.post("/api/session/start", (req: Request, res: Response) => {
-    const { childId = "default", subject } = req.body;
-    db.prepare(
-      "UPDATE sessions SET ended_at = strftime('%s','now')*1000 WHERE ended_at IS NULL"
-    ).run();
-
-    const sessionId = crypto.randomUUID();
-    db.prepare(
-      "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)"
-    ).run(sessionId, childId, subject || null);
-
-    logger.info("session started", { sessionId, childId, subject });
-    res.json({ sessionId, childId, subject, startedAt: Date.now() });
-  });
-
-  // ============== 结束会话 ==============
-  app.post("/api/session/end", (_req: Request, res: Response) => {
-    const session = getActiveSession();
-    if (!session) return res.status(400).json({ error: "no active session" });
-
-    const endedAt = Date.now();
-    const sess = db.prepare("SELECT * FROM sessions WHERE id = ?").get(session.id) as any;
-    const durationMin = Math.max(1, Math.round((endedAt - sess.started_at) / 60000));
-
-    const postureStats = db
-      .prepare(
-        `SELECT COUNT(*) as count, AVG(score) as avg_score,
-                SUM(CASE WHEN warning IS NOT NULL THEN 1 ELSE 0 END) as warnings
-         FROM posture_events WHERE session_id = ?`
-      )
-      .get(session.id) as any;
-
-    const chatStats = db
-      .prepare(
-        `SELECT
-          SUM(CASE WHEN role='child' AND topic='offtopic' THEN 1 ELSE 0 END) as offtopic,
-          SUM(CASE WHEN role='child' AND topic='offtopic' AND redirected=1 THEN 1 ELSE 0 END) as recovered
-         FROM chat_turns WHERE session_id = ? AND (state IS NULL OR state = 'writing')`
-      )
-      .get(session.id) as any;
-
-    db.prepare(
-      `UPDATE sessions SET
-         ended_at = ?, total_minutes = ?, avg_focus_score = ?,
-         posture_warning_count = ?, offtopic_count = ?, offtopic_recovered = ?
-       WHERE id = ?`
-    ).run(
-      endedAt,
-      durationMin,
-      postureStats.avg_score || 0,
-      postureStats.warnings || 0,
-      chatStats.offtopic || 0,
-      chatStats.recovered || 0,
-      session.id
-    );
-
-    res.json({
-      sessionId: session.id,
-      durationMin,
-      avgFocusScore: Math.round(postureStats.avg_score || 0),
-      postureWarningCount: postureStats.warnings || 0,
-      offtopicCount: chatStats.offtopic || 0,
-      offtopicRecovered: chatStats.recovered || 0,
-    });
-  });
+  registerSessionRoutes(app, { db, logger });
 
   // ============== 摄像头帧 ==============
   let frameCountForLog = 0;
@@ -238,7 +146,7 @@ export function createApp(opts: AppOptions): express.Express {
 
     // Auto-create a session if needed; the camera might fire after "写完啦"
     // ended the previous session.
-    const session = getOrCreateActiveSession();
+    const session = getOrCreateActiveSession(db);
     const sessionKey = session.id;
 
     frameCountForLog = (frameCountForLog || 0) + 1;
@@ -361,7 +269,7 @@ export function createApp(opts: AppOptions): express.Express {
     // Auto-create a session if none is active (e.g. after "写完啦" was
     // pressed, or on first message ever). Don't 400 — the kid should be
     // able to chat right after ending a session.
-    const session = getOrCreateActiveSession();
+    const session = getOrCreateActiveSession(db);
 
     // Load child for the active session (v0.7: 称谓规则用 child.name 注入 prompt)
     const child = db.prepare("SELECT * FROM children WHERE id = ?").get(session.child_id) as any;
@@ -507,7 +415,7 @@ export function createApp(opts: AppOptions): express.Express {
       }
       if (!req.file) return res.status(400).json({ error: "no photo" });
       // Auto-create a session if needed; same reasoning as /api/chat.
-      const session = getOrCreateActiveSession();
+      const session = getOrCreateActiveSession(db);
 
       // 1. 写文件到 mistakesDir
       const mistakeId = randomUUID();
