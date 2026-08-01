@@ -56,17 +56,6 @@ const OFFTOPIC_KEYWORDS = [
 
 const EMOTION_KEYWORDS = ["不想", "不要", "烦", "累", "哭", "生气", "怕"];
 
-function classifyTopic(text: string): "learning" | "offtopic" | "emotion" {
-  const t = text.toLowerCase();
-  for (const kw of OFFTOPIC_KEYWORDS) {
-    if (t.includes(kw.toLowerCase())) return "offtopic";
-  }
-  for (const kw of EMOTION_KEYWORDS) {
-    if (t.includes(kw)) return "emotion";
-  }
-  return "learning";
-}
-
 export function createApp(opts: AppOptions): express.Express {
   const { db } = opts;
   const httpsPort = opts.httpsPort ?? HTTPS_PORT;
