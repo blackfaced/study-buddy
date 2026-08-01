@@ -3,8 +3,9 @@
 // Write app scoring — pure functions, no DOM.
 // =====================================================================
 //
-// Given a kid's per-stroke bounding boxes and the reference character's
-// stroke count + bounding box, decide a 1-3 star rating.
+// Given a kid's per-stroke pixel mask and the reference character's
+// per-stroke pixel mask (both are flat Uint8Array(SIZE*SIZE) where
+// each byte is 0/1), decide a 1-3 star rating.
 //
 // Two dimensions, with explicit weights so the breakdown is auditable:
 //
@@ -12,50 +13,49 @@
 //      number of strokes? 1.0 if kidStrokes == refStrokes, falls off
 //      linearly with the gap (clamped at 0).
 //
-//   2. Bbox overlap (weight 0.6): how much of the reference character
-//      is "covered" by the union of the kid's stroke bboxes? Returns
-//      a 0-1 ratio of intersection / reference area. Encourages the
-//      kid to fill the 田字格 instead of writing in one corner.
-//
-// We intentionally leave out "stroke order" and "pressure" from the
-// v0.1 score. Stroke order is a separate dimension worth a dedicated
-// round (and the kid gets it for free from the animateCharacter
-// preview). Pressure needs Apple Pencil + a real device to measure,
-// and the user said "如果可以" — v0.2 if Pencil data is reliable.
+//   2. Shape IoU (weight 0.6): the kid's pixel mask intersected with
+//      the reference's pixel mask, divided by their union. This is the
+//      big change from v0.8 — v0.8 used bbox overlap which made
+//      "write a big messy blob covering the whole 田字格" score higher
+//      than "write a small accurate stroke" because it measured AREA
+//      coverage rather than SHAPE overlap. IoU fixes that: a stray
+//      blob off in the corner contributes to the union without
+//      contributing to the intersection, so the kid's score is hurt
+//      by ink they put in the wrong place. The reference's actual
+//      pixel mask (rasterised from the HanziWriter SVG paths, not from
+//      a bounding box) is what counts as "the correct shape".
 //
 // Star thresholds:
 //   3 ★  total >= 0.7
 //   2 ★  total >= 0.4
 //   1 ★  otherwise (kid wrote something, but very off)
 //
-// All inputs are plain {x, y, w, h} objects so this module can be
-// unit-tested in node --test (no DOM).
+// All inputs are plain arrays of bytes so this module can be
+// unit-tested in node --test (no DOM, no canvas).
 // =====================================================================
 
 /**
- * @typedef {{x:number,y:number,w:number,h:number}} Bbox
- */
-
-/**
  * @param {object} input
- * @param {number} input.kidStrokes  Number of strokes the kid drew
- * @param {number} input.refStrokes  Number of strokes the reference has
- * @param {Bbox[]}  input.kidBboxes  Kid's per-stroke bounding boxes
- * @param {Bbox}    input.refBbox    Reference character's bbox
- * @returns {{stars: 1|2|3, breakdown: {strokes: number, overlap: number, total: number}}}
+ * @param {number}    input.kidStrokes  Number of strokes the kid drew
+ * @param {number}    input.refStrokes  Number of strokes the reference has
+ * @param {Uint8Array} input.kidBitmap  SIZE*SIZE bytes, 0/1
+ * @param {Uint8Array} input.refBitmap  SIZE*SIZE bytes, 0/1
+ * @param {number}    [input.size]     SIZE (defaults to kidBitmap.length, must match refBitmap)
+ * @returns {{stars: 1|2|3, breakdown: {strokes: number, iou: number, total: number}}}
  */
-export function scoreStrokes({ kidStrokes, refStrokes, kidBboxes, refBbox }) {
+export function scoreStrokes({ kidStrokes, refStrokes, kidBitmap, refBitmap, size }) {
+  const actualSize = size || (kidBitmap ? kidBitmap.length : 0);
   // v0.1: if the reference is missing or degenerate, we can't really
   // score. Return 1 star (kid wrote SOMETHING, but we can't say
   // much about how it compares).
-  if (!refBbox || refBbox.w <= 0 || refBbox.h <= 0 || refStrokes <= 0) {
-    return { stars: 1, breakdown: { strokes: 0, overlap: 0, total: 0 } };
+  if (!refBitmap || actualSize <= 0 || refStrokes <= 0) {
+    return { stars: 1, breakdown: { strokes: 0, iou: 0, total: 0 } };
   }
   const strokesScore = strokeCountMatch(kidStrokes, refStrokes);
-  const overlapScore = bboxOverlap(kidBboxes, refBbox);
-  const total = strokesScore * 0.4 + overlapScore * 0.6;
+  const iouScore = bitmapIou(kidBitmap, refBitmap);
+  const total = strokesScore * 0.4 + iouScore * 0.6;
   const stars = total >= 0.7 ? 3 : total >= 0.4 ? 2 : 1;
-  return { stars, breakdown: { strokes: strokesScore, overlap: overlapScore, total } };
+  return { stars, breakdown: { strokes: strokesScore, iou: iouScore, total } };
 }
 
 /** Linear falloff: 1.0 when equal, 0.0 when the gap reaches refStrokes. */
@@ -66,42 +66,21 @@ function strokeCountMatch(kid, ref) {
 }
 
 /**
- * Union of kid bboxes, then intersect with ref bbox. Returns
- * intersection / ref area. If ref is missing or empty, returns 0.
- * (We compare against the reference area — not the union — so a kid
- * who writes everywhere gets a fair score, not penalized for "too
- * much ink".)
+ * IoU = intersection / union over two equal-size Uint8Array masks.
+ * Returns 0 if either mask is empty.
  */
-function bboxOverlap(kidBboxes, ref) {
-  if (!ref || ref.w <= 0 || ref.h <= 0) return 0;
-  if (!kidBboxes || kidBboxes.length === 0) return 0;
-  const union = unionBboxes(kidBboxes);
-  const inter = intersectBbox(union, ref);
-  const refArea = ref.w * ref.h;
-  if (refArea <= 0) return 0;
-  return clamp(inter.w * inter.h / refArea, 0, 1);
-}
-
-function unionBboxes(bs) {
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const b of bs) {
-    if (!b) continue;
-    if (b.x < minX) minX = b.x;
-    if (b.y < minY) minY = b.y;
-    if (b.x + b.w > maxX) maxX = b.x + b.w;
-    if (b.y + b.h > maxY) maxY = b.y + b.h;
+function bitmapIou(kid, ref) {
+  if (!kid || !ref) return 0;
+  if (kid.length !== ref.length) return 0;
+  let inter = 0, union = 0;
+  for (let i = 0; i < kid.length; i++) {
+    const k = kid[i] & 1;
+    const r = ref[i] & 1;
+    if (k && r) inter++;
+    if (k || r) union++;
   }
-  if (!isFinite(minX)) return { x: 0, y: 0, w: 0, h: 0 };
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-}
-
-function intersectBbox(a, b) {
-  const x = Math.max(a.x, b.x);
-  const y = Math.max(a.y, b.y);
-  const r = Math.min(a.x + a.w, b.x + b.w);
-  const bot = Math.min(a.y + a.h, b.y + b.h);
-  if (r <= x || bot <= y) return { x: 0, y: 0, w: 0, h: 0 };
-  return { x, y, w: r - x, h: bot - y };
+  if (union === 0) return 0;
+  return inter / union;
 }
 
 function clamp(x, lo, hi) {

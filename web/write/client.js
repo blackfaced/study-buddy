@@ -239,14 +239,21 @@ async function startWord(item) {
   });
   item.writer = writer;
 
-  // Decided opacity from grade.js
+  // v0.8.1 (issue #66): always show the reference at full opacity
+  // for the first look. grade.js's computeDisplayLevel fades to 0
+  // after 3+ attempts, which broke the v0.8 flow — if the kid
+  // can't see the reference they can't compare, can't score, can't
+  // learn. We still call computeDisplayLevel so we exercise the
+  // module (and so a future re-introduction of the fade is a
+  // one-line change), but the visual is locked to 1.0.
   const now = Date.now();
-  const level = computeDisplayLevel({
+  computeDisplayLevel({
     attemptCount: item.attemptCount,
     lastShownAt: item.lastShownAt,
     now,
     cooldownMs: COOLDOWN_MS,
   });
+  const level = 1.0;
   item.opacity = level;
   item.startedAt = now;
   item.lastShownAt = now;
@@ -360,6 +367,107 @@ function disableKidInput() {
 }
 
 // ===========================================================================
+//  Rasterise — kid + ref SVG paths → SIZE*SIZE bitmap masks for IoU
+// ===========================================================================
+
+/**
+ * Rasterise both the kid's strokes and the reference character's
+ * strokes into SIZE*SIZE bitmap masks so scoreStrokes() can compute
+ * IoU (intersection over union).
+ *
+ * v0.8.1 (issue #66): this replaces the old "bbox overlap" approach
+ * that scored messy-but-large ink higher than accurate-but-small
+ * ink. IoU on the actual rasterised shape is what "did the kid
+ * write the right shape" really means.
+ *
+ * Trick: HanziWriter's reference path has stroke-width="200" inside
+ * a 600 viewBox, while the kid's strokes are 6 wide. If we naively
+ * drawImage both, the ref is ~33× wider than the kid in pixels and
+ * the IoU is dominated by the ref's area. We normalise both to
+ * stroke-width 6 before rasterising so a 1-stroke-wide ref pixel
+ * matches a 1-stroke-wide kid pixel.
+ */
+async function rasterizeStrokes(strokes, item) {
+  const SIZE = 100;
+  const c = document.createElement("canvas");
+  c.width = SIZE;
+  c.height = SIZE;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = false;  // sharp edges; we want pixel-accurate mask
+
+  // Canvas is 100x100, SVG viewBox is 600x600. Scale 1/6 makes a
+  // HanziWriter stroke-width="200" in 600 viewBox become 33 pixels
+  // wide in the canvas, which dominates any kid stroke. We instead
+  // draw both sides at a NORMALISED stroke width: the kid's 6
+  // (6/600 * 100 = 1px) and the ref's 200 (200/600 * 100 = 33px)
+  // would not be comparable. So we use the same Path2D + ctx.stroke
+  // path for both, with the same line width and caps, and let the
+  // d-strings themselves encode where ink goes.
+  const scale = SIZE / STAGE_SIZE;
+
+  // 1. Kid strokes — read d-strings from the live SVG, paint with
+  //    Path2D. The kid-svg's own paint already happened, but the
+  //    colours are red and the stroke-width is 6 in 600 viewBox; we
+  //    want a clean black-on-transparent mask at the same scale.
+  ctx.save();
+  ctx.scale(scale, scale);
+  ctx.strokeStyle = "#000";
+  ctx.fillStyle = "#000";
+  ctx.lineWidth = 6;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const s of strokes) {
+    const d = s.pathEl.getAttribute("d");
+    if (!d) continue;
+    try {
+      ctx.stroke(new Path2D(d));
+    } catch (e) { /* malformed d, skip */ }
+  }
+  ctx.restore();
+  const kidBitmap = bitmapFromCanvas(ctx, SIZE);
+
+  // 2. Ref strokes. Read the d-strings directly from HanziWriter's
+  //    paths (the clone + drawImage approach failed on iOS Safari
+  //    with "value is not of type SVGImageElement"). The HanziWriter
+  //    paths are inside <g transform="translate(...) scale(...)">,
+  //    so the raw d values are in unscaled SVG coordinates — we
+  //    apply the same ctx.scale above, and that nests with the
+  //    transform group, producing the same visual.
+  ctx.clearRect(0, 0, SIZE, SIZE);
+  let refStrokes = 0;
+  const refSvg = hanziTarget ? hanziTarget.querySelector("svg") : null;
+  if (refSvg) {
+    refStrokes = refSvg.querySelectorAll("path").length;
+    ctx.save();
+    ctx.scale(scale, scale);
+    ctx.strokeStyle = "#000";
+    ctx.fillStyle = "#000";
+    ctx.lineWidth = 6;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    refSvg.querySelectorAll("path").forEach((p) => {
+      const d = p.getAttribute("d");
+      if (!d) return;
+      try { ctx.stroke(new Path2D(d)); } catch (e) { /* skip */ }
+    });
+    ctx.restore();
+  }
+  const refBitmap = bitmapFromCanvas(ctx, SIZE);
+
+  return { kidBitmap, refBitmap, refStrokes, size: SIZE };
+}
+
+/** Convert a canvas's current RGBA pixels to a SIZE*SIZE 0/1 mask. */
+function bitmapFromCanvas(ctx, size) {
+  const data = ctx.getImageData(0, 0, size, size).data;
+  const out = new Uint8Array(size * size);
+  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+    out[j] = data[i + 3] > 0 ? 1 : 0;
+  }
+  return out;
+}
+
+// ===========================================================================
 //  Submit / Undo / Score
 // ===========================================================================
 
@@ -381,46 +489,23 @@ async function submitCurrent() {
   // accept (we use SVG's M..L space — multiple subpaths work).
   const combined = strokes.map((s) => s.d).join(" ");
 
-  // 1. Compute the score client-side. We do this in the client because
-  //    the bbox math needs the rendered SVG (HanziWriter's bbox is in
-  //    its own SVG node, not exposed via the server).
-  const kidBboxes = strokes
-    .map((s) => s.pathEl.getBBox())
-    .filter((b) => b && b.width > 0 && b.height > 0)
-    .map((b) => ({ x: b.x, y: b.y, w: b.width, h: b.height }));
-  // Reference bbox: HanziWriter renders the character at full viewBox
-  // when showCharacter=true. We can ask the writer for the character's
-  // intrinsic bbox via quiz/options, but the simplest reliable read is
-  // the union of the rendered stroke paths in the writer's SVG.
-  let refBbox = null;
-  let refStrokes = 0;
-  if (item.writer) {
-    const refSvg = hanziTarget.querySelector("svg");
-    if (refSvg) {
-      const paths = refSvg.querySelectorAll("path");
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      paths.forEach((p) => {
-        try {
-          const b = p.getBBox();
-          if (b.width <= 0 || b.height <= 0) return;
-          if (b.x < minX) minX = b.x;
-          if (b.y < minY) minY = b.y;
-          if (b.x + b.width > maxX) maxX = b.x + b.width;
-          if (b.y + b.height > maxY) maxY = b.y + b.height;
-          refStrokes++;
-        } catch { /* getBBox can throw on detached nodes */ }
-      });
-      if (isFinite(minX)) {
-        refBbox = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-      }
-    }
-  }
-
+  // 1. Compute the score client-side. v0.8.1 (issue #66): switched
+  //    from "bbox overlap of the kid's union vs the ref's bbox" to
+  //    "IoU of the rasterised kid path vs the rasterised ref path".
+  //    v0.8's bbox overlap made "draw a big messy blob covering the
+  //    whole 田字格" beat "draw a small accurate stroke", because it
+  //    measured AREA coverage, not SHAPE similarity. The iPad live
+  //    test caught it — kid wrote ugly but scored 3★, dad wrote
+  //    accurately but scored 1★. Rasterising both sides to a 100×100
+  //    canvas and computing intersection-over-union reflects what
+  //    "matches" actually means.
+  const { kidBitmap, refBitmap, refStrokes, size } = rasterizeStrokes(strokes, item);
   const { stars, breakdown } = scoreStrokes({
     kidStrokes: strokes.length,
     refStrokes: Math.max(refStrokes, 1),  // if writer gave 0, pretend 1 so 0 kid → 0 score
-    kidBboxes,
-    refBbox,
+    kidBitmap,
+    refBitmap,
+    size,
   });
   showScore(stars, breakdown);
 
@@ -452,7 +537,7 @@ function showScore(stars, breakdown) {
   const star = "★";
   const empty = "☆";
   scoreEl.textContent = `${star.repeat(stars)}${empty.repeat(3 - stars)}  ${(breakdown.total * 100).toFixed(0)} 分`;
-  scoreEl.title = `笔画数 ${(breakdown.strokes * 100).toFixed(0)} · 重合度 ${(breakdown.overlap * 100).toFixed(0)}`;
+  scoreEl.title = `笔画数 ${(breakdown.strokes * 100).toFixed(0)} · 形状重合 ${(breakdown.iou * 100).toFixed(0)}`;
 }
 
 // ===========================================================================
