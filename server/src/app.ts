@@ -33,6 +33,7 @@ import {
 import { extractCharsImage } from "./vision.js";
 import { registerPortalRoutes } from "./routes/portal.js";
 import { registerSystemRoutes } from "./routes/system.js";
+import { registerBuddyRoutes } from "./routes/buddy.js";
 
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
@@ -115,61 +116,12 @@ export function createApp(opts: AppOptions): express.Express {
     limits: { fileSize: 500 * 1024 },
   });
 
-  // Portal + system routes (refactor PR 1: extracted from app.ts
-  // into ./routes/portal.ts and ./routes/system.ts so the rest of
-  // app.ts can stay focused on chat / game / write / buddy logic).
+  // Portal + system + buddy routes (refactor PR 1 + 2: extracted
+  // from app.ts into ./routes/ so the rest of app.ts can stay
+  // focused on chat / game / write / session logic).
   registerPortalRoutes(app, WEB_DIR);
   registerSystemRoutes(app, db);
-
-  // ============== Buddy PIN gate (issue #55) ==============
-  // Per-IP rate limit: 5 wrong → 5-min lockout. State is in-memory;
-  // a server restart clears it (intentional — recoverable by restart).
-  app.post("/api/buddy/unlock", (req: Request, res: Response) => {
-    const { pin } = req.body ?? {};
-    if (typeof pin !== "string") {
-      return res.status(400).json({ error: "pin must be a string" });
-    }
-    const ip = req.ip ?? "unknown";
-    const result = buddyLock.tryUnlock({ ip, pin });
-    if (result.ok) {
-      return res.json({ ok: true });
-    }
-    if (result.reason === "wrong") {
-      return res.status(401).json({ error: "wrong" });
-    }
-    // Locked out — also surface Retry-After so well-behaved clients
-    // can back off automatically.
-    res.setHeader("Retry-After", String(result.retryAfterSec));
-    return res.status(429).json({ error: "locked", retryAfterSec: result.retryAfterSec });
-  });
-
-  // ============== 配对 ==============
-  app.get("/api/pair", (req: Request, res: Response) => {
-    const child = db.prepare("SELECT * FROM children WHERE id = 'default'").get() as any;
-    res.json({
-      childId: child?.id || "default",
-      name: child?.name || "小宝",
-      grade: child?.grade || "二年级",
-      // Bug 1 fix: was `${PORT}` (undefined) — now uses httpsPort.
-      serverUrl: `${req.protocol}://${req.hostname}:${httpsPort}`,
-    });
-  });
-
-  // ============== 改名（手动）==============
-  // W1 hotfix #2：父母或 buddy 页面也可以直接改名（不依赖 chat 自动检测）
-  // Body: { childId?: string, name: string }
-  app.post("/api/child/rename", (req: Request, res: Response) => {
-    const childId = (req.body?.childId as string) || "default";
-    const name = (req.body?.name as string)?.trim();
-    if (!name || name.length < 1 || name.length > 10) {
-      return res.status(400).json({ error: "name must be 1-10 chars" });
-    }
-    const child = db.prepare("SELECT * FROM children WHERE id = ?").get(childId) as any;
-    if (!child) return res.status(404).json({ error: "child not found" });
-    db.prepare("UPDATE children SET name = ? WHERE id = ?").run(name, childId);
-    logger.info("child name changed via /api/child/rename", { childId, newName: name });
-    res.json({ childId, name });
-  });
+  registerBuddyRoutes(app, { db, httpsPort, lock: buddyLock, logger });
 
   // ============== 当前活跃 session ==============
   function getActiveSession() {
