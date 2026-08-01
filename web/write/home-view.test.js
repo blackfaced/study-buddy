@@ -15,9 +15,26 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { attachHomeView } from "./home-view.js";
 
-/** Build a fake DOM container with the bits home-view touches. */
+/** Build a fake DOM container with the bits home-view touches. The
+ *  fake appendChild enforces Node-shape the same way the real DOM
+ *  does, so renderLibrary can't pass plain objects (regression:
+ *  PR #70's refactor wrote `{tagName, className, ...}` literals
+ *  and called appendChild, which throws on the real DOM but the
+ *  old fake silently accepted). */
+function makeFakeNode(tag = "div") {
+  return { tagName: tag, nodeType: 1, children: [], textContent: "" };
+}
 function makeDom() {
-  const wordList = { innerHTML: "", children: [], appendChild(c) { this.children.push(c); } };
+  const wordList = {
+    innerHTML: "",
+    children: [],
+    appendChild(c) {
+      if (!c || typeof c.nodeType !== "number" || typeof c.appendChild !== "function") {
+        throw new TypeError("Failed to execute 'appendChild' on 'Node': parameter 1 is not of type 'Node'.");
+      }
+      this.children.push(c);
+    },
+  };
   const startBtn = { disabled: true };
   const charsInput = { value: "" };
   const homeError = { textContent: "" };
@@ -25,23 +42,51 @@ function makeDom() {
   return { wordList, startBtn, charsInput, homeError, addBtn };
 }
 
+/** A fake createNode that returns a proper Node-shape (mimics
+ *  document.createElement). Tests pass this in via the createNode
+ *  dependency; production uses document.createElement by default. */
+function makeFakeCreateNode() {
+  const calls = [];
+  function createNode(tag) {
+    const node = makeFakeNode(tag);
+    // wrap appendChild so that pushing to children also tracks
+    // nesting, mirroring the real DOM's tree.
+    const origAppend = node.appendChild;
+    node.appendChild = function (c) {
+      if (!c || typeof c.nodeType !== "number" || typeof c.appendChild !== "function") {
+        throw new TypeError("Failed to execute 'appendChild' on 'Node': parameter 1 is not of type 'Node'.");
+      }
+      this.children.push(c);
+      return c;
+    };
+    calls.push(tag);
+    return node;
+  }
+  return { createNode, calls };
+}
+
 test("home-view: renderLibrary enables the start button when library has chars", () => {
   const dom = makeDom();
-  const calls = { fetchCount: 0, errorText: null };
+  const { createNode, calls } = makeFakeCreateNode();
+  const calls2 = { fetchCount: 0, errorText: null };
   const home = attachHomeView({
     dom,
     api: "/api/write",
+    createNode,
     fetch: async () => ({ words: [{ char: "一", attemptCount: 0 }] }),
-    onLibraryLoaded: () => { calls.fetchCount++; },
+    onLibraryLoaded: () => { calls2.fetchCount++; },
   });
   home.renderLibrary([{ char: "一", attemptCount: 0 }]);
   assert.equal(dom.startBtn.disabled, false, "start should be enabled with 1 char");
   assert.equal(dom.wordList.children.length, 1, "should paint 1 cell");
+  // 1 cell div + 1 char span + 1 delete button = 3 createNode calls
+  assert.equal(calls.length, 3, "should construct div + span + button");
 });
 
 test("home-view: renderLibrary disables the start button when library is empty", () => {
   const dom = makeDom();
-  const home = attachHomeView({ dom, api: "/api/write" });
+  const { createNode } = makeFakeCreateNode();
+  const home = attachHomeView({ dom, api: "/api/write", createNode });
   home.renderLibrary([]);
   assert.equal(dom.startBtn.disabled, true);
   assert.equal(dom.wordList.children.length, 0);
@@ -49,7 +94,8 @@ test("home-view: renderLibrary disables the start button when library is empty",
 
 test("home-view: renderLibrary shows attempt count when > 0", () => {
   const dom = makeDom();
-  const home = attachHomeView({ dom, api: "/api/write" });
+  const { createNode } = makeFakeCreateNode();
+  const home = attachHomeView({ dom, api: "/api/write", createNode });
   home.renderLibrary([{ char: "天", attemptCount: 3 }]);
   const cell = dom.wordList.children[0];
   assert.equal(cell.children.length, 3, "char + attempts label + delete button");
@@ -59,31 +105,96 @@ test("home-view: renderLibrary shows attempt count when > 0", () => {
 
 test("home-view: renderLibrary does not show attempt label when count is 0", () => {
   const dom = makeDom();
-  const home = attachHomeView({ dom, api: "/api/write" });
+  const { createNode } = makeFakeCreateNode();
+  const home = attachHomeView({ dom, api: "/api/write", createNode });
   home.renderLibrary([{ char: "一", attemptCount: 0 }]);
   const cell = dom.wordList.children[0];
   assert.equal(cell.children.length, 2, "char + delete button (no attempts label)");
 });
 
+test("home-view: renderLibrary constructs nodes via createNode (regression — PR #70 plain-object bug)", () => {
+  // Regression: PR #70's refactor built plain {tagName, className,
+  // ...} literals and called wordList.appendChild(plainObject),
+  // which throws on the real DOM with "parameter 1 is not of type
+  // 'Node'". The fix routes every node through createNode. This
+  // test asserts the dependency is actually used.
+  const dom = makeDom();
+  const { createNode, calls } = makeFakeCreateNode();
+  const home = attachHomeView({ dom, api: "/api/write", createNode });
+  home.renderLibrary([
+    { char: "一", attemptCount: 0 },
+    { char: "韩", attemptCount: 2 },
+  ]);
+  // 2 cells: each has div + char span + (maybe) attempts span + delete button
+  // Cell 1 (attemptCount=0): div + span + button = 3
+  // Cell 2 (attemptCount=2): div + span + span + button = 4
+  // Total = 7
+  assert.equal(calls.length, 7, "createNode called for every node built");
+  assert.equal(dom.wordList.children.length, 2, "two cells painted");
+});
+
 test("home-view: loadLibrary sets error message when fetch fails", async () => {
   const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
   const home = attachHomeView({
     dom,
     api: "/api/write",
+    createNode,
     fetch: async () => { throw new Error("network down"); },
   });
   await home.loadLibrary();
   assert.match(dom.homeError.textContent, /加载字库失败/);
+  assert.match(dom.homeError.textContent, /network down/, "should include the underlying error message so user can diagnose");
   assert.equal(dom.startBtn.disabled, true, "start should stay disabled on error");
+});
+
+test("home-view: loadLibrary surfaces a network/TypeError (real iOS / Android cert fail case)", async () => {
+  // iOS Safari + Android Chrome both throw a generic TypeError
+  // "Failed to fetch" when the cert isn't trusted. We need the
+  // UI to show the real message, not just "加载字库失败", so the
+  // user can tell the difference between cert / network / 4xx / 5xx.
+  const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
+  const home = attachHomeView({
+    dom,
+    api: "/api/write",
+    createNode,
+    fetch: async () => { throw new TypeError("Failed to fetch"); },
+  });
+  await home.loadLibrary();
+  assert.match(dom.homeError.textContent, /Failed to fetch/, "must include the real browser error");
+});
+
+test("home-view: loadLibrary surfaces HTTP error from StudyBuddy.fetch (status + text)", async () => {
+  // StudyBuddy.fetch throws with err.message like
+  // "StudyBuddy.fetch: /api/write/words -> 500 internal error".
+  // The UI must show that, not a generic 加载字库失败.
+  const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
+  const home = attachHomeView({
+    dom,
+    api: "/api/write",
+    createNode,
+    fetch: async () => {
+      const e = new Error("StudyBuddy.fetch: /api/write/words -> 500 internal error");
+      e.status = 500;
+      throw e;
+    },
+  });
+  await home.loadLibrary();
+  assert.match(dom.homeError.textContent, /500/);
+  assert.match(dom.homeError.textContent, /StudyBuddy\.fetch/);
 });
 
 test("home-view: addChars shows 'enter chars' error when input is empty", async () => {
   const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
   dom.charsInput.value = "   ";
   let posted = false;
   const home = attachHomeView({
     dom,
     api: "/api/write",
+    createNode,
     fetch: async () => { posted = true; return { added: 0, skipped: 0 }; },
   });
   await home.addChars();
@@ -93,11 +204,13 @@ test("home-view: addChars shows 'enter chars' error when input is empty", async 
 
 test("home-view: addChars calls POST and re-renders on success", async () => {
   const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
   dom.charsInput.value = "一二三";
   const calls = { postUrl: null, postBody: null, libraryAfterPost: null };
   const home = attachHomeView({
     dom,
     api: "/api/write",
+    createNode,
     fetch: async (url, opts) => {
       // The first call is the POST (has opts.body). The second
       // is the GET for loadLibrary — capture only the POST.
@@ -119,10 +232,12 @@ test("home-view: addChars calls POST and re-renders on success", async () => {
 
 test("home-view: addChars shows 'no new' message when server returns added=0", async () => {
   const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
   dom.charsInput.value = "重复";
   const home = attachHomeView({
     dom,
     api: "/api/write",
+    createNode,
     fetch: async () => ({ added: 0, skipped: 5 }),
   });
   await home.addChars();
@@ -131,10 +246,12 @@ test("home-view: addChars shows 'no new' message when server returns added=0", a
 
 test("home-view: addChars shows 'skipped' message when some are duplicates", async () => {
   const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
   dom.charsInput.value = "新字";
   const home = attachHomeView({
     dom,
     api: "/api/write",
+    createNode,
     fetch: async () => ({ added: 1, skipped: 1 }),
   });
   await home.addChars();
