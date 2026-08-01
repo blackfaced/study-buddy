@@ -24,6 +24,7 @@ import { paintPathsToCanvas, parseCTMString } from "./rasterize.js";
 import { runShowFlow } from "./show-flow.js";
 import { attachKidInput } from "./kid-input.js";
 import { createWriteSession } from "./session.js";
+import { attachHomeView } from "./home-view.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -65,74 +66,20 @@ let phase = null;   // 'animating' | 'showing' | 'writing' | 'submitted'
 let pendingTimers = [];  // {kind: 'showing'|'animate', timer} so we can cancel on retry
 
 // ===========================================================================
-//  Home view — load + render library
+//  Home view — load + render library (refactored to ./home-view.js)
 // ===========================================================================
 
-async function loadLibrary() {
-  try {
-    // v0.7 (issue #21): use shared fetch.
-    const data = await window.StudyBuddy.fetch(API + "/words");
-    session.library = data.words || [];
-    renderLibrary();
-  } catch {
-    homeError.textContent = "加载字库失败";
-  }
-}
-
-function renderLibrary() {
-  wordList.innerHTML = "";
-  for (const w of session.library) {
-    const cell = document.createElement("div");
-    cell.className = "word-cell";
-    cell.title = `练过 ${w.attemptCount} 次`;
-    const ch = document.createElement("span");
-    ch.textContent = w.char;
-    cell.appendChild(ch);
-    if (w.attemptCount > 0) {
-      const c = document.createElement("span");
-      c.className = "attempts";
-      c.textContent = `×${w.attemptCount}`;
-      cell.appendChild(c);
-    }
-    const del = document.createElement("button");
-    del.textContent = "×";
-    del.title = `删 "${w.char}"`;
-    del.onclick = async () => {
-      if (!confirm(`确定删 "${w.char}" 吗？历史练习也会一起删。`)) return;
-      try {
-        await window.StudyBuddy.fetch(API + "/words/" + encodeURIComponent(w.char), { method: "DELETE" });
-      } catch { /* ignore — loadLibrary will re-render anyway */ }
-      await loadLibrary();
-    };
-    cell.appendChild(del);
-    wordList.appendChild(cell);
-  }
-  startBtn.disabled = session.library.length === 0;
-}
-
-async function addChars() {
-  homeError.textContent = "";
-  const chars = charsInput.value.trim();
-  if (!chars) {
-    homeError.textContent = "请输入要练的字";
-    return;
-  }
-  try {
-    const r = await window.StudyBuddy.fetch(API + "/words", {
-      method: "POST",
-      body: { chars, addedBy: "parent" },
-    });
-    charsInput.value = "";
-    if (r.added === 0) {
-      homeError.textContent = "没有新增（可能都是重复字或非汉字）";
-    } else if (r.skipped > 0) {
-      homeError.textContent = `新增 ${r.added} 个，跳过 ${r.skipped} 个重复`;
-    }
-    await loadLibrary();
-  } catch {
-    homeError.textContent = "添加失败";
-  }
-}
+const homeView_ = attachHomeView({
+  dom: { wordList, startBtn, charsInput, homeError, addBtn },
+  api: API,
+  fetch: window.StudyBuddy.fetch,
+  onLibraryLoaded: (words) => {
+    session.library = words;
+  },
+});
+const loadLibrary = homeView_.loadLibrary;
+const renderLibrary = homeView_.renderLibrary;
+const addChars = homeView_.addChars;
 
 addBtn.onclick = addChars;
 charsInput.addEventListener("keydown", (e) => {
