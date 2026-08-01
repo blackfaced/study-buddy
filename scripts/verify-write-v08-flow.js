@@ -108,9 +108,12 @@ const BASE = process.env.TEST_URL || "http://localhost:3000";
   check(`animating: #retry-btn hidden`, animPhase["retry-btn"] === false);
   check(`animating: #next-btn hidden`, animPhase["next-btn"] === false);
 
-  // Wait through the 100ms anim + 3000ms showing = ~3.5s, then we
-  // should be in 'writing' with undo + submit visible.
-  await page.waitForTimeout(4000);
+  // Wait through animation + 3s showing window. v0.8.2 (issue #68):
+  // the show flow is now driven by animDone, not a magic setTimeout(100),
+  // so the timing reflects actual HanziWriter animation duration (~2.5s
+  // for "一") + 3s show window = ~5.5s before writing. Use 6s with
+  // margin to avoid flake.
+  await page.waitForTimeout(6000);
   const writingPhase = await page.evaluate(() => {
     const ids = ["again-btn", "undo-btn", "submit-btn", "retry-btn", "next-btn"];
     return Object.fromEntries(ids.map((id) => {
@@ -118,7 +121,7 @@ const BASE = process.env.TEST_URL || "http://localhost:3000";
       return [id, el.style.display !== "none"];
     }));
   });
-  console.log("  after 3.5s wait, button visibility:", JSON.stringify(writingPhase));
+  console.log("  after 6s wait, button visibility:", JSON.stringify(writingPhase));
   check(`writing: #undo-btn visible`, writingPhase["undo-btn"] === true);
   check(`writing: #submit-btn visible`, writingPhase["submit-btn"] === true);
   check(`writing: #next-btn hidden`, writingPhase["next-btn"] === false);
