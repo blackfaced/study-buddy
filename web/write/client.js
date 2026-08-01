@@ -22,6 +22,7 @@ import { computeDisplayLevel } from "./grade.js";
 import { scoreStrokes } from "./score.js";
 import { paintPathsToCanvas, parseCTMString } from "./rasterize.js";
 import { runShowFlow } from "./show-flow.js";
+import { attachKidInput } from "./kid-input.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -308,72 +309,21 @@ function applyCharacterOpacity(opacity) {
 
 // ===========================================================================
 //  Kid input — pointer events, one SVG path per pointerdown-up
+//  (extracted to ./kid-input.js — see that module for tests + API)
 // ===========================================================================
 
-function enableKidInput() {
-  let activePath = null;
-  let activeD = "";
-
-  function getPos(e) {
-    const rect = kidSvg.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * STAGE_SIZE;
-    const y = ((e.clientY - rect.top) / rect.height) * STAGE_SIZE;
-    return { x, y };
-  }
-
-  kidSvg.onpointerdown = (e) => {
-    if (phase !== "writing") return;
-    e.preventDefault();
-    kidSvg.setPointerCapture(e.pointerId);
-    const p = getPos(e);
-    activeD = `M ${p.x} ${p.y}`;
-    activePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    activePath.setAttribute("d", activeD);
-    activePath.setAttribute("stroke", "#e74c3c");
-    activePath.setAttribute("stroke-width", "6");
-    activePath.setAttribute("stroke-linecap", "round");
-    activePath.setAttribute("stroke-linejoin", "round");
-    activePath.setAttribute("fill", "none");
-    kidSvg.appendChild(activePath);
-  };
-
-  kidSvg.onpointermove = (e) => {
-    if (!activePath) return;
-    e.preventDefault();
-    const p = getPos(e);
-    activeD += ` L ${p.x} ${p.y}`;
-    activePath.setAttribute("d", activeD);
-  };
-
-  kidSvg.onpointerup = (e) => {
-    if (!activePath) return;
-    e.preventDefault();
+const kidInput = attachKidInput({
+  svg: kidSvg,
+  stageSize: STAGE_SIZE,
+  isWritingPhase: () => phase === "writing",
+  onStroke: (s) => {
+    // Route the completed stroke into the current session item.
     const item = session[sessionIdx];
-    item.strokes.push({ pathEl: activePath, d: activeD });
-    activePath.setAttribute("opacity", "0.85");
-    activePath = null;
-    activeD = "";
-  };
-
-  kidSvg.onpointercancel = () => {
-    // Treat cancel like a stroke-end so the kid doesn't lose ink if
-    // their palm briefly leaves the surface.
-    if (activePath) {
-      const item = session[sessionIdx];
-      item.strokes.push({ pathEl: activePath, d: activeD });
-      activePath.setAttribute("opacity", "0.85");
-      activePath = null;
-      activeD = "";
-    }
-  };
-}
-
-function disableKidInput() {
-  kidSvg.onpointerdown = null;
-  kidSvg.onpointermove = null;
-  kidSvg.onpointerup = null;
-  kidSvg.onpointercancel = null;
-}
+    if (item) item.strokes.push(s);
+  },
+});
+const enableKidInput = () => kidInput.attach();
+const disableKidInput = () => kidInput.detach();
 
 // ===========================================================================
 //  Rasterise — kid + ref SVG paths → SIZE*SIZE bitmap masks for IoU
