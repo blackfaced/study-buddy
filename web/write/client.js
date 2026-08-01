@@ -23,6 +23,8 @@ import { scoreStrokes } from "./score.js";
 import { paintPathsToCanvas, parseCTMString } from "./rasterize.js";
 import { runShowFlow } from "./show-flow.js";
 import { attachKidInput } from "./kid-input.js";
+import { createWriteSession } from "./session.js";
+import { attachHomeView } from "./home-view.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -55,81 +57,29 @@ const statusEl = document.getElementById("status");
 const scoreEl = document.getElementById("score");
 
 // ----- Session state -----
-let library = [];   // [{ char, addedAt, addedBy, attemptCount }] from server
-let session = [];   // current 5-char session
-let sessionIdx = 0;
+// All session state is owned by ./session.js (refactor PR 7).
+// Client.js reads via getters (.library / .session / .sessionIdx
+// / .currentItem / .isDone) and mutates via .start() / .next()
+// / .retry().
+const session = createWriteSession({ initialLibrary: [] });
 let phase = null;   // 'animating' | 'showing' | 'writing' | 'submitted'
 let pendingTimers = [];  // {kind: 'showing'|'animate', timer} so we can cancel on retry
 
 // ===========================================================================
-//  Home view — load + render library
+//  Home view — load + render library (refactored to ./home-view.js)
 // ===========================================================================
 
-async function loadLibrary() {
-  try {
-    // v0.7 (issue #21): use shared fetch.
-    const data = await window.StudyBuddy.fetch(API + "/words");
-    library = data.words || [];
-    renderLibrary();
-  } catch {
-    homeError.textContent = "加载字库失败";
-  }
-}
-
-function renderLibrary() {
-  wordList.innerHTML = "";
-  for (const w of library) {
-    const cell = document.createElement("div");
-    cell.className = "word-cell";
-    cell.title = `练过 ${w.attemptCount} 次`;
-    const ch = document.createElement("span");
-    ch.textContent = w.char;
-    cell.appendChild(ch);
-    if (w.attemptCount > 0) {
-      const c = document.createElement("span");
-      c.className = "attempts";
-      c.textContent = `×${w.attemptCount}`;
-      cell.appendChild(c);
-    }
-    const del = document.createElement("button");
-    del.textContent = "×";
-    del.title = `删 "${w.char}"`;
-    del.onclick = async () => {
-      if (!confirm(`确定删 "${w.char}" 吗？历史练习也会一起删。`)) return;
-      try {
-        await window.StudyBuddy.fetch(API + "/words/" + encodeURIComponent(w.char), { method: "DELETE" });
-      } catch { /* ignore — loadLibrary will re-render anyway */ }
-      await loadLibrary();
-    };
-    cell.appendChild(del);
-    wordList.appendChild(cell);
-  }
-  startBtn.disabled = library.length === 0;
-}
-
-async function addChars() {
-  homeError.textContent = "";
-  const chars = charsInput.value.trim();
-  if (!chars) {
-    homeError.textContent = "请输入要练的字";
-    return;
-  }
-  try {
-    const r = await window.StudyBuddy.fetch(API + "/words", {
-      method: "POST",
-      body: { chars, addedBy: "parent" },
-    });
-    charsInput.value = "";
-    if (r.added === 0) {
-      homeError.textContent = "没有新增（可能都是重复字或非汉字）";
-    } else if (r.skipped > 0) {
-      homeError.textContent = `新增 ${r.added} 个，跳过 ${r.skipped} 个重复`;
-    }
-    await loadLibrary();
-  } catch {
-    homeError.textContent = "添加失败";
-  }
-}
+const homeView_ = attachHomeView({
+  dom: { wordList, startBtn, charsInput, homeError, addBtn },
+  api: API,
+  fetch: window.StudyBuddy.fetch,
+  onLibraryLoaded: (words) => {
+    session.library = words;
+  },
+});
+const loadLibrary = homeView_.loadLibrary;
+const renderLibrary = homeView_.renderLibrary;
+const addChars = homeView_.addChars;
 
 addBtn.onclick = addChars;
 charsInput.addEventListener("keydown", (e) => {
@@ -137,13 +87,8 @@ charsInput.addEventListener("keydown", (e) => {
 });
 
 startBtn.onclick = () => {
-  if (library.length === 0) return;
-  session = [];
-  for (let i = 0; i < 5; i++) {
-    const w = library[i % library.length];
-    session.push({ char: w.char, attemptCount: w.attemptCount, lastShownAt: null, opacity: 1.0 });
-  }
-  sessionIdx = 0;
+  if (session.library.length === 0) return;
+  session.start();
   homeView.classList.add("hidden");
   practiceView.classList.add("active");
   presentCurrent();
@@ -162,17 +107,17 @@ function clearPendingTimers() {
 }
 
 function presentCurrent() {
-  if (sessionIdx >= session.length) {
+  if (session.isDone) {
     statusEl.textContent = "本轮结束，回主页";
     setPhase("done");
     setTimeout(exitToHome, 1500);
     return;
   }
-  const item = session[sessionIdx];
+  const item = session.currentItem;
   // v0.7 (issue #63): em-dash "—" rendered as a Chinese-glyph in some
   // mobile fonts, making the status read "第 1/5 字 — 一" like "字 一 一".
   // "·" middle dot is much safer.
-  statusEl.textContent = `第 ${sessionIdx + 1} / ${session.length} 字 · ${item.char}`;
+  statusEl.textContent = `第 ${session.sessionIdx + 1} / ${session.session.length} 字 · ${item.char}`;
   startWord(item);
 }
 
@@ -318,7 +263,7 @@ const kidInput = attachKidInput({
   isWritingPhase: () => phase === "writing",
   onStroke: (s) => {
     // Route the completed stroke into the current session item.
-    const item = session[sessionIdx];
+    const item = session.currentItem;
     if (item) item.strokes.push(s);
   },
 });
@@ -431,7 +376,7 @@ function bitmapFromCanvas(ctx, size) {
 // ===========================================================================
 
 function undoLastStroke() {
-  const item = session[sessionIdx];
+  const item = session.currentItem;
   if (!item || !item.strokes || item.strokes.length === 0) return;
   const last = item.strokes.pop();
   if (last && last.pathEl && last.pathEl.parentNode === kidSvg) {
@@ -441,7 +386,7 @@ function undoLastStroke() {
 }
 
 async function submitCurrent() {
-  const item = session[sessionIdx];
+  const item = session.currentItem;
   if (!item) return;
   const strokes = item.strokes || [];
   // Concatenate all stroke d-strings into one path the server can
@@ -506,7 +451,7 @@ function showScore(stars, breakdown) {
 againBtn.onclick = () => {
   // "笔顺重放" — re-animate the current character on demand.
   if (phase === "writing" || phase === "animating" || phase === "showing" || phase === "submitted") {
-    const item = session[sessionIdx];
+    const item = session.currentItem;
     if (item && item.writer) {
       // Re-show reference at full opacity during the replay, then drop
       // back to opacity 0 so the kid can keep writing.
@@ -534,7 +479,7 @@ submitBtn.onclick = () => {
 retryBtn.onclick = () => {
   // "重练" — clear kid strokes, restart the same char (no advance).
   if (phase !== "submitted") return;
-  const item = session[sessionIdx];
+  const item = session.currentItem;
   if (item) item.attemptCount = (item.attemptCount || 0) + 1;  // attempts++; opacity goes down next time
   enableKidInput();
   startWord(item);
@@ -542,7 +487,7 @@ retryBtn.onclick = () => {
 
 nextBtn.onclick = () => {
   if (phase !== "submitted") return;
-  sessionIdx++;
+  session.next();
   enableKidInput();
   presentCurrent();
 };
