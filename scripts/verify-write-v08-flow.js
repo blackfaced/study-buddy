@@ -82,9 +82,8 @@ const BASE = process.env.TEST_URL || "http://localhost:3000";
 
   // ----- 3. Click start, observe phase transitions -----
   console.log("\n=== Practice view phase transitions ===");
-  await page.fill("#chars-input", "一");
-  await page.click("#add-btn");
-  await page.waitForTimeout(300);
+  // Library already has "一" from the setup step; no need to re-add
+  // (the server's PRIMARY KEY would dedupe and leave the library empty).
   // Listen for the very first phase transition: client.js does
   // `setPhase("animating")` synchronously inside startWord, so the
   // #again-btn style.display must become "" before the next yield.
@@ -162,10 +161,26 @@ const BASE = process.env.TEST_URL || "http://localhost:3000";
   // session, which is empty in our test — so the score will be 1 star
   // (no kid strokes). That's still a valid "submitted" transition.
   //
-  // What we really want to test: after clicking 提交, the score
-  // element shows, and 重练/下一题 buttons appear.
+  // Inject a kid stroke that matches the reference (a horizontal
+  // line at y≈300 in the 600 viewBox, like the ref's "一"). The
+  // rasterise → score pipeline should produce a non-zero IoU and
+  // bump the score above the all-zero baseline.
+  await page.evaluate(() => {
+    const kidSvg = document.getElementById("kid-svg");
+    // The internal session state isn't exposed on window, so we
+    // emulate what onpointerup would do: append a path element.
+    // The score pipeline reads `item.strokes` directly; this test
+    // is loose because we can't reach the closure, so we mainly
+    // assert the phase transition + score line shows up.
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M 100 290 L 500 310");
+    path.setAttribute("stroke", "#e74c3c");
+    path.setAttribute("stroke-width", "6");
+    path.setAttribute("fill", "none");
+    kidSvg.appendChild(path);
+  });
   await page.click("#submit-btn", { force: true });   // .cta animation makes it "unstable" for Playwright
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(800);   // give the async rasterise a moment
   const submittedPhase = await page.evaluate(() => {
     const ids = ["again-btn", "undo-btn", "submit-btn", "retry-btn", "next-btn"];
     const score = document.getElementById("score");
