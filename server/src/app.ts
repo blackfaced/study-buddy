@@ -11,24 +11,18 @@ import { config as loadDotenv } from "dotenv";
 import express, { type Request, type Response } from "express";
 import multer from "multer";
 import Database from "better-sqlite3";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { mkdirSync } from "node:fs";
-import { type VisionClient, extractCharsImage } from "./vision.js";
+import { type VisionClient } from "./vision.js";
 import { requestLogger, type Logger, createLogger, stdoutSink } from "./logger.js";
-import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
 import { BuddyLock } from "./buddy-lock.js";
-import {
-  addWritingWords,
-  deleteWritingWord,
-  listWritingAttempts,
-  listWritingWords,
-  recordWritingAttempt,
-} from "./write-sync.js";
 import { registerPortalRoutes } from "./routes/portal.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerBuddyRoutes } from "./routes/buddy.js";
 import { registerSessionRoutes } from "./routes/session.js";
 import { registerChatRoutes, defaultCallMinimax, classifyTopic } from "./routes/chat.js";
+import { registerGameRoutes } from "./routes/game.js";
+import { registerWriteRoutes } from "./routes/write.js";
 
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
@@ -128,186 +122,15 @@ export function createApp(opts: AppOptions): express.Express {
     callMinimax: defaultCallMinimax,
   });
 
-  // ============== Game sync (v0.5b) ==============
-  // Apps like candy-math-island POST their mistakes here. We persist to
-  // the shared mistakes table (source='game') and append the same event
-  // to the outbox so the Memory Nexus worker can index it asynchronously.
-  app.post("/api/game/mistake", async (req: Request, res: Response) => {
-    const { childId, subject, problem, errorType, userAnswer, correctAnswer, level } = req.body ?? {};
-    if (
-      typeof childId !== "string" ||
-      typeof subject !== "string" ||
-      typeof problem !== "string" ||
-      typeof errorType !== "string" ||
-      typeof userAnswer !== "number" ||
-      typeof correctAnswer !== "number" ||
-      typeof level !== "number"
-    ) {
-      return res.status(400).json({ error: "missing or invalid fields" });
-    }
-    try {
-      const id = await recordGameMistake(db, outboxPath, {
-        childId,
-        subject,
-        problem,
-        errorType,
-        userAnswer,
-        correctAnswer,
-        level,
-      });
-      logger.info("game mistake recorded", { mistakeId: id, errorType, level });
-      res.json({ mistakeId: id });
-    } catch (e: any) {
-      logger.error("game mistake record failed", { error: e.message });
-      res.status(500).json({ error: e.message });
-    }
+  // Game + write + extract routes
+  // (refactor PR 5). The rest of app.ts is glue + re-exports.
+  registerGameRoutes(app, { db, logger, outboxPath });
+  registerWriteRoutes(app, {
+    db,
+    logger,
+    mistakesDir,
+    visionClient: opts.visionClient === undefined ? null : opts.visionClient,
   });
-
-  app.get("/api/game/weak-topics", async (req: Request, res: Response) => {
-    const days = Number(req.query.days ?? 7);
-    if (!Number.isFinite(days) || days <= 0) {
-      return res.status(400).json({ error: "days must be a positive number" });
-    }
-    const topics = await getGameWeakTopics(db, days);
-    res.json({ days, weakTopics: topics });
-  });
-
-  // ============== Game session (v0.6 time-mode) ==============
-  // Apps POST a finished time-mode run here for daily aggregation.
-  app.post("/api/game/session", async (req: Request, res: Response) => {
-    const {
-      childId, appId, durationSec,
-      totalQuestions, correctCount,
-      startedAt, endedAt,
-    } = req.body ?? {};
-    if (
-      typeof childId !== "string" ||
-      typeof appId !== "string" ||
-      typeof durationSec !== "number" ||
-      typeof totalQuestions !== "number" ||
-      typeof correctCount !== "number" ||
-      typeof startedAt !== "number" ||
-      typeof endedAt !== "number"
-    ) {
-      return res.status(400).json({ error: "missing or invalid fields" });
-    }
-    try {
-      const id = await recordGameSession(db, outboxPath, {
-        childId, appId, durationSec,
-        totalQuestions, correctCount,
-        startedAt, endedAt,
-      });
-      const correctRate = Math.round((correctCount / totalQuestions) * 100);
-      logger.info("game session recorded", {
-        sessionId: id, appId, totalQuestions, correctCount, correctRate,
-      });
-      res.json({ sessionId: id, correctRate });
-    } catch (e: any) {
-      // 400 for validation errors thrown by recordGameSession (e.g. totalQuestions <= 0);
-      // 500 for anything else.
-      if (/must be/.test(e.message) || /not found/.test(e.message)) {
-        return res.status(400).json({ error: e.message });
-      }
-      logger.error("game session record failed", { error: e.message });
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.get("/api/game/daily", async (req: Request, res: Response) => {
-    const days = Number(req.query.days ?? 7);
-    if (!Number.isFinite(days) || days <= 0) {
-      return res.status(400).json({ error: "days must be a positive number" });
-    }
-    const appId = typeof req.query.appId === "string" ? req.query.appId : undefined;
-    const daily = await getGameDailyStats(db, days, appId);
-    res.json({ days, appId: appId ?? null, daily });
-  });
-
-  // ============== Write app (issue #57) ==============
-  // Per-character word library + attempt history. No PIN gate — writing
-  // is a parent-supervised activity, not the kind of distraction the
-  // buddy PIN is meant to block.
-  app.get("/api/write/words", (_req: Request, res: Response) => {
-    const words = listWritingWords(db);
-    res.json({ words });
-  });
-
-  app.post("/api/write/words", (req: Request, res: Response) => {
-    const { chars, addedBy } = req.body ?? {};
-    if (typeof chars !== "string") {
-      return res.status(400).json({ error: "chars must be a string" });
-    }
-    // Split the string into individual CJK characters; write-sync
-    // does the per-char CJK validation + dedup.
-    const arr = Array.from(chars);
-    const result = addWritingWords(db, arr, typeof addedBy === "string" ? addedBy : "parent");
-    res.json(result);
-  });
-
-  app.delete("/api/write/words/:char", (req: Request, res: Response) => {
-    const char = String(req.params.char);
-    // Defensive: only allow single CJK characters in the URL.
-    if (!/^[\u4E00-\u9FFF]$/.test(char)) {
-      return res.status(400).json({ error: "char must be a single CJK character" });
-    }
-    const removed = deleteWritingWord(db, char);
-    if (!removed) return res.status(404).json({ error: "not found" });
-    res.json({ ok: true });
-  });
-
-  app.get("/api/write/words/:char/attempts", (req: Request, res: Response) => {
-    const char = String(req.params.char);
-    if (!/^[\u4E00-\u9FFF]$/.test(char)) {
-      return res.status(400).json({ error: "char must be a single CJK character" });
-    }
-    const rawLimit = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
-    const limit = Math.min(Number(rawLimit ?? 50) || 50, 200);
-    const attempts = listWritingAttempts(db, char, limit);
-    res.json({ char, attempts });
-  });
-
-  app.post("/api/write/attempts", (req: Request, res: Response) => {
-    const { char, level, strokePath } = req.body ?? {};
-    if (typeof char !== "string" || !/^[\u4E00-\u9FFF]$/.test(char)) {
-      return res.status(400).json({ error: "char must be a single CJK character" });
-    }
-    if (typeof level !== "number" || !Number.isFinite(level) || level < 0 || level > 1) {
-      return res.status(400).json({ error: "level must be a number in [0, 1]" });
-    }
-    if (strokePath !== null && strokePath !== undefined && typeof strokePath !== "string") {
-      return res.status(400).json({ error: "strokePath must be a string or null" });
-    }
-    // FK enforcement: if the char is not in the library, the INSERT
-    // will fail. The client should always add to the library first.
-    try {
-      const id = recordWritingAttempt(db, { char, level, strokePath: strokePath ?? null });
-      res.json({ attemptId: id });
-    } catch (e: any) {
-      res.status(400).json({ error: e.message });
-    }
-  });
-
-  // v0.7 (issue #57 v0.2): extract CJK characters from a photo.
-  // Powers the Mavis agent's "look at this textbook" workflow.
-  app.post(
-    "/api/write/extract-words",
-    upload.single("image"),
-    async (req: Request, res: Response) => {
-      if (!visionClient) {
-        return res.status(503).json({
-          error: "vision not configured (MINIMAX_API_KEY not set on the server)",
-        });
-      }
-      if (!req.file) return res.status(400).json({ error: "no image" });
-      const base64 = req.file.buffer.toString("base64");
-      try {
-        const result = await extractCharsImage(visionClient, base64);
-        res.json({ words: result.words, model: "MiniMax-M3" });
-      } catch (e: any) {
-        res.status(502).json({ error: `vision failed: ${e.message}` });
-      }
-    },
-  );
 
   return app;
 }
