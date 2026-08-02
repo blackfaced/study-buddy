@@ -16,27 +16,67 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { attachKidInput } from "./kid-input.js";
 
+/** Hand-rolled SVG-namespaced <path> factory used by tests. Returns
+ *  objects with setAttribute / getAttribute / a tagName + namespace
+ *  marker so the production SVG.appendChild check would accept them
+ *  in a real browser (and so our test fakeSvg validates Node shape,
+ *  mirroring what real DOM does). */
+function makeFakePathEl() {
+  const attrs = {};
+  return {
+    tagName: "path",
+    namespace: "http://www.w3.org/2000/svg",
+    nodeType: 1,
+    children: [],
+    textContent: "",
+    appendChild(c) {
+      if (!c || typeof c.nodeType !== "number" || typeof c.appendChild !== "function") {
+        throw new TypeError(
+          "Failed to execute 'appendChild' on 'Node': parameter 1 is not of type 'Node'.",
+        );
+      }
+      this.children.push(c);
+      return c;
+    },
+    setAttribute(name, val) { attrs[name] = val; },
+    getAttribute(name) { return attrs[name]; },
+  };
+}
+
+function makeFakeCreateElement() {
+  const calls = [];
+  function createElement(tag) {
+    calls.push(tag);
+    return makeFakePathEl();
+  }
+  return { createElement, calls };
+}
+
 /**
- * Build a minimal mock of the kid-svg element. We use a real
- * jsdom-style element (HTMLElement) so createElementNS works.
- * In node 22 test runner, document is provided if we ask for
- * the "dom" environment — but we can also fake it with a tiny
- * polyfill if needed.
+ * Build a minimal mock of the kid-svg element. The appendChild
+ * enforces Node-shape (mirrors real DOM) so PR #70's plain-object
+ * makePath bug would have been caught by this test.
  */
 function makeSvg() {
-  // If we're in a DOM env (node 22 test --experimental-vm-modules
-  // isn't required; the test runner provides `document` if we
-  // set environment to "dom" in package.json). For this test
-  // we use a hand-rolled mock that supports the small surface
-  // we touch.
-  return {
+  const svg = {
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 600 }),
     setPointerCapture: () => {},
-    appendChild: (el) => el,
     paths: [],
     childNodes: [],
     addEventListener: () => {},
   };
+  // Enforce Node shape on appendChild like the real DOM does.
+  svg.appendChild = (el) => {
+    if (!el || typeof el.nodeType !== "number" || typeof el.appendChild !== "function") {
+      throw new TypeError(
+        "Failed to execute 'appendChild' on 'Node': parameter 1 is not of type 'Node'.",
+      );
+    }
+    svg.paths.push(el);
+    svg.childNodes.push(el);
+    return el;
+  };
+  return svg;
 }
 
 function makePointerEvent(clientX, clientY) {
@@ -54,6 +94,7 @@ function makeDeps(overrides = {}) {
     stageSize: 600,
     isWritingPhase: () => true,
     onStroke: () => {},
+    createElement: makeFakeCreateElement().createElement,
     ...overrides,
   };
 }
@@ -195,4 +236,47 @@ test("kid-input: detach() sets all SVG pointer handlers to null", () => {
   assert.equal(deps.svg.onpointermove, null, "detach should null onpointermove");
   assert.equal(deps.svg.onpointerup, null, "detach should null onpointerup");
   assert.equal(deps.svg.onpointercancel, null, "detach should null onpointercancel");
+});
+
+// --- createElement DI (regression: PR #70 plain-object makePath) --
+
+test("kid-input: createElement is required and used to build path nodes", () => {
+  // Regression: PR #70 built paths as plain {tagName, setAttribute, ...}
+  // objects. svg.appendChild(plainObject) threw on the real DOM and
+  // the kid saw no ink. The fix routes makePath through a createElement
+  // dependency, so production wires document.createElementNS and the
+  // test fake must be used.
+  assert.throws(
+    () => attachKidInput({ svg: makeSvg(), stageSize: 600, isWritingPhase: () => true, onStroke: () => {} }),
+    /createElement is required/,
+    "should refuse to attach without a createElement dependency",
+  );
+
+  const { createElement, calls } = makeFakeCreateElement();
+  const deps = makeDeps({ createElement });
+  const kid = attachKidInput(deps);
+  kid.attach();
+  kid.__handlers.down(makePointerEvent(100, 100));
+  kid.__handlers.up(makePointerEvent(100, 100));
+  assert.equal(calls.length, 1, "createElement should be called once per pointerdown");
+  assert.equal(calls[0], "path", "createElement should build a 'path' element");
+});
+
+test("kid-input: real-DOM SVG.appendChild would accept the path returned by createElement (regression)", () => {
+  // The PR #70 bug was that makePath returned a plain object so real
+  // SVG.appendChild threw "parameter 1 is not of type 'Node'". With
+  // createElement producing a Node-shape object, the SVG accepts it
+  // and the stroke lands in the DOM tree.
+  const { createElement } = makeFakeCreateElement();
+  const deps = makeDeps({ createElement });
+  const kid = attachKidInput(deps);
+  kid.attach();
+  kid.__handlers.down(makePointerEvent(100, 100));
+  // If createElement returned a plain object, deps.svg.appendChild
+  // would throw "parameter 1 is not of type 'Node'" (mirroring real
+  // DOM). With Node-shape, the path is appended cleanly.
+  assert.equal(deps.svg.paths.length, 1, "SVG should hold the newly created path");
+  const el = deps.svg.paths[0];
+  assert.equal(el.namespace, "http://www.w3.org/2000/svg", "path must be SVG-namespaced");
+  assert.equal(typeof el.appendChild, "function", "path must be a real Node (has appendChild)");
 });

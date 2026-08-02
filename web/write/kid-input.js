@@ -8,7 +8,7 @@
 // `item.strokes` to rasterise + score the kid's work.
 //
 // Public API:
-//   - attachKidInput({ svg, stageSize, isWritingPhase, onStroke })
+//   - attachKidInput({ svg, stageSize, isWritingPhase, onStroke, createElement })
 //     returns { attach(), detach(), __handlers }
 //
 //   - svg:             the kid's <svg> element (kid-svg in client.js)
@@ -17,44 +17,69 @@
 //                      is in the "writing" phase of the state machine
 //   - onStroke:        ({ pathEl, d }) => void — called once per
 //                      completed stroke (pointerup or pointercancel)
+//   - createElement:   (tag) => SVGElement — factory for new <path>
+//                      nodes. Production passes
+//                      `document.createElementNS(SVG_NS, tag)`;
+//                      tests pass a fake. Required.
 //
 // The exposed __handlers are for testing only — production code
 // uses attach()/detach() to wire up the SVG's onpointerdown/move/up.
+//
+// History: PR #70 originally built path elements as plain JS objects
+// (no DOM), so svg.appendChild(plainObject) threw on real browsers —
+// kids could see the canvas but their strokes never appeared. This
+// module now requires createElement so the production wiring always
+// goes through the real DOM factory.
 // =====================================================================
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const STROKE_COLOR = "#e74c3c";
 const STROKE_WIDTH = "6";
 
-/**
- * Build a new <path>-like element. In a browser this would use
- * document.createElementNS, but the rest of the app only needs
- * the setAttribute / getAttribute / appendChild surface, so we
- * use a plain object. That keeps the module testable without
- * a DOM and avoids the SVG-namespace-detached-node trap we hit
- * on iOS Safari (see the v0.8.1 score rewrite).
- */
-function makePath(d) {
-  const attrs = {
-    d,
-    stroke: STROKE_COLOR,
-    "stroke-width": STROKE_WIDTH,
-    "stroke-linecap": "round",
-    "stroke-linejoin": "round",
-    fill: "none",
-  };
-  return {
-    tagName: "path",
-    namespace: SVG_NS,
-    setAttribute(name, val) { attrs[name] = val; },
-    getAttribute(name) { return attrs[name]; },
-  };
+/** Default for the browser: a real SVG-namespaced <path>. Tests
+ *  must inject their own createElement (see kid-input.test.js). */
+function defaultCreateElement(tag) {
+  if (
+    typeof document === "undefined" ||
+    typeof document.createElementNS !== "function"
+  ) {
+    throw new Error(
+      "kid-input: no document available; pass createElement explicitly " +
+        "(production should pass document.createElementNS(SVG_NS, tag))",
+    );
+  }
+  return document.createElementNS(SVG_NS, tag);
 }
 
-export function attachKidInput({ svg, stageSize, isWritingPhase, onStroke }) {
+export function attachKidInput({
+  svg,
+  stageSize,
+  isWritingPhase,
+  onStroke,
+  createElement,
+}) {
+  if (typeof createElement !== "function") {
+    throw new Error("kid-input: createElement is required (see defaultCreateElement)");
+  }
+  const _createElement = createElement || defaultCreateElement;
+
   /** Active path being drawn right now. null between strokes. */
   let activePath = null;
   let activeD = "";
+
+  function makePath(d) {
+    // Real SVG-namespaced path element — the previous PR #70 refactor
+    // built plain {tagName, setAttribute, ...} objects, which made
+    // svg.appendChild throw on real browsers.
+    const el = _createElement("path");
+    el.setAttribute("d", d);
+    el.setAttribute("stroke", STROKE_COLOR);
+    el.setAttribute("stroke-width", STROKE_WIDTH);
+    el.setAttribute("stroke-linecap", "round");
+    el.setAttribute("stroke-linejoin", "round");
+    el.setAttribute("fill", "none");
+    return el;
+  }
 
   function getPos(e) {
     const rect = svg.getBoundingClientRect();

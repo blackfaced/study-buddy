@@ -9,12 +9,22 @@
 const { chromium } = require("playwright");
 
 const URL = process.env.TEST_URL || "https://localhost:3000/write/";
+// Default to a mobile viewport (iPhone 12-ish) so the test catches
+// touch / pointer / CSS bugs that only show up on phones. Override
+// with VIEWPORT=desktop for Mac/iPad sanity checks.
+const VIEWPORT = process.env.VIEWPORT || "mobile";
 
 (async () => {
   const browser = await chromium.launch({
     executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   });
-  const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const ctx = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: VIEWPORT === "mobile" ? { width: 390, height: 844 } : { width: 1280, height: 800 },
+    deviceScaleFactor: VIEWPORT === "mobile" ? 2 : 1,
+    isMobile: VIEWPORT === "mobile",
+    hasTouch: VIEWPORT === "mobile",
+  });
   const page = await ctx.newPage();
 
   const consoleMsgs = [];
@@ -105,6 +115,137 @@ const URL = process.env.TEST_URL || "https://localhost:3000/write/";
   console.log(`step 5: Hanzi Writer mounted, svg count = ${hanziSvgCount}`);
   if (hanziSvgCount === 0) {
     console.log("WARN: no SVG rendered by HanziWriter — maybe CDN issue");
+  }
+
+  // 5a. Regression (mobile pointer fix): #kid-svg must have the
+  // .interactive class so its CSS pointer-events: auto kicks in.
+  // Without it, taps on the canvas are silently swallowed by the
+  // CSS rule ".practice-stage svg { pointer-events: none; }" and
+  // the kid can't draw. (See issue: phone showed 字, kid couldn't
+  // write.) We check it after the practice view becomes active.
+  await page.waitForFunction(
+    () => document.getElementById("kid-svg")?.classList.contains("interactive"),
+    { timeout: 5000 },
+  ).catch(() => {});
+  const kidSvgHasInteractive = await page.evaluate(() =>
+    document.getElementById("kid-svg")?.classList.contains("interactive"),
+  );
+  console.log(`step 5a: #kid-svg has .interactive class = ${kidSvgHasInteractive}`);
+  if (!kidSvgHasInteractive) {
+    console.log("FAIL: #kid-svg missing .interactive class — kid can't draw on mobile (CSS pointer-events: none would block taps)");
+    process.exit(1);
+  }
+  // Also check the computed pointer-events to catch any CSS regressions.
+  const kidSvgPointerEvents = await page.evaluate(() => {
+    const el = document.getElementById("kid-svg");
+    return el ? getComputedStyle(el).pointerEvents : null;
+  });
+  console.log(`step 5b: #kid-svg computed pointer-events = ${kidSvgPointerEvents}`);
+  if (kidSvgPointerEvents !== "auto") {
+    console.log(`FAIL: #kid-svg pointer-events is "${kidSvgPointerEvents}", expected "auto"`);
+    process.exit(1);
+  }
+
+  // 5c. Mobile stage size: on a 375px-wide viewport, the stage
+  // should be at most ~360px so the kid can see the controls row
+  // below without scrolling. The old CSS "min(560px, 92vw)" put
+  // the stage at 345px on a 375 viewport, which is fine, but
+  // HanziWriter's character is rendered to fill the stage box, so
+  // a wide stage means a wide character (especially 横 like 一).
+  // We assert the stage is no wider than 92vw + 12px slack.
+  const stageWidth = await page.evaluate(() => {
+    const el = document.querySelector(".practice-stage");
+    return el ? el.getBoundingClientRect().width : 0;
+  });
+  const viewportWidth = await page.evaluate(() => window.innerWidth);
+  console.log(`step 5c: stage width = ${stageWidth}px, viewport = ${viewportWidth}px`);
+  if (stageWidth > viewportWidth * 0.95) {
+    console.log(`FAIL: practice-stage is ${stageWidth}px on a ${viewportWidth}px viewport — character is too big to see controls`);
+    process.exit(1);
+  }
+
+  // 5d. Regression (kid-input plain-object DOM bug): a real
+  // touch tap + drag must add a <path> child to #kid-svg. PR #70
+  // extracted kid-input.js with a fake makePath() that returns
+  // plain {tagName, setAttribute, ...} objects; svg.appendChild
+  // threw on the real DOM ("parameter 1 is not of type 'Node'")
+  // and the kid saw no ink. The fix is to create a real SVG <path>
+  // via createElementNS. This step catches the bug if it returns.
+  //
+  // Important: wait for the writing phase first. The v0.8 flow is
+  // animating → showing (3s) → writing. kid-input's onDown short-
+  // circuits with `if (!isWritingPhase()) return;`, so we need to
+  // be in the writing phase (status text "字消失啦，开始写 ↓")
+  // before tapping, otherwise the bug is masked by the phase gate.
+  await page.waitForFunction(
+    () => document.getElementById("status")?.textContent?.includes("字消失啦"),
+    { timeout: 15000 },
+  );
+  const kidSvgRect = await page.evaluate(() => {
+    const el = document.getElementById("kid-svg");
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, w: r.width, h: r.height };
+  });
+  const pathsBefore = await page.evaluate(() =>
+    document.querySelectorAll("#kid-svg path").length,
+  );
+  // Simulate a stroke: tap at left, drag to right (one 一 stroke).
+  const startX = kidSvgRect.x + kidSvgRect.w * 0.25;
+  const startY = kidSvgRect.y + kidSvgRect.h * 0.5;
+  const endX = kidSvgRect.x + kidSvgRect.w * 0.75;
+  const endY = kidSvgRect.y + kidSvgRect.h * 0.5;
+  // Drive kid-input's handlers directly (the property handlers
+  // attached by kidInput.attach()). This mirrors what a real touch
+  // would do, without the synthetic-PointerEvent quirks that
+  // dispatchEvent has on detached property handlers.
+  const dispatchResult = await page.evaluate(([sx, sy, ex, ey]) => {
+    const svg = document.getElementById("kid-svg");
+    if (typeof svg.onpointerdown !== "function") {
+      return { error: "kid-svg.onpointerdown not a function" };
+    }
+    const mkEvent = (type, x, y) => ({
+      type,
+      bubbles: true,
+      cancelable: true,
+      pointerType: "touch",
+      isPrimary: true,
+      pointerId: 1,
+      clientX: x,
+      clientY: y,
+      preventDefault() {},
+    });
+    try {
+      svg.onpointerdown(mkEvent("pointerdown", sx, sy));
+      const steps = 10;
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        svg.onpointermove(mkEvent("pointermove", sx + (ex - sx) * t, sy + (ey - sy) * t));
+      }
+      svg.onpointerup(mkEvent("pointerup", ex, ey));
+      return {
+        ok: true,
+        paths: svg.querySelectorAll("path").length,
+        status: document.getElementById("status")?.textContent,
+        allChildren: Array.from(svg.children).map(c => c.tagName),
+      };
+    } catch (e) {
+      return { error: e.constructor.name + ": " + e.message };
+    }
+  }, [startX, startY, endX, endY]);
+  if (dispatchResult.error) {
+    console.log(`step 5d: dispatch failed: ${dispatchResult.error}`);
+    console.log("FAIL: pointer event simulation threw — kid-input broken (regression of PR #70 plain-object makePath)");
+    process.exit(1);
+  }
+  console.log(`step 5d: dispatchResult = ${JSON.stringify(dispatchResult)}`);
+  await page.waitForTimeout(300);
+  const pathsAfter = await page.evaluate(() =>
+    document.querySelectorAll("#kid-svg path").length,
+  );
+  console.log(`step 5d: #kid-svg <path> count before=${pathsBefore} after=${pathsAfter}`);
+  if (pathsAfter <= pathsBefore) {
+    console.log("FAIL: pointer event didn't add a <path> to #kid-svg (PR #70 plain-object makePath bug — SVG.appendChild(plainObject) throws)");
+    process.exit(1);
   }
 
   // 6. Status text in v0.8 flow has different values per phase

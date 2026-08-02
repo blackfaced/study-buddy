@@ -257,6 +257,13 @@ function applyCharacterOpacity(opacity) {
 //  (extracted to ./kid-input.js — see that module for tests + API)
 // ===========================================================================
 
+// SVG namespace — kid-input.js needs this to build real <path>
+// elements via createElementNS. We pass it as the createElement
+// dependency so the module never reaches for `document` directly
+// (which keeps it testable without a DOM in node --test).
+const SVG_NS = "http://www.w3.org/2000/svg";
+const createSvgElement = (tag) => document.createElementNS(SVG_NS, tag);
+
 const kidInput = attachKidInput({
   svg: kidSvg,
   stageSize: STAGE_SIZE,
@@ -266,6 +273,7 @@ const kidInput = attachKidInput({
     const item = session.currentItem;
     if (item) item.strokes.push(s);
   },
+  createElement: createSvgElement,
 });
 const enableKidInput = () => kidInput.attach();
 const disableKidInput = () => kidInput.detach();
