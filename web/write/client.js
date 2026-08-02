@@ -347,7 +347,22 @@ async function rasterizeStrokes(strokes, item) {
   let refStrokes = 0;
   const refSvg = hanziTarget ? hanziTarget.querySelector("svg") : null;
   if (refSvg) {
-    refStrokes = refSvg.querySelectorAll("path").length;
+    // v0.8.2.1 (issue: phone score 0): refStrokes must be the REAL
+    // stroke count, not the HanziWriter sub-path count. The library
+    // splits each stroke into multiple sub-paths for the animation
+    // (e.g. "一" → 6 sub-paths), so refSvg.querySelectorAll("path")
+    // returns 6 for a single-stroke character. The kid drew 1
+    // stroke → strokesScore = 1 - |1-6|/6 = 0.17 → final score
+    // ~0.1 → "0 分" even for a perfect stroke. The right answer is
+    // HanziWriter.loadCharacterData(char).strokes.length.
+    try {
+      const refCharData = await HanziWriter.loadCharacterData(item.char);
+      refStrokes = (refCharData && refCharData.strokes) ? refCharData.strokes.length : 0;
+    } catch (e) {
+      // HanziWriter CDN hiccup — fall back to the (wrong) sub-path
+      // count rather than 0, which would make every score a hard 0.
+      refStrokes = refSvg.querySelectorAll("path").length;
+    }
     // Find the first <g> with a transform attribute; that's the
     // HanziWriter's glyph group. We compose any chained transforms.
     const g = refSvg.querySelector("g[transform]");
@@ -411,7 +426,12 @@ async function submitCurrent() {
   //    accurately but scored 1★. Rasterising both sides to a 100×100
   //    canvas and computing intersection-over-union reflects what
   //    "matches" actually means.
-  const { kidBitmap, refBitmap, refStrokes, size } = rasterizeStrokes(strokes, item);
+  // rasterizeStrokes is async (it awaits HanziWriter.loadCharacterData
+  // for the real stroke count). Without await here we destructure a
+  // Promise and get kidBitmap=undefined, refBitmap=undefined,
+  // refStrokes=0 → score.js short-circuits to 1★ "0 分". Bug caught
+  // on the v0.8.2.1 phone live test (issue: phone score always 0).
+  const { kidBitmap, refBitmap, refStrokes, size } = await rasterizeStrokes(strokes, item);
   const { stars, breakdown } = scoreStrokes({
     kidStrokes: strokes.length,
     refStrokes: Math.max(refStrokes, 1),  // if writer gave 0, pretend 1 so 0 kid → 0 score
