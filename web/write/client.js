@@ -180,7 +180,13 @@ async function startWord(item) {
   const writer = HanziWriter.create(hanziTarget, item.char, {
     width: STAGE_SIZE,
     height: STAGE_SIZE,
-    padding: 5,
+    // v0.8.2.2: padding 5 made "一" span 88% of the viewBox
+    // horizontally (look "huge" on phones), and pushed the glyph
+    // down past the visual center. padding 100 keeps the character
+    // at ~60% of viewBox so it doesn't crowd the controls row, and
+    // the centering math is closer to the kid's natural writing area.
+    // (Tested with 一/二/三/韩 — see verify-write-v082-char-size.js.)
+    padding: 100,
     showCharacter: true,
     showOutline: false,
     strokeColor: "#4caf50",
@@ -329,7 +335,9 @@ async function rasterizeStrokes(strokes, item) {
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   const kidDs = strokes.map((s) => s.pathEl.getAttribute("d")).filter(Boolean);
-  paintPathsToCanvas(ctx, kidDs, null, 6);
+  // deviceLineWidth=1 → 1 device pixel stroke in the 100x100 mask
+  // (no ctm, so paintPathsToCanvas doesn't scale).
+  paintPathsToCanvas(ctx, kidDs, null, 1);
   ctx.restore();
   const kidBitmap = bitmapFromCanvas(ctx, SIZE);
 
@@ -376,7 +384,12 @@ async function rasterizeStrokes(strokes, item) {
     const refDs = Array.from(refSvg.querySelectorAll("path"))
       .map((p) => p.getAttribute("d"))
       .filter(Boolean);
-    paintPathsToCanvas(ctx, refDs, ctm, 6);
+    // deviceLineWidth=1 → 1 device pixel stroke in the 100x100 mask
+    // (matches the kid's stroke width after paintPathsToCanvas
+    // divides by |ctm.scale|). Without the normalisation in
+    // paintPathsToCanvas the ref stroke was 1/0.39 ≈ 2.5x wider
+    // than the kid's and IoU never reached 1.0.
+    paintPathsToCanvas(ctx, refDs, ctm, 1);
     ctx.restore();
   }
   const refBitmap = bitmapFromCanvas(ctx, SIZE);
