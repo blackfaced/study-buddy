@@ -101,20 +101,35 @@ export function applyCTM(ctx, ctm) {
 
 /**
  * Paint a list of d-strings onto the given canvas context as stroked
- * paths, with the optional CTM applied first. Caller is responsible
- * for setting strokeStyle, lineWidth, lineCap, lineJoin — this
- * function just strokes paths.
+ * paths, with the optional CTM applied first. The `lineWidth` is the
+ * final stroke width in **device space** (canvas pixels), regardless
+ * of whether a CTM is applied. Internally we convert it to user
+ * units by dividing by the CTM's uniform scale factor, so that:
  *
+ *   - With no ctm, lineWidth=1 → 1 device pixel stroke.
+ *   - With ctm scale 0.576 (HanziWriter's glyph transform), lineWidth=1
+ *     → 1 device pixel stroke, same as the no-ctm case.
+ *
+ * This matters for IoU scoring: without the normalization the ref's
+ * stroke ends up at 0.576px (or whatever |ctm.d| is) while the kid's
+ * is 1px, so the kid's stroke contributes proportionally more to the
+ * mask area and the IoU never reaches 1.0 even for a perfect match.
+ *
+ * Example:
  *   paintPathsToCanvas(ctx, ["M 0 0 L 100 100"], {a:0.5,b:0,c:0,d:0.5,e:0,f:0}, 6)
  *
  * @param {CanvasRenderingContext2D} ctx
  * @param {string[]} dStrings
  * @param {{a,b,c,d,e,f}|null} ctm
- * @param {number} lineWidth
+ * @param {number} deviceLineWidth  stroke width in device pixels
  */
-export function paintPathsToCanvas(ctx, dStrings, ctm, lineWidth) {
+export function paintPathsToCanvas(ctx, dStrings, ctm, deviceLineWidth) {
   ctx.save();
-  ctx.lineWidth = lineWidth;
+  // Convert device lineWidth to user units. For a pure scale ctm
+  // (which is all HanziWriter emits), |ctm.a| is the scale factor.
+  // We use Math.hypot(a, b) to also handle a future rotated ctm.
+  const scale = ctm ? Math.hypot(ctm.a, ctm.b) || 1 : 1;
+  ctx.lineWidth = deviceLineWidth / scale;
   if (ctm) applyCTM(ctx, ctm);
   for (const d of dStrings) {
     if (!d) continue;
