@@ -49,6 +49,15 @@
        cross + diagonals unless we explicitly layer the grid on top. */
     .practice-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
     .practice-stage svg.interactive { pointer-events: auto; touch-action: none; cursor: crosshair; }
+    /* char-center: wrapper that holds both the HanziWriter reference
+       (#hanzi-target) and the kid's drawable SVG (#kid-svg). The
+       char-center module applies `translate(...) scale(...)` here so
+       the character fits the stage and lands on the grid center,
+       regardless of viewport (phone ~358 stage vs pad ~560 stage).
+       transform-origin: center means the scale shrinks toward the
+       stage's middle; the translate then nudges the now-scaled
+       character the remaining distance to the grid center. */
+    .character-layer { position: absolute; inset: 0; transform-origin: center center; will-change: transform; }
     /* v0.7 (issue #63): grid sits above the reference SVG, and we clip
        the rotated 141.4%-tall diagonals so they don't bleed outside the
        stage box once the z-index promotes them. */
@@ -110,9 +119,16 @@
   <section class="practice" id="practice-view">
     <div class="practice-stage" id="stage">
       <div class="grid-overlay"><div class="diagonal"></div><div class="diag2"></div></div>
-      <!-- Hanzi Writer mounts here; kid's strokes layer on top. -->
-      <div id="hanzi-target" style="position:absolute; inset:0;"></div>
-      <svg id="kid-svg" class="interactive" viewBox="0 0 600 600" preserveAspectRatio="xMidYMid meet" aria-label="孩子写字区"></svg>
+      <!-- character-layer: a single wrapper so char-center can
+           translate+scale BOTH the HanziWriter reference and the
+           kid's drawable SVG together. Without this wrapper, moving
+           one would break the kid's coordinate alignment with the
+           reference. -->
+      <div class="character-layer" id="character-layer">
+        <!-- Hanzi Writer mounts here; kid's strokes layer on top. -->
+        <div id="hanzi-target" style="position:absolute; inset:0;"></div>
+        <svg id="kid-svg" class="interactive" viewBox="0 0 600 600" preserveAspectRatio="xMidYMid meet" aria-label="孩子写字区"></svg>
+      </div>
     </div>
     <div class="practice-controls">
       <button id="again-btn" type="button" class="secondary">笔顺重放</button>
