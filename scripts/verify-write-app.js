@@ -168,6 +168,50 @@ const VIEWPORT = process.env.VIEWPORT || "mobile";
     process.exit(1);
   }
 
+  // 5e. Char-center alignment (issue: phone "字看不全"): the
+  // HanziWriter glyph must be visually centered on the stage grid.
+  // Before char-center, wide characters like "一" landed off the
+  // right edge of a phone stage (102px overflow measured on a
+  // 358-wide stage) and the kid only saw part of the glyph. After
+  // char-center, the g's screen center should match the stage's
+  // screen center within a small tolerance. We test on the
+  // current viewport; the same code path is exercised on pad in
+  // the multi-viewport Playwright suite (see step 5f).
+  // Wait for the g to be present (CDN data load + viewBox change).
+  await page.waitForFunction(
+    () => document.querySelector("#hanzi-target svg g[transform]")?.getBoundingClientRect().width > 0,
+    { timeout: 10000 },
+  ).catch(() => {});
+  const alignment = await page.evaluate(() => {
+    const stage = document.getElementById("stage").getBoundingClientRect();
+    const refSvg = document.querySelector("#hanzi-target svg");
+    const g = refSvg?.querySelector("g[transform]");
+    if (!g) return null;
+    const gRect = g.getBoundingClientRect();
+    return {
+      stageCx: stage.left + stage.width / 2,
+      stageCy: stage.top + stage.height / 2,
+      gCx: gRect.left + gRect.width / 2,
+      gCy: gRect.top + gRect.height / 2,
+      gW: gRect.width,
+    };
+  });
+  if (alignment) {
+    console.log(`step 5e: g center (${alignment.gCx.toFixed(1)}, ${alignment.gCy.toFixed(1)}) vs stage center (${alignment.stageCx.toFixed(1)}, ${alignment.stageCy.toFixed(1)}), glyph width = ${alignment.gW.toFixed(1)}px`);
+    const dx = Math.abs(alignment.gCx - alignment.stageCx);
+    const dy = Math.abs(alignment.gCy - alignment.stageCy);
+    // Tolerance: 5% of stage width OR 6px (whichever is larger).
+    // PR #78 (padding:100) had g center off by ~100px from stage
+    // center on a phone — this would fail any reasonable tolerance.
+    const tol = Math.max(6, stageWidth * 0.05);
+    if (dx > tol || dy > tol) {
+      console.log(`FAIL: g center is off by (${dx.toFixed(1)}, ${dy.toFixed(1)})px from stage center (tolerance ${tol.toFixed(1)}px) — char-center module didn't center the glyph`);
+      process.exit(1);
+    }
+  } else {
+    console.log("step 5e: SKIPPED — g not present in #hanzi-target yet (CDN may not have returned character data)");
+  }
+
   // 5d. Regression (kid-input plain-object DOM bug): a real
   // touch tap + drag must add a <path> child to #kid-svg. PR #70
   // extracted kid-input.js with a fake makePath() that returns
