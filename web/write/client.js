@@ -26,6 +26,7 @@ import { attachKidInput } from "./kid-input.js";
 import { createWriteSession } from "./session.js";
 import { attachHomeView } from "./home-view.js";
 import { renderProgressHeader } from "./progress-header.js";
+import { centerWhenReady, centerCharacter } from "./char-center.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -216,10 +217,15 @@ async function startWord(item, opts = {}) {
     height: STAGE_SIZE,
     // v0.8.2.2: padding 5 made "一" span 88% of the viewBox
     // horizontally (look "huge" on phones), and pushed the glyph
-    // down past the visual center. padding 100 keeps the character
-    // at ~60% of viewBox so it doesn't crowd the controls row, and
-    // the centering math is closer to the kid's natural writing area.
-    // (Tested with 一/二/三/韩 — see verify-write-v082-char-size.js.)
+    // down past the visual center. v0.9 (PR #79): we now
+    // dynamically re-center the character after HanziWriter mounts
+    // (see centerWhenReady below), so the padding just needs to
+    // keep the glyph from overflowing the SVG itself. 100 is a
+    // safe middle ground — small enough that "一" still fits
+    // inside the SVG bounds (was 152% wide at padding 5), large
+    // enough that tall characters like "量" don't crowd the
+    // edge. The visual centering on the stage grid is now the
+    // char-center module's job, not padding's.
     padding: 100,
     showCharacter: true,
     showOutline: false,
@@ -229,6 +235,15 @@ async function startWord(item, opts = {}) {
     delayBetweenStrokes: 200,
   });
   item.writer = writer;
+
+  // v0.9 (issue: phone "字看不全"): center the character on the
+  // stage grid and scale to fit. Different viewports (phone ~358
+  // stage, pad ~560 stage) get different scales — same code path.
+  // centerWhenReady waits for the HanziWriter data to load (CDN
+  // fetch is async) before measuring. We don't await it here —
+  // the animation can start in parallel and the transform gets
+  // applied the moment the data arrives.
+  centerWhenReady({ stage, hanziTarget, kidSvg, margin: 0.1 }).catch(() => {});
 
   // v0.8.1 (issue #66): always show the reference at full opacity
   // for the first look. grade.js's computeDisplayLevel fades to 0
@@ -594,6 +609,22 @@ function exitToHome() {
   homeView.classList.remove("hidden");
   loadLibrary();
 }
+
+// v0.9 (PR #79): re-center the character on viewport resize.
+// The stage is responsive (min(560px, 92vw)), so a phone going
+// from portrait to landscape, or a URL bar collapsing/expanding,
+// changes the stage size. The character was scaled for the old
+// size; without re-centering it would float off the grid.
+// Debounce so we don't run this on every pixel of a soft keyboard
+// animation. We measure synchronously here (data is already
+// loaded) — centerWhenReady's MutationObserver isn't needed.
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    centerCharacter({ stage, hanziTarget, kidSvg, margin: 0.1 });
+  }, 120);
+});
 
 // ----- Boot -----
 enableKidInput();   // attach the input handlers; the phase check
