@@ -278,12 +278,23 @@ function unlockBuddyUI() {
   pinUnlocked = true;
   pinOverlay.style.display = 'none';
   document.querySelector('.app').classList.remove('hidden');
+  // cam-preview is allowed to show once the gate is open. The camera
+  // module's start() may also toggle it, but unlocking should not
+  // leave it hidden by accident.
+  const camEl = document.getElementById('cam-preview');
+  if (camEl) camEl.style.display = '';
 }
 
 function lockBuddyUI() {
   pinUnlocked = false;
   pinOverlay.style.display = 'flex';
   document.querySelector('.app').classList.add('hidden');
+  // Hide the camera preview while the gate is up. Without this, the
+  // fixed-positioned #cam-preview (top:16px right:16px 120×160) shows
+  // through the rgba(0,0,0,0.7) overlay and looks like a misplaced
+  // black rectangle in the top-right of the modal — issue #84.
+  const camEl = document.getElementById('cam-preview');
+  if (camEl) camEl.style.display = 'none';
   setTimeout(() => pinInput.focus(), 0);  // iOS Safari 需要异步 focus
 }
 
