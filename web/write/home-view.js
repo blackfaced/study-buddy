@@ -69,6 +69,21 @@ export function attachHomeView({ dom, api, fetch, createNode, onLibraryLoaded, o
     startBtn.disabled = library.length === 0;
   }
 
+  // Issue #80: homeError wears .error-msg by default (red), so even
+  // success-style text like "新增 N 个" looked scary to a kid. The
+  // success state uses .success-msg (green) instead. The wrapper
+  // also resets the class so a stale success line doesn't bleed
+  // into the next attempt.
+  function setError(text, kind) {
+    homeError.textContent = text;
+    homeError.className = kind === "success" ? "success-msg" : "error-msg";
+  }
+
+  function clearError() {
+    homeError.textContent = "";
+    homeError.className = "";
+  }
+
   async function loadLibrary() {
     try {
       const data = await fetch(api + "/words");
@@ -79,15 +94,15 @@ export function attachHomeView({ dom, api, fetch, createNode, onLibraryLoaded, o
       // Surface the real error so the user can tell cert/network/4xx/5xx
       // apart instead of seeing a generic "加载字库失败" every time.
       const msg = e && e.message ? e.message : String(e);
-      homeError.textContent = `加载字库失败: ${msg}`;
+      setError(`加载字库失败: ${msg}`, "error");
     }
   }
 
   async function addChars() {
-    homeError.textContent = "";
+    clearError();
     const chars = charsInput.value.trim();
     if (!chars) {
-      homeError.textContent = "请输入要练的字";
+      setError("请输入要练的字", "error");
       return;
     }
     try {
@@ -97,16 +112,30 @@ export function attachHomeView({ dom, api, fetch, createNode, onLibraryLoaded, o
       });
       charsInput.value = "";
       if (r.added === 0) {
-        homeError.textContent = "没有新增（可能都是重复字或非汉字）";
+        setError("没有新增（可能都是重复字或非汉字）", "error");
       } else if (r.skipped > 0) {
-        homeError.textContent = `新增 ${r.added} 个，跳过 ${r.skipped} 个重复`;
+        // "added some, skipped some" — green, not red. Kid added a
+        // new char, that's a success. The skipped count is info,
+        // not a failure.
+        setError(`✓ 新增 ${r.added} 个，跳过 ${r.skipped} 个重复`, "success");
       }
+      // Full success (added > 0, skipped === 0): leave homeError
+      // empty. The cards appearing in the library is the feedback.
       await loadLibrary();
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
-      homeError.textContent = `添加失败: ${msg}`;
+      setError(`添加失败: ${msg}`, "error");
     }
   }
 
-  return { renderLibrary, loadLibrary, addChars };
+  // Issue #80: when the kid types in the input, any stale error or
+  // success message from a prior attempt clears. The kid shouldn't
+  // stare at a red "没有新增" while composing the next batch.
+  // Returned as `_onInput` so the production wiring (client.js) can
+  // attach it to the input's 'input' event.
+  function _onInput() {
+    clearError();
+  }
+
+  return { renderLibrary, loadLibrary, addChars, _onInput };
 }

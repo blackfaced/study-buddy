@@ -37,6 +37,10 @@
     .start-btn { padding: 14px 20px; font-size: 18px; background: var(--accent); color: white; border: none; border-radius: 16px; font-weight: bold; }
     .start-btn:disabled { background: #ccc; }
     .error-msg { color: #d32f2f; font-size: 14px; min-height: 18px; }
+    /* Issue #80: success-state message (e.g. "✓ 新增 N 个") is
+       green, not red. Same layout (font-size, min-height) so the
+       line height doesn't jump when the message switches kind. */
+    .success-msg { color: #2e7d32; font-size: 14px; min-height: 18px; }
 
     /* ===== Practice view (Apple Pencil + Hanzi Writer) ===== */
     .practice { display: none; flex: 1; flex-direction: column; align-items: center; gap: 12px; }

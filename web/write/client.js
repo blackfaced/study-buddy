@@ -85,6 +85,10 @@ addBtn.onclick = addChars;
 charsInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") addChars();
 });
+// Issue #80: typing in the input clears any stale error/success
+// message from a prior attempt, so the kid sees a clean slate
+// instead of a red "没有新增" lingering from the previous try.
+charsInput.addEventListener("input", homeView_._onInput);
 
 startBtn.onclick = () => {
   if (session.library.length === 0) return;

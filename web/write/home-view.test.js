@@ -257,4 +257,109 @@ test("home-view: addChars shows 'skipped' message when some are duplicates", asy
   await home.addChars();
   assert.match(dom.homeError.textContent, /新增 1 个/);
   assert.match(dom.homeError.textContent, /跳过 1 个重复/);
+  assert.match(dom.homeError.className, /success/,
+    "skipped message is success-msg (green), not error-msg (red) — see issue #80");
+});
+
+// ---------------------------------------------------------------------------
+// Issue #80: '没有新增' error scares the kid because the homeError text
+// stays red even when the last action was a success, and a stale
+// failure message from a prior attempt can still be on screen when
+// the kid comes back to the home view.
+// Fix:
+//   1. Clear homeError on every keystroke in the input (no stale msg).
+//   2. Style success vs error differently via .error-msg / .success-msg
+//      classes (so '新增 N 个' isn't red).
+//   3. When add is a full success (added > 0, skipped === 0), don't
+//      write any text — the cards appearing is feedback enough.
+// ---------------------------------------------------------------------------
+
+test("home-view: addChars on full success leaves homeError empty (no red text scares kid)", async () => {
+  // Issue #80: previously this branch left homeError untouched (text
+  // ""), which is fine — but the test pins down the new rule that
+  // we must NOT switch to a 'success' text. The cards appearing is
+  // the feedback.
+  const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
+  dom.charsInput.value = "一二三";
+  const home = attachHomeView({
+    dom,
+    api: "/api/write",
+    createNode,
+    fetch: async () => ({ added: 3, skipped: 0 }),
+  });
+  await home.addChars();
+  assert.equal(dom.homeError.textContent, "", "no text on full success — cards are the feedback");
+  assert.equal(dom.homeError.className || "", "", "no .error-msg class either");
+});
+
+test("home-view: addChars with 'skipped' message marks the homeError as success, not error", async () => {
+  // The 'skipped' line ("新增 N 个，跳过 M 个") used to be styled as
+  // error (red) because homeError always wore .error-msg. That's
+  // terrifying for a kid who just added 1 new char. Now it's a
+  // .success-msg.
+  const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
+  dom.charsInput.value = "新字";
+  const home = attachHomeView({
+    dom,
+    api: "/api/write",
+    createNode,
+    fetch: async () => ({ added: 1, skipped: 1 }),
+  });
+  await home.addChars();
+  assert.match(dom.homeError.textContent, /新增 1 个/);
+  // The class must contain 'success-msg' and must NOT be the
+  // pure-error 'error-msg' class. We assert by exact token, not
+  // substring, so 'success-msg' (which contains the letters
+  // "error-msg") doesn't trip the check.
+  const tokens = dom.homeError.className.split(/\s+/);
+  assert.ok(tokens.includes("success-msg"),
+    "skipped-but-added message wears .success-msg");
+  assert.ok(!tokens.includes("error-msg"),
+    "should NOT wear the bare .error-msg class (that's the red error style)");
+});
+
+test("home-view: addChars with 'no new chars' still uses error class", async () => {
+  const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
+  dom.charsInput.value = "重复";
+  const home = attachHomeView({
+    dom,
+    api: "/api/write",
+    createNode,
+    fetch: async () => ({ added: 0, skipped: 5 }),
+  });
+  await home.addChars();
+  assert.match(dom.homeError.textContent, /没有新增/);
+  const tokens = dom.homeError.className.split(/\s+/);
+  assert.ok(tokens.includes("error-msg"),
+    "real 'no new' message still wears the error class");
+  assert.ok(!tokens.includes("success-msg"),
+    "should NOT wear success-msg — this is a real failure");
+});
+
+test("home-view: addChars stale 'no new' error from previous attempt is cleared when kid types in input", async () => {
+  // Bug repro: kid adds '重复' → sees red '没有新增'. Types '上' but
+  // hasn't clicked 加进去 yet. The red text is still on screen and
+  // looks like the new attempt already failed.
+  // Fix: typing in the input clears the stale error so the kid sees
+  // a clean slate.
+  const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
+  const home = attachHomeView({
+    dom,
+    api: "/api/write",
+    createNode,
+    fetch: async () => ({ added: 0, skipped: 5 }),
+  });
+  dom.charsInput.value = "重复";
+  await home.addChars();
+  assert.match(dom.homeError.textContent, /没有新增/, "precondition: error is shown");
+  // Simulate the kid typing in the input (we expose _onInput via the
+  // returned object so the production wiring can attach it to the
+  // input's 'input' event).
+  assert.equal(typeof home._onInput, "function", "module must expose _onInput for the input event");
+  home._onInput();
+  assert.equal(dom.homeError.textContent, "", "stale error cleared on input");
 });
