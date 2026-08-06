@@ -43,6 +43,19 @@
     .practice.active { display: flex; }
     .home.hidden { display: none; }
     .practice-stage { position: relative; width: min(560px, 92vw); aspect-ratio: 1; background: white; border: 2px solid var(--accent); border-radius: 12px; touch-action: none; }
+    /* v0.8.3 (issue #81): persistent header above the stage.
+       Stays visible across all phases so the kid always knows
+       "第 N/M 字 · X". */
+    .progress-header {
+      width: min(560px, 92vw);
+      text-align: center;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary, #333);
+      padding: 4px 0;
+      min-height: 24px;
+    }
+    .progress-header.empty { color: transparent; }
     /* v0.7 (issue #63): keep 田字格 lines above the HanziWriter reference.
        HanziWriter's reference stroke is 200 units in a 600 viewBox, so it
        ends up ~33% of the stage width and visually overwrites the
@@ -108,6 +121,11 @@
 
   <!-- ============== Practice view ============== -->
   <section class="practice" id="practice-view">
+    <!-- v0.8.3 (issue #81): persistent progress header — stays visible
+         through every phase so the kid always knows where they are in
+         the 5-item session. The phase status (bottom-right) changes
+         per phase, but this header does NOT. -->
+    <div class="progress-header" id="progress-header" aria-live="polite"></div>
     <div class="practice-stage" id="stage">
       <div class="grid-overlay"><div class="diagonal"></div><div class="diag2"></div></div>
       <!-- Hanzi Writer mounts here; kid's strokes layer on top. -->
@@ -119,6 +137,9 @@
       <button id="undo-btn" type="button" class="secondary" style="display:none;">撤销</button>
       <button id="submit-btn" type="button" class="secondary" style="display:none;">提交</button>
       <button id="retry-btn" type="button" class="secondary" style="display:none;">重练</button>
+      <!-- v0.8.3 (issue #85): 上一字 button lets the kid review their
+           previous attempt. Disabled when on the first char. -->
+      <button id="prev-btn" type="button" class="secondary" style="display:none;" disabled>上一字</button>
       <button id="next-btn" type="button" class="secondary" style="display:none;">下一题</button>
       <button id="exit-btn" type="button" class="danger">退出</button>
       <span class="status" id="status">看 3 秒后字会消失，凭记忆写</span>

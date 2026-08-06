@@ -25,6 +25,7 @@ import { runShowFlow } from "./show-flow.js";
 import { attachKidInput } from "./kid-input.js";
 import { createWriteSession } from "./session.js";
 import { attachHomeView } from "./home-view.js";
+import { renderProgressHeader } from "./progress-header.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -51,10 +52,12 @@ const againBtn = document.getElementById("again-btn");
 const undoBtn = document.getElementById("undo-btn");
 const submitBtn = document.getElementById("submit-btn");
 const retryBtn = document.getElementById("retry-btn");
+const prevBtn = document.getElementById("prev-btn");
 const nextBtn = document.getElementById("next-btn");
 const exitBtn = document.getElementById("exit-btn");
 const statusEl = document.getElementById("status");
 const scoreEl = document.getElementById("score");
+const progressHeader = document.getElementById("progress-header");
 
 // ----- Session state -----
 // All session state is owned by ./session.js (refactor PR 7).
@@ -106,19 +109,28 @@ function clearPendingTimers() {
   pendingTimers = [];
 }
 
-function presentCurrent() {
+function presentCurrent(opts = {}) {
   if (session.isDone) {
     statusEl.textContent = "本轮结束，回主页";
+    if (progressHeader) progressHeader.textContent = "";
     setPhase("done");
     setTimeout(exitToHome, 1500);
     return;
   }
   const item = session.currentItem;
-  // v0.7 (issue #63): em-dash "—" rendered as a Chinese-glyph in some
-  // mobile fonts, making the status read "第 1/5 字 — 一" like "字 一 一".
-  // "·" middle dot is much safer.
-  statusEl.textContent = `第 ${session.sessionIdx + 1} / ${session.session.length} 字 · ${item.char}`;
-  startWord(item);
+  // v0.8.3 (issue #81): progress header is a SEPARATE persistent
+  // element above the stage. It shows "第 N/M 字 · X" and stays
+  // visible across all phases. The phase status (statusEl) keeps
+  // its per-phase text — they don't compete for the same space.
+  if (progressHeader) {
+    const r = renderProgressHeader({
+      sessionIdx: session.sessionIdx,
+      total: session.session.length,
+      char: item.char,
+    });
+    progressHeader.textContent = r.text;
+  }
+  startWord(item, opts);
 }
 
 /** Centralised phase transition so buttons + timer handlers stay in sync. */
@@ -131,6 +143,13 @@ function setPhase(next) {
   undoBtn.style.display = "none";
   submitBtn.style.display = "none";
   retryBtn.style.display = "none";
+  // v0.8.3 (issue #85): 上一字 only shows on submitted phase
+  // (kid can review previous attempt) AND only if there's a
+  // previous char to go to.
+  if (prevBtn) {
+    prevBtn.style.display = "none";
+    prevBtn.disabled = !session.canGoPrev;
+  }
   nextBtn.style.display = "none";
   submitBtn.classList.remove("cta");
   retryBtn.classList.remove("cta");
@@ -158,6 +177,10 @@ function setPhase(next) {
     undoBtn.style.display = "none";
     submitBtn.style.display = "none";
     retryBtn.style.display = "";
+    if (prevBtn && session.canGoPrev) {
+      prevBtn.style.display = "";
+      prevBtn.disabled = false;
+    }
     nextBtn.style.display = "";
     retryBtn.classList.add("cta");
   } else if (next === "done") {
@@ -169,13 +192,20 @@ function setPhase(next) {
   }
 }
 
-async function startWord(item) {
+async function startWord(item, opts = {}) {
   clearPendingTimers();
+  // v0.8.3 (issue #85): when reviewing a previous char (keepStrokes),
+  // don't clear item.strokes — we want to redraw the kid's ink
+  // alongside the reference. The caller (prevBtn handler) passes
+  // { keepStrokes: true }.
+  const keepStrokes = !!opts.keepStrokes;
   // Clear previous instance + kid's strokes
   hanziTarget.innerHTML = "";
   kidSvg.innerHTML = "";
   if (scoreEl) { scoreEl.textContent = ""; scoreEl.style.display = "none"; }
-  item.strokes = [];   // [{pathEl, d}] for the current attempt
+  if (!keepStrokes) {
+    item.strokes = [];   // [{pathEl, d}] for the current attempt
+  }
 
   const writer = HanziWriter.create(hanziTarget, item.char, {
     width: STAGE_SIZE,
@@ -531,6 +561,21 @@ nextBtn.onclick = () => {
   session.next();
   enableKidInput();
   presentCurrent();
+};
+
+// v0.8.3 (issue #85): 上一字 button — re-shows the previous char
+// in submitted state (ref + kid ink visible). Does NOT clear the
+// strokes — the whole point is for the kid to see what they wrote.
+// Only enabled when session.canGoPrev (i.e. sessionIdx > 0).
+prevBtn.onclick = () => {
+  if (phase !== "submitted") return;
+  if (!session.canGoPrev) return;
+  session.prev();
+  // Re-render the now-current item. startWord rebuilds the SVG
+  // and redraws the saved strokes from item.strokes. Pass
+  // { keepStrokes: true } so the kid's ink isn't wiped.
+  enableKidInput();
+  presentCurrent({ keepStrokes: true });
 };
 
 exitBtn.onclick = () => {
