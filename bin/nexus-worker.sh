@@ -27,9 +27,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-OUTBOX="${NEXUS_OUTBOX:-$ROOT/data/nexus-outbox.jsonl}"
-PIDFILE="${NEXUS_PIDFILE:-$ROOT/data/nexus-worker.pid}"
-LOGFILE="${NEXUS_LOGFILE:-$ROOT/data/logs/nexus-worker.log}"
+# Default outbox path MUST match where the server writes.
+# The server (server/src/index.ts) defaults to `process.cwd() + "data/..."`
+# and runs with cwd=server/, so it writes to $ROOT/server/data/.
+# The worker runs from $ROOT (this script's directory), so the equivalent
+# default for the worker is also $ROOT/server/data/. Earlier versions
+# defaulted to $ROOT/data/ (a different directory), which silently made
+# the worker poll a non-existent file for the entire life of the server.
+OUTBOX="${NEXUS_OUTBOX:-$ROOT/server/data/nexus-outbox.jsonl}"
+PIDFILE="${NEXUS_PIDFILE:-$ROOT/server/data/nexus-worker.pid}"
+LOGFILE="${NEXUS_LOGFILE:-$ROOT/server/data/logs/nexus-worker.log}"
 POLL_MS="${NEXUS_POLL_MS:-30000}"
 
 # The actual worker is a small tsx script. We keep the script tiny so
