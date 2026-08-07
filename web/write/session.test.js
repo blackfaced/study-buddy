@@ -127,3 +127,53 @@ test("write-session: next() past the end stays at isDone (no throw)", () => {
   assert.equal(s.isDone, true);
   assert.equal(s.sessionIdx, 5);
 });
+
+// --- prev() / canGoPrev (issue #85: 上一字 button) --------------
+
+test("write-session: prev() at sessionIdx 0 is a no-op (stays at 0)", () => {
+  const s = createWriteSession({ initialLibrary: lib(["一", "二", "三"]) });
+  s.start();
+  assert.equal(s.sessionIdx, 0);
+  assert.equal(s.canGoPrev, false);
+  assert.doesNotThrow(() => s.prev());
+  assert.equal(s.sessionIdx, 0);
+});
+
+test("write-session: prev() decrements sessionIdx, canGoPrev tracks position", () => {
+  const s = createWriteSession({ initialLibrary: lib(["一", "二", "三"]) });
+  s.start();
+  s.next(); s.next();  // now at idx 2, char "三"
+  assert.equal(s.currentItem.char, "三");
+  assert.equal(s.canGoPrev, true);
+  s.prev();
+  assert.equal(s.sessionIdx, 1);
+  assert.equal(s.currentItem.char, "二");
+  assert.equal(s.canGoPrev, true);
+  s.prev();
+  assert.equal(s.sessionIdx, 0);
+  assert.equal(s.currentItem.char, "一");
+  assert.equal(s.canGoPrev, false);
+});
+
+test("write-session: prev() does NOT clear strokes (kid can review)", () => {
+  // The whole point of #85: kid can re-view what they wrote.
+  const s = createWriteSession({ initialLibrary: lib(["一", "二"]) });
+  s.start();
+  // Draw 2 strokes on char 一 (idx 0)
+  s.currentItem.strokes.push({ d: "M 1 1" }, { d: "M 2 2" });
+  s.next();
+  // Now at 二. Go back to 一.
+  s.prev();
+  assert.equal(s.currentItem.char, "一");
+  assert.equal(s.currentItem.strokes.length, 2);  // preserved
+});
+
+test("write-session: prev() past the start stays at 0 (no throw)", () => {
+  const s = createWriteSession({ initialLibrary: lib(["一", "二"]) });
+  s.start();
+  s.next();
+  s.prev();
+  s.prev();
+  s.prev();  // past start, no throw
+  assert.equal(s.sessionIdx, 0);
+});

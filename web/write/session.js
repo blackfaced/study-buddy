@@ -19,8 +19,10 @@
 //     .currentItem   shortcut for session[sessionIdx] (may be undefined)
 //     .isDone        true when sessionIdx >= session.length OR
 //                    session is empty
+//     .canGoPrev     true when sessionIdx > 0 (上一字 button enable)
 //     .start()       populate session from library
 //     .next()        advance sessionIdx
+//     .prev()        decrement sessionIdx (issue #85, review previous char)
 //     .retry()       keep sessionIdx, clear currentItem.strokes
 // =====================================================================
 
@@ -58,6 +60,14 @@ export function createWriteSession({ initialLibrary = [] } = {}) {
     if (sessionIdx < session.length) sessionIdx++;
   }
 
+  // Issue #85: go back to a previous character in the session so
+  // the kid can review their previous attempt. Does NOT clear
+  // strokes — the whole point is to let the kid see what they
+  // wrote. No-op at sessionIdx 0.
+  function prev() {
+    if (sessionIdx > 0) sessionIdx--;
+  }
+
   function retry() {
     // Keep sessionIdx, reset the per-item scratch state. The
     // HanziWriter instance is re-created in startWord, so we
@@ -73,8 +83,10 @@ export function createWriteSession({ initialLibrary = [] } = {}) {
     get sessionIdx() { return sessionIdx; },
     get currentItem() { return session[sessionIdx]; },
     get isDone() { return sessionIdx >= session.length; },
+    get canGoPrev() { return sessionIdx > 0; },
     start,
     next,
+    prev,
     retry,
   };
 }
