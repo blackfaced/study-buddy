@@ -178,9 +178,7 @@
       </div>
 
       <div class="today-strip" id="today-strip">
-        <span>今日 <b id="home-today-q">0</b> 题</span>
-        <span>正确率 <b id="home-today-rate">—</b></span>
-        <span>连玩 <b id="home-today-sessions">0</b> 次</span>
+        <span>今天还没玩过~</span>
       </div>
     </div>
   </div>
@@ -265,6 +263,7 @@
 </div>
 
 <script src="/shared/app.js"></script>
+<script type="module" src="./home-stats.js"></script>
 <script>
 "use strict";
 
@@ -479,14 +478,20 @@ function showPage(id) {
 
 // ============== 首页 ==============
 async function loadHomeStats() {
+  const strip = document.getElementById("today-strip");
+  // 默认文案：first-time 暖消息（issue #82，避免冷冰冰的 3 个 0 像成绩单）
+  if (window.CandyHomeStats) {
+    const r = window.CandyHomeStats.renderHomeStrip(null);
+    strip.outerHTML = r.html;
+  }
   try {
     // v0.7 (issue #21): use shared fetch.
     const data = await StudyBuddy.fetch(API_BASE + "/api/game/daily?days=1&appId=" + APP_ID);
     const today = (data.daily || [])[0];
-    if (today) {
-      document.getElementById("home-today-q").textContent = today.totalQuestions;
-      document.getElementById("home-today-rate").textContent = today.correctRate + "%";
-      document.getElementById("home-today-sessions").textContent = today.sessionCount;
+    if (window.CandyHomeStats) {
+      const r = window.CandyHomeStats.renderHomeStrip(today);
+      // outerHTML replace gives us a fresh node; re-grab.
+      document.getElementById("today-strip").outerHTML = r.html;
     }
   } catch {}
 }
