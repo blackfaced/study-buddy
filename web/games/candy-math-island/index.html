@@ -189,6 +189,7 @@
       <div class="quiz-counter">已答 <b id="quiz-count">0</b> · L<span id="quiz-level">1</span></div>
       <div class="quiz-timer" id="quiz-timer">60</div>
       <div class="quiz-actions">
+        <button class="btn-pill" id="btn-pause" title="暂停本局，回来再继续">暂停</button>
         <button class="btn-pill" id="btn-quit" title="结束本局看战报">结束</button>
         <a class="back-to-portal" href="/" title="回门户" aria-label="回门户">🏠</a>
       </div>
@@ -567,6 +568,8 @@ function nextQuestion() {
 }
 
 function tick() {
+  // v0.8.3 (issue #83): when paused, freeze the timer.
+  if (state.paused) return;
   state.remainingMs -= 100;
   if (state.remainingMs <= 0) {
     state.remainingMs = 0;
@@ -631,6 +634,39 @@ document.getElementById("btn-quit").onclick = () => {
   if (state.totalQuestions === 0) { showPage("home"); return; }
   if (confirm("确定结束本局？")) endQuiz();
 };
+
+// v0.8.3 (issue #83): pause / resume the 60s challenge so the kid
+// can step away (bathroom, snack, parent calls) without losing
+// the current question or the remaining time.
+document.getElementById("btn-pause").onclick = () => {
+  togglePause();
+};
+
+function togglePause() {
+  if (!state.tickHandle) return;  // not in an active round
+  state.paused = !state.paused;
+  const pauseBtn = document.getElementById("btn-pause");
+  const inputEl = document.getElementById("answer-input");
+  const keypad = document.getElementById("keypad");
+  pauseBtn.textContent = state.paused ? "继续" : "暂停";
+  inputEl.disabled = !!state.paused;
+  // Disable the keypad buttons while paused (input is the canonical
+  // answer path; both are protected so the kid can't accidentally
+  // answer during a pause).
+  if (keypad) {
+    for (const b of keypad.querySelectorAll("button")) {
+      b.disabled = !!state.paused;
+    }
+  }
+}
+
+// v0.8.3 (issue #83): auto-pause when the tab is backgrounded.
+// Best-effort — don't depend on this. Kids can also tap 暂停.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && state.tickHandle && !state.paused) {
+    togglePause();
+  }
+});
 
 // ============== 数字键盘 / 输入 ==============
 const inputEl = document.getElementById("answer-input");
