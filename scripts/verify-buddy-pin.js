@@ -42,12 +42,18 @@ const CORRECT_PIN = process.env.BUDDY_PIN || "8864";
   await page.goto(URL);
   await page.waitForSelector("#pin-overlay", { state: "visible", timeout: 5000 });
 
-  // 1. modal visible, chat UI hidden
+  // 1. modal visible, chat UI hidden, cam-preview also hidden while PIN locked (issue #84)
   const pinVisible = await page.isVisible("#pin-overlay");
   const appHidden = await page.evaluate(() => document.querySelector(".app").classList.contains("hidden"));
-  console.log(`step 1: pin-overlay visible = ${pinVisible}, .app hidden = ${appHidden}`);
+  const camHidden = await page.evaluate(() => {
+    const cam = document.getElementById("cam-preview");
+    if (!cam) return true;  // absent counts as hidden
+    return getComputedStyle(cam).display === "none";
+  });
+  console.log(`step 1: pin-overlay visible = ${pinVisible}, .app hidden = ${appHidden}, cam-preview hidden = ${camHidden}`);
   if (!pinVisible) { console.log("FAIL: pin-overlay not visible"); process.exit(1); }
   if (!appHidden) { console.log("FAIL: .app should be hidden before unlock"); process.exit(1); }
+  if (!camHidden) { console.log("FAIL: #cam-preview should be hidden while PIN locked (issue #84)"); process.exit(1); }
 
   // 2. wrong PIN (use type so the input event fires; fill() bypasses it)
   await page.locator("#pin-input").click();
