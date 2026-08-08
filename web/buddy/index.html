@@ -388,7 +388,30 @@ async function start() {
 
 // 注意：不直接调 start()，等 PIN 解锁后再调（见 submitPin 200 分支）
 // 但如果用户刷页面、modal 又出现，自动 focus 输入框
-lockBuddyUI();
+//
+// v0.8.x: dev-mode skip gate. Check /api/buddy/status before showing
+// the PIN overlay — when BUDDY_PIN is unset (dev mode), the server
+// returns { locked: false } and we skip straight into the chat. This
+// avoids the misleading UI where a 4-digit input box accepts any PIN
+// and silently lets the kid through. Production deployments set
+// BUDDY_PIN and the existing PIN gate path runs unchanged.
+(async () => {
+  try {
+    const status = await window.StudyBuddy.fetch('/api/buddy/status');
+    if (status && status.locked === false) {
+      // dev mode: skip the gate, go straight to the chat.
+      unlockBuddyUI();
+      start();
+      return;
+    }
+  } catch (e) {
+    // If the status check fails (network, server down), fall back to
+    // the original lock-the-UI behavior so the user sees something
+    // rather than a blank screen.
+    console.warn('[buddy] status check failed, falling back to lock', e);
+  }
+  lockBuddyUI();
+})();
 </script>
 </body>
 </html>

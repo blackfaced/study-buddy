@@ -42,6 +42,14 @@ export function registerBuddyRoutes(app: Express, deps: BuddyRouteDeps): void {
   // ============== Buddy PIN gate (issue #55) ==============
   // Per-IP rate limit: 5 wrong → 5-min lockout. State is in-memory;
   // a server restart clears it (intentional — recoverable by restart).
+  app.get("/api/buddy/status", (_req: Request, res: Response) => {
+    // Public read — no IP rate limit, no unlock required. The portal
+    // hits this on page load to decide whether to render the PIN
+    // overlay (locked: true) or skip straight to the chat (locked:
+    // false, dev mode). Never leaks the PIN.
+    return res.json({ locked: lock.isEnabled() });
+  });
+
   app.post("/api/buddy/unlock", (req: Request, res: Response) => {
     const { pin } = req.body ?? {};
     if (typeof pin !== "string") {
