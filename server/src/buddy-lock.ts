@@ -52,6 +52,16 @@ export class BuddyLock {
   }
 
   /**
+   * Whether the PIN gate is enabled. False when BUDDY_PIN was unset
+   * (dev mode — all attempts return ok without rate limiting). Used by
+   * the portal status endpoint to decide whether to render the PIN
+   * overlay at all.
+   */
+  isEnabled(): boolean {
+    return this.pin !== null;
+  }
+
+  /**
    * Attempt to unlock for the given IP with the given PIN.
    * Returns { ok: true } on success, or { ok: false, reason, ... }.
    *

@@ -374,6 +374,50 @@ describe("POST /api/buddy/unlock (issue #55: PIN gate)", () => {
   });
 });
 
+describe("GET /api/buddy/status (issue: dev-mode skip PIN gate)", () => {
+  // Companion to the unlock tests — same makeApp helper, same
+  // per-app in-memory BuddyLock instance.
+  function makeApp(pin: string | null) {
+    const outbox = join(mkdtempSync(join(tmpdir(), "study-buddy-buddystatus-")), "outbox.jsonl");
+    return createApp({
+      db,
+      httpsPort: 3000,
+      outboxPath: outbox,
+      buddyPin: pin,
+    });
+  }
+
+  it("returns { locked: false } when BUDDY_PIN is unset (dev mode)", async () => {
+    const app = makeApp(null);
+    const res = await request(app).get("/api/buddy/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ locked: false });
+  });
+
+  it("returns { locked: true } when BUDDY_PIN is set (and never leaks the PIN)", async () => {
+    const app = makeApp("8864");
+    const res = await request(app).get("/api/buddy/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ locked: true });
+    expect(JSON.stringify(res.body)).not.toContain("8864");
+  });
+
+  it("returns { locked: false } when BUDDY_PIN is empty string (treated as unset)", async () => {
+    const app = makeApp("");
+    const res = await request(app).get("/api/buddy/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ locked: false });
+  });
+
+  it("status endpoint is open to any IP (no rate limit, no unlock required)", async () => {
+    const app = makeApp("8864");
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app).get("/api/buddy/status");
+      expect(res.status).toBe(200);
+    }
+  });
+});
+
 describe("GET /api/write/words (issue #57: word library)", () => {
   it("returns empty list on fresh DB", async () => {
     const res = await request(app).get("/api/write/words");
