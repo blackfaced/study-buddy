@@ -353,6 +353,16 @@ async function loadPickGenModule() {
   _buildBiasFromWeakTopics = mod.buildBiasFromWeakTopics;
 }
 
+// v0.8 (#100, T3): sync-mistake-reviews module — extracted to a file
+// so the queue-flush logic is unit-testable (see sync-mistake-reviews.test.js).
+// Lazy-loaded on first use to keep the page-load path lean.
+let _syncMistakeReviews;
+async function loadSyncMistakeReviews() {
+  if (_syncMistakeReviews) return;
+  const mod = await import("./sync-mistake-reviews.js");
+  _syncMistakeReviews = mod.syncMistakeReviews;
+}
+
 const QUIZ_ITEMS = [
   { errorType: "compute",  level: 1, gen: genAddCompute },
   { errorType: "compute",  level: 1, gen: genSubCompute },
@@ -800,23 +810,20 @@ async function syncToServer() {
       if (e && e.status) m.syncedToServer = true;
     }
   }
-  // v0.8 (#99, T3 prep): sync the cascade-review queue. T3 (#100)
-  // implements the server endpoint; until then a 404 just means the
-  // queue is dropped (no harm — the cascade is best-effort). We
-  // intentionally don't fail the whole sync if this rejects.
+  // v0.8 (#100, T3): sync the cascade-review queue. Implemented in
+  // sync-mistake-reviews.js (extracted for unit testability). Fire-and-
+  // forget: we don't await — the session-end recordSession() chain
+  // must not be blocked on the cascade endpoint. The helper swallows
+  // its own errors (network, 4xx, 5xx) and clears the queue in place
+  // either way — see the module header for why we drop on error
+  // instead of retrying.
   if (state.pendingMistakeReviews.length > 0) {
-    try {
-      await StudyBuddy.fetch(API_BASE + "/api/game/mistake-review", {
-        method: "POST",
-        body: {
-          childId: "default",
-          results: state.pendingMistakeReviews.slice(),
-        },
-      });
-      state.pendingMistakeReviews = [];
-    } catch {
-      /* endpoint not yet implemented (T3) or network blip — drop */
-    }
+    await loadSyncMistakeReviews();
+    _syncMistakeReviews(state.pendingMistakeReviews, {
+      fetchFn: StudyBuddy.fetch,
+      apiBase: API_BASE,
+      childId: "default",
+    });
   }
   // 持久化到 localStorage（包括已同步的，给错题本用）
   const unsynced = state.pendingMistakes.filter(m => !m.syncedToServer);
