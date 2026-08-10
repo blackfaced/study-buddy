@@ -55,70 +55,72 @@ describe("GET /api/apps (platform registry)", () => {
   });
 });
 
-describe("POST /api/game/mistake", () => {
+describe("POST /api/game/mistake (issue #98: auto-record, dedupe by child_id+problem)", () => {
+  // T1 contract: string user/correct answer, dedupe via UNIQUE
+  // (child_id, problem), returns {id, created} with 201/200.
+  // The old {mistakeId} + outbox-write contract was retired when this
+  // route moved from routes/game.ts to routes/mistake-api.ts. Outbox
+  // writes are a separate concern (the Memory Nexus worker can read
+  // straight from the mistakes table — see issue #34 follow-up).
   const validBody = {
     childId: "default",
-    subject: "math",
     problem: "5 + 7 = ?",
     errorType: "carry",
-    userAnswer: 11,
-    correctAnswer: 12,
-    level: 1,
+    userAnswer: "11",
+    correctAnswer: "12",
+    source: "candy-math-island",
   };
 
-  it("returns 200 and a mistakeId on a valid payload", async () => {
+  it("returns 201 and {id, created:true} on a first-time payload", async () => {
     const res = await request(app).post("/api/game/mistake").send(validBody);
-    expect(res.status).toBe(200);
-    expect(typeof res.body.mistakeId).toBe("number");
+    expect(res.status).toBe(201);
+    expect(res.body.created).toBe(true);
+    expect(typeof res.body.id).toBe("number");
   });
 
-  it("persists the mistake with source='game' and the user/correct answers", async () => {
+  it("persists the mistake with the user/correct answers and child_id", async () => {
     const res = await request(app).post("/api/game/mistake").send(validBody);
-    const id = res.body.mistakeId as number;
+    const id = res.body.id as number;
     const row = db
       .prepare("SELECT * FROM mistakes WHERE id = ?")
       .get(id) as any;
     expect(row).toBeDefined();
-    expect(row.source).toBe("game");
+    expect(row.child_id).toBe("default");
     expect(row.error_type).toBe("carry");
-    expect(parseInt(row.user_answer, 10)).toBe(11);
-    expect(parseInt(row.correct_answer, 10)).toBe(12);
+    expect(row.user_answer).toBe("11");
+    expect(row.correct_answer).toBe("12");
   });
 
-  it("appends an outbox entry so the Nexus worker can index it later", async () => {
-    const res = await request(app).post("/api/game/mistake").send(validBody);
-    expect(res.status).toBe(200);
-    // Read the raw file (the worker's job, but the test verifies the seam)
-    const raw = await import("node:fs/promises").then((m) => m.readFile(outboxPath, "utf-8"));
-    const lines = raw.split("\n").filter(Boolean);
-    expect(lines.length).toBeGreaterThan(0);
-    const last = JSON.parse(lines[lines.length - 1]);
-    expect(last.kind).toBe("math_mistake");
-    expect(last.entityId).toBe("child:default");
-    expect(last.payload).toMatchObject({ errorType: "carry", level: 1, source: "game" });
+  it("returns 200 and {id, created:false} on a second identical call (idempotent)", async () => {
+    const res1 = await request(app).post("/api/game/mistake").send(validBody);
+    const res2 = await request(app).post("/api/game/mistake").send(validBody);
+    expect(res1.status).toBe(201);
+    expect(res2.status).toBe(200);
+    expect(res2.body.created).toBe(false);
+    expect(res2.body.id).toBe(res1.body.id);
   });
 
-  it("returns 400 when fields are missing or wrong type", async () => {
+  it("returns 400 when required fields are missing", async () => {
     const res = await request(app).post("/api/game/mistake").send({ childId: "default" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/missing or invalid/);
+    expect(res.body.error).toMatch(/required/);
   });
 });
 
 describe("GET /api/game/weak-topics", () => {
   it("returns the aggregated weak topics across recent days", async () => {
-    // Seed three carries
+    // Seed three carries via the new mistake-api contract (T1, #98):
+    // string user/correct answer, source='game' so weak-topics can find them.
     for (let i = 0; i < 3; i++) {
       await request(app)
         .post("/api/game/mistake")
         .send({
           childId: "default",
-          subject: "math",
           problem: `5+${i}`,
           errorType: "carry",
-          userAnswer: 0,
-          correctAnswer: 1,
-          level: 1,
+          userAnswer: "0",
+          correctAnswer: "1",
+          source: "game",
         });
     }
     const res = await request(app).get("/api/game/weak-topics?days=7");

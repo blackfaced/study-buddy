@@ -2,10 +2,13 @@
 //
 // Tests for the game route module extracted from app.ts (PR 5 of
 // the refactor series). The module owns:
-//   - POST /api/game/mistake      — record a candy-math-island mistake
 //   - GET  /api/game/weak-topics  — recent weak topics for a window
 //   - POST /api/game/session      — record a finished time-mode run
 //   - GET  /api/game/daily        — daily stats for the parent dashboard
+//
+// NOTE: POST /api/game/mistake was removed in #98 (T1 of #34 split).
+// Tests for the new contract (string userAnswer, returns {id, created},
+// UNIQUE on child_id+problem) live in mistake-api.test.ts.
 //
 // Tested in isolation. The data layer is the real game-sync.ts (already
 // covered by game-sync.test.ts), so these tests focus on the HTTP
@@ -40,49 +43,6 @@ beforeEach(() => {
 function silentLogger() {
   return { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
 }
-
-// --- POST /api/game/mistake -----------------------------------------
-
-describe("POST /api/game/mistake", () => {
-  it("records a mistake and returns the id", async () => {
-    const res = await request(app)
-      .post("/api/game/mistake")
-      .send({
-        childId: "default",
-        subject: "math",
-        problem: "2 + 2 = ?",
-        errorType: "calculation",
-        userAnswer: 5,
-        correctAnswer: 4,
-        level: 2,
-      });
-    expect(res.status).toBe(200);
-    expect(res.body.mistakeId).toBeTruthy();
-  });
-
-  it("returns 400 when fields are missing or wrong type", async () => {
-    const res = await request(app)
-      .post("/api/game/mistake")
-      .send({ childId: "default" });  // missing everything else
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/missing or invalid/);
-  });
-
-  it("returns 400 when userAnswer is a string", async () => {
-    const res = await request(app)
-      .post("/api/game/mistake")
-      .send({
-        childId: "default",
-        subject: "math",
-        problem: "2 + 2",
-        errorType: "calculation",
-        userAnswer: "five",  // wrong type
-        correctAnswer: 4,
-        level: 1,
-      });
-    expect(res.status).toBe(400);
-  });
-});
 
 // --- GET /api/game/weak-topics --------------------------------------
 

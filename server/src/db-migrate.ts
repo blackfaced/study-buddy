@@ -32,6 +32,11 @@ export function migrateSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN source TEXT DEFAULT 'study-buddy'`); } catch {}
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN user_answer TEXT`); } catch {}
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN correct_answer TEXT`); } catch {}
+  // v0.8 (#34a-1, issue #98): per-child mistake dedupe. Existing rows are
+  // back-filled with child_id = 'default' so the UNIQUE index can be built
+  // without conflicts. The endpoint (/api/game/mistake) accepts an explicit
+  // childId; missing/empty defaults to 'default' for backwards compat.
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN child_id TEXT NOT NULL DEFAULT 'default'`); } catch {}
 
   // 初始化 schema
   db.exec(`
@@ -96,6 +101,7 @@ export function migrateSchema(db: Database.Database): void {
       source TEXT DEFAULT 'study-buddy',
       user_answer TEXT,
       correct_answer TEXT,
+      child_id TEXT NOT NULL DEFAULT 'default',
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
@@ -159,6 +165,11 @@ export function migrateSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_mistakes_session ON mistakes(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_game_sessions_child ON game_sessions(child_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
+    -- v0.8 (#34a-1, issue #98): UNIQUE on (child_id, problem) — the
+    -- foundation for "auto-record once, dedupe across multiple wrong
+    -- answers" without a SELECT-then-INSERT race. T2 (#99) and T3 (#100)
+    -- build on top of this index.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_child_problem ON mistakes(child_id, problem);
   `);
 
   // 首次启动：建一个默认孩子

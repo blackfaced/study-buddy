@@ -4,15 +4,22 @@
 // =====================================================================
 //
 // Owns the /api/game/* surface (the v0.5b platform sync endpoints):
-//   - POST /api/game/mistake      — record a mistake from a hung app
 //   - GET  /api/game/weak-topics  — recent weak topics for a window
 //   - POST /api/game/session      — record a finished time-mode run
 //   - GET  /api/game/daily        — daily stats for the parent dashboard
 //
-// All heavy lifting is in ./game-sync.ts (recordGameMistake,
-// getGameWeakTopics, recordGameSession, getGameDailyStats). This
-// module is the HTTP shell: validation + status codes + response
-// shape. The data layer has its own tests (game-sync.test.ts).
+// NOTE: POST /api/game/mistake was removed in #98 (T1 of #34 split).
+// The endpoint now lives in ./mistake-api.ts with a deduped contract
+// (UNIQUE on child_id+problem, returns {id, created} not {mistakeId}).
+// The data-layer recordGameMistake helper is still in game-sync.ts for
+// any non-HTTP caller (and game-sync.test.ts), but is no longer wired
+// to an HTTP route — clients should migrate to /api/game/mistake's new
+// shape (T2 = #99, candy-math-island client picker rewrite).
+//
+// All heavy lifting is in ./game-sync.ts (getGameWeakTopics,
+// recordGameSession, getGameDailyStats). This module is the HTTP shell:
+// validation + status codes + response shape. The data layer has its
+// own tests (game-sync.test.ts).
 //
 // Public API:
 //   - registerGameRoutes(app, { db, logger, outboxPath })
@@ -20,7 +27,7 @@
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import type { Logger } from "../logger.js";
-import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "../game-sync.js";
+import { getGameWeakTopics, recordGameSession, getGameDailyStats } from "../game-sync.js";
 
 export interface GameRouteDeps {
   db: Database.Database;
@@ -31,40 +38,7 @@ export interface GameRouteDeps {
 export function registerGameRoutes(app: Express, deps: GameRouteDeps): void {
   const { db, logger, outboxPath } = deps;
 
-  // ============== Game sync (v0.5b) ==============
-  // Apps like candy-math-island POST their mistakes here. We persist to
-  // the shared mistakes table (source='game') and append the same event
-  // to the outbox so the Memory Nexus worker can index it asynchronously.
-  app.post("/api/game/mistake", async (req: Request, res: Response) => {
-    const { childId, subject, problem, errorType, userAnswer, correctAnswer, level } = req.body ?? {};
-    if (
-      typeof childId !== "string" ||
-      typeof subject !== "string" ||
-      typeof problem !== "string" ||
-      typeof errorType !== "string" ||
-      typeof userAnswer !== "number" ||
-      typeof correctAnswer !== "number" ||
-      typeof level !== "number"
-    ) {
-      return res.status(400).json({ error: "missing or invalid fields" });
-    }
-    try {
-      const id = await recordGameMistake(db, outboxPath, {
-        childId,
-        subject,
-        problem,
-        errorType,
-        userAnswer,
-        correctAnswer,
-        level,
-      });
-      logger.info("game mistake recorded", { mistakeId: id, errorType, level });
-      res.json({ mistakeId: id });
-    } catch (e: any) {
-      logger.error("game mistake record failed", { error: e.message });
-      res.status(500).json({ error: e.message });
-    }
-  });
+  // NOTE: POST /api/game/mistake moved to ./mistake-api.ts (T1 of #34).
 
   app.get("/api/game/weak-topics", async (req: Request, res: Response) => {
     const days = Number(req.query.days ?? 7);
