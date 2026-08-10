@@ -9,6 +9,16 @@
 // active pool (e.g. to honour the adaptive ladder's current level)
 // and inject a deterministic RNG for tests.
 //
+// The optional { mistakeProvider, mistakeRate } options enable the
+// 30% mistake-mix window (issue #99, #34a-2). When both are set,
+// each pick() first rolls against `mistakeRate` (default 0.3); on a
+// hit, `mistakeProvider()` is called and its return value (a Mistake
+// object compatible with the Question shape) is served directly. If
+// the provider returns null (pool empty), the picker falls through
+// to the regular weighted-sampling path so a session never starves
+// for questions. Callers without mistakeProvider behave exactly as
+// before — backwards compat is enforced by the test suite.
+//
 // Used by web/games/candy-math-island/index.html. The buildBiasFromWeakTopics
 // helper below is also exported so the game can convert the server's
 // /api/game/weak-topics response into the bias map without extra glue.
@@ -24,14 +34,21 @@
  * @property {number} answer
  * @property {string} [errorType]
  * @property {boolean} [scenario]
+ *
+ * @typedef {Object} Mistake
+ * @property {number} id
+ * @property {string} problem        e.g. "7+5" — the kid's question
+ * @property {number|string} answer  the correct answer
+ * @property {string} errorType
+ * @property {true} [fromMistake]    marker so callers/tests can identify the source
  */
 
 /**
  * @param {QuizItem[]} items
  * @param {Record<string, number>} errorTypeBias
  * @param {() => number} [rng]
- * @param {{ levels?: number[] }} [opts]
- * @returns {() => Question}
+ * @param {{ levels?: number[], mistakeProvider?: () => (Mistake|null), mistakeRate?: number }} [opts]
+ * @returns {() => (Question|Mistake)}
  */
 export function pickGenWithBias(items, errorTypeBias, rng = Math.random, opts = {}) {
   if (!Array.isArray(items) || items.length === 0) {
@@ -52,7 +69,37 @@ export function pickGenWithBias(items, errorTypeBias, rng = Math.random, opts = 
     throw new Error("pickGenWithBias: no positive weight in bias map for the current pool");
   }
 
+  // v0.8 (#99, #34a-2): 30% mistake-mix gate. Defaults to 0.3 so callers
+  // can pass just { mistakeProvider } and get the spec'd rate. Setting
+  // mistakeRate to 0 (or omitting mistakeProvider) disables the gate
+  // entirely — the regular weighted path is the only source of picks.
+  const mistakeProvider = opts.mistakeProvider;
+  const mistakeRate = typeof opts.mistakeRate === "number" ? opts.mistakeRate : 0.3;
+  const mistakeGateEnabled = typeof mistakeProvider === "function" && mistakeRate > 0;
+
   return function pick() {
+    // 1. Mistake-mix gate (only when configured). On a hit, try the
+    //    provider; null means "pool empty", fall through to the regular
+    //    path so the session never starves.
+    if (mistakeGateEnabled && rng() < mistakeRate) {
+      const m = mistakeProvider();
+      if (m) {
+        // Wrap the raw mistake into the Question shape so the renderer
+        // and the regular picker can share downstream code. We tag
+        // `fromMistake` so the caller can route the answer to the
+        // cascade-review endpoint (T3, #100) and so tests can identify
+        // the source without inspecting display/answer.
+        return {
+          display: m.problem,
+          answer: m.answer,
+          errorType: m.errorType,
+          level: null,
+          fromMistake: true,
+          mistakeId: m.id,
+        };
+      }
+    }
+    // 2. Regular weighted-sampling path.
     const r = rng() * total;
     let acc = 0;
     for (const { it, w } of weighted) {
