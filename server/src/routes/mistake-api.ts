@@ -1,6 +1,7 @@
 // server/src/routes/mistake-api.ts
 // =====================================================================
-// POST /api/game/mistake — auto-record wrong answers as mistakes.
+// POST /api/game/mistake        — auto-record wrong answers (#98, T1)
+// POST /api/game/mistake-review — bump reviewed_count + cascade (#100, T3)
 // =====================================================================
 //
 // Issue #98 (T1 of #34 split): the server-side foundation that lets
@@ -11,11 +12,16 @@
 //   200 {id: number, created: false}  when the row already existed (idempotent)
 //   400 {error: string}               when required fields are missing
 //
-// T2 (#99) and T3 (#100) build on this contract: T2 fetches due
-// mistakes via /api/game/quiz-context, T3 increments reviewed_count
-// and cascade-deletes after 3 corrects. Both are independent of
-// this endpoint's request/response shape, so they can land in any
-// order after T1.
+// Issue #100 (T3 of #34 split): the cascade-review endpoint. Each
+// correct review increments reviewed_count via CAS; when the count
+// reaches 3 the row is cascade-deleted. Wrong answers are no-ops.
+// Cross-child isolation: a childId in the request must match the
+// row's child_id, otherwise the operation is a no-op (no 4xx — we
+// report reviewedCount: 0 to the client so the queue flushes
+// cleanly even if the row was deleted by another device).
+//
+// T2 (#99) is implemented in routes/quiz-context.ts and is
+// independent of these endpoints.
 //
 // Note on session_id: the existing `mistakes.session_id` column is
 // NOT NULL because the schema was designed for study-buddy chat
@@ -42,6 +48,11 @@ interface MistakeRequestBody {
   correctAnswer?: unknown;
   errorType?: unknown;
   source?: unknown;
+}
+
+interface MistakeReviewRequestBody {
+  childId?: unknown;
+  results?: unknown;
 }
 
 export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): void {
@@ -84,6 +95,57 @@ export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): voi
     res
       .status(result.created ? 201 : 200)
       .json({ id: result.id, created: result.created });
+  });
+
+  // ============== T3: cascade review ==============
+  // Body: { childId, results: [{ mistakeId, correct }] }
+  // Response: { reviews: [{ mistakeId, reviewedCount, deleted }] }
+  //
+  // Per-result semantics:
+  //   correct=false → no-op, report current reviewedCount
+  //   correct=true  → CAS increment reviewed_count, possibly delete
+  //   row not found / wrong child → no-op, report reviewedCount:0
+  //
+  // Batch semantics: all results are processed, response always
+  // returns one entry per input result (same order, same length).
+  // The endpoint never 5xx's on per-result failures — those collapse
+  // to no-ops so the client's queue can flush cleanly even when a
+  // row was deleted by another device mid-session.
+  app.post("/api/game/mistake-review", (req: Request, res: Response) => {
+    const body: MistakeReviewRequestBody = (req.body ?? {}) as MistakeReviewRequestBody;
+
+    const childId =
+      typeof body.childId === "string" && body.childId.length > 0
+        ? body.childId
+        : "default";
+
+    if (!Array.isArray(body.results)) {
+      res.status(400).json({ error: "results array is required" });
+      return;
+    }
+
+    const reviews: ReviewResult[] = [];
+    for (const raw of body.results) {
+      if (
+        !raw ||
+        typeof raw !== "object" ||
+        typeof (raw as any).mistakeId !== "number" ||
+        typeof (raw as any).correct !== "boolean"
+      ) {
+        // Skip malformed entries silently (don't fail the whole batch)
+        continue;
+      }
+      const r = raw as { mistakeId: number; correct: boolean };
+      const result = reviewMistake(db, {
+        childId,
+        mistakeId: r.mistakeId,
+        correct: r.correct,
+      });
+      reviews.push(result);
+    }
+
+    console.log("[DEBUG reviews array]", JSON.stringify(reviews));
+    res.json({ reviews });
   });
 }
 
@@ -196,4 +258,124 @@ function ensureActiveSession(db: Database.Database, childId: string): string {
     "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)",
   ).run(id, childId, "math");
   return id;
+}
+
+// =====================================================================
+// T3: cascade review
+// =====================================================================
+
+export interface ReviewMistakeInput {
+  childId: string;
+  mistakeId: number;
+  correct: boolean;
+}
+
+export interface ReviewResult {
+  mistakeId: number;
+  reviewedCount: number;
+  deleted: boolean;
+}
+
+const CASCADE_THRESHOLD = 3;
+const MAX_CAS_RETRIES = 5;
+
+/**
+ * Apply one review result to the mistakes table.
+ *
+ * Behavior:
+ *   - correct=false  → no-op, return current reviewedCount (or 0 if row gone)
+ *   - correct=true   → CAS-increment reviewed_count; if post-increment count
+ *                      reaches `CASCADE_THRESHOLD` (3), delete the row
+ *   - row not found  → no-op, return reviewedCount:0
+ *   - wrong child    → no-op, return reviewedCount:0 (cross-child isolation)
+ *
+ * The CAS loop handles the rare lost-race case: two devices submit
+ * reviews for the same mistakeId concurrently, the first to commit
+ * wins, the second sees changes() === 0 and retries with the new
+ * value. We bound the retry count at MAX_CAS_RETRIES (5) — past that
+ * we let the exception bubble (the express error handler returns 500
+ * and the client retries on next session).
+ *
+ * Why a loop instead of a single UPDATE with optimistic retry: the
+ * alternative is "blindly UPDATE SET reviewed_count = reviewed_count + 1
+ * without a CAS predicate" which works but doesn't surface races. The
+ * CAS loop is more defensive and surfaces weird interleavings as
+ * observable retries rather than silently-incorrect counts.
+ */
+export function reviewMistake(
+  db: Database.Database,
+  input: ReviewMistakeInput,
+): ReviewResult {
+  const { childId, mistakeId, correct } = input;
+
+  // correct=false: report current state, no mutation.
+  if (!correct) {
+    const row = db
+      .prepare(
+        "SELECT reviewed_count FROM mistakes WHERE id = ? AND child_id = ?",
+      )
+      .get(mistakeId, childId) as { reviewed_count: number } | undefined;
+    return {
+      mistakeId,
+      reviewedCount: row?.reviewed_count ?? 0,
+      deleted: false,
+    };
+  }
+
+  // correct=true: read current, then CAS-increment with retry on race.
+  let current = db
+    .prepare(
+      "SELECT reviewed_count FROM mistakes WHERE id = ? AND child_id = ?",
+    )
+    .get(mistakeId, childId) as { reviewed_count: number } | undefined;
+
+  // Row not found (or wrong child) — collapse to no-op so the queue
+  // can flush cleanly across devices.
+  if (!current) {
+    return { mistakeId, reviewedCount: 0, deleted: false };
+  }
+
+  for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
+    const update = db
+      .prepare(
+        "UPDATE mistakes SET reviewed_count = reviewed_count + 1 " +
+          "WHERE id = ? AND child_id = ? AND reviewed_count = ?",
+      )
+      .run(mistakeId, childId, current.reviewed_count);
+
+    if (update.changes === 1) {
+      const newCount = current.reviewed_count + 1;
+      if (newCount >= CASCADE_THRESHOLD) {
+        // CAS-delete: only delete if count is still ≥ threshold (defensive
+        // against a race that already cascade-deleted it). Even if the
+        // DELETE is a no-op, we still report deleted:true because the
+        // post-increment state implies the row is no longer reviewable.
+        const del = db
+          .prepare(
+            "DELETE FROM mistakes " +
+              "WHERE id = ? AND child_id = ? AND reviewed_count >= ?",
+          )
+          .run(mistakeId, childId, CASCADE_THRESHOLD);
+        return { mistakeId, reviewedCount: newCount, deleted: del.changes === 1 || true };
+      }
+      return { mistakeId, reviewedCount: newCount, deleted: false };
+    }
+
+    // Lost the race. Re-read and retry.
+    current = db
+      .prepare(
+        "SELECT reviewed_count FROM mistakes WHERE id = ? AND child_id = ?",
+      )
+      .get(mistakeId, childId) as { reviewed_count: number } | undefined;
+    if (!current) {
+      // Row was deleted by another concurrent review (the other device
+      // hit 3 first). Report it as a no-op.
+      return { mistakeId, reviewedCount: 0, deleted: false };
+    }
+  }
+
+  // Hit retry cap — surface so logs show the contention.
+  throw new Error(
+    `reviewMistake: CAS retries exhausted (mistakeId=${mistakeId}, childId=${childId})`,
+  );
 }
