@@ -46,14 +46,20 @@ export function migrateSchema(db: Database.Database): void {
   // (smallest id) per (child_id, problem) and drop the rest. This is
   // a one-time migration; subsequent inserts go through the new deduped
   // /api/game/mistake endpoint so no further dupes can be created.
-  db.exec(`
-    DELETE FROM mistakes
-    WHERE id NOT IN (
-      SELECT MIN(id)
-      FROM mistakes
-      GROUP BY child_id, problem
-    );
-  `);
+  // Wrapped in try/catch because the table may not exist yet on a fresh
+  // DB (this DELETE runs before the CREATE TABLE block below).
+  try {
+    db.exec(`
+      DELETE FROM mistakes
+      WHERE id NOT IN (
+        SELECT MIN(id)
+        FROM mistakes
+        GROUP BY child_id, problem
+      );
+    `);
+  } catch {
+    /* fresh DB — mistakes table doesn't exist yet, nothing to dedupe */
+  }
 
   // 初始化 schema
   db.exec(`

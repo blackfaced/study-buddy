@@ -378,12 +378,35 @@ async function fetchErrorTypeBias() {
   }
 }
 
-// v0.7 (#16): pickGen now uses the adaptive level *and* the errorType
-// bias from the server's weak-topics report. 80% from the current
-// level, 20% from a lower level (so a weak topic at L2 doesn't get
-// crowded out by L3 multiplication drills); within the chosen level,
-// weighted by errorTypeBias. Falls back to a flat per-level choice
-// if no bias is set (e.g. first call before startQuiz fetched anything).
+/**
+ * v0.8 (#99, #34a-2): fetch /api/game/quiz-context and build a
+ * mistakeProvider closure for the picker. Returns null on any failure
+ * (network error, server down, 4xx/5xx) so the picker can degrade
+ * gracefully to "no mistake mix this session".
+ *
+ * Why a closure instead of a plain array: pickGenWithBias calls the
+ * provider once per pick, so the provider can manage the "draw
+ * without replacement" invariant itself (we just shift the pool).
+ * This keeps the picker stateless.
+ */
+async function fetchQuizContext() {
+  try {
+    // Client's local day in the kid's timezone (matches the server's
+    // expectation that date is a YYYY-MM-DD string in the kid's day).
+    const date = new Date().toLocaleDateString("en-CA"); // en-CA → YYYY-MM-DD
+    const data = await StudyBuddy.fetch(API_BASE + "/api/game/quiz-context", {
+      method: "POST",
+      body: { childId: "default", date },
+    });
+    if (!data || data.eligible !== true || !Array.isArray(data.mistakes) || data.mistakes.length === 0) {
+      return null;
+    }
+    const pool = data.mistakes.slice();
+    return () => pool.length > 0 ? pool.shift() : null;
+  } catch {
+    return null;
+  }
+}
 function pickGen() {
   if (!_pickGenWithBias) {
     // pickGen called before module loaded — degrade to the old
@@ -408,7 +431,17 @@ function pickGen() {
       : [lvl];
   }
   const bias = state.errorTypeBias || { carry: 0.25, borrow: 0.15, multiply: 0.1, compute: 0.5 };
-  const pick = _pickGenWithBias(QUIZ_ITEMS, bias, Math.random, { levels });
+  // v0.8 (#99, #34a-2): 30% mistake-mix window. mistakeProvider is a
+  // closure that yields a fresh due mistake per call; pickGenWithBias
+  // wraps it into the Question shape. Falls through to the regular
+  // weighted path when the pool is empty (no starvation). When the
+  // server said eligible:false (5+ sessions today) or the fetch
+  // failed, mistakeProvider is null and the gate is disabled.
+  const pick = _pickGenWithBias(QUIZ_ITEMS, bias, Math.random, {
+    levels,
+    mistakeProvider: state.mistakeProvider,
+    mistakeRate: 0.3,
+  });
   return pick();
 }
 
@@ -429,6 +462,14 @@ let state = {
   level: 1,           // 1=简单 (L1), 2=中等 (L2 进位/退位), 3=挑战 (L3 乘法/应用)
   streak: 0,          // 连续答对次数
   wrongStreak: 0,     // 连续答错次数
+  // v0.8 (#99, #34a-2): 30% mistake-mix provider. Set by startQuiz
+  // after fetching /api/game/quiz-context; null when the server says
+  // the kid is past the 5-sessions/day window or the fetch failed.
+  mistakeProvider: null,
+  // pendingMistakeReviews: list of {mistakeId, correct} for the
+  // /api/game/mistake-review cascade (T3, #100). Filled when a
+  // mistake (fromMistake:true) is answered; flushed at session end.
+  pendingMistakeReviews: [],
 };
 
 const ADAPTIVE = {
@@ -510,6 +551,8 @@ async function startQuiz() {
   state.totalQuestions = 0;
   state.correctCount = 0;
   state.pendingMistakes = [];
+  state.pendingMistakeReviews = [];
+  state.mistakeProvider = null;
   state.startedAt = Date.now();
   // v0.6.1: reset adaptive ladder state for a fresh 60s sprint.
   state.level = 1;
@@ -523,6 +566,10 @@ async function startQuiz() {
   // silently fall back to the default bias — kid should never see an
   // error for a "nice to have" optimization.
   state.errorTypeBias = await fetchErrorTypeBias();
+  // v0.8 (#99, #34a-2): fetch due mistakes for the 30% mix window.
+  // Same graceful-degrade philosophy as the bias fetch — server down
+  // means a regular session (no mix), not a crash.
+  state.mistakeProvider = await fetchQuizContext();
   updateLevelBadge(state.level);
   showPage("quiz");
   nextQuestion();
@@ -595,19 +642,43 @@ function submitAnswer() {
   if (isCorrect) {
     state.correctCount++;
     inputEl.classList.add("correct");
+    // v0.8 (#99, T3 prep): if this correct answer was a review of a
+    // picked mistake, queue the cascade increment. The actual
+    // /api/game/mistake-review endpoint is T3 (#100, not yet
+    // implemented) — syncMistakeReviews silently no-ops on 404.
+    if (state.currentQuestion.fromMistake && state.currentQuestion.mistakeId) {
+      state.pendingMistakeReviews.push({
+        mistakeId: state.currentQuestion.mistakeId,
+        correct: true,
+      });
+    }
   } else {
     inputEl.classList.add("wrong");
     // 收集错题，留给 syncToServer
+    // v0.8 (#99, #34a-2): contract changed to match the new server
+    // endpoint — user/correct answers are strings, no subject/level
+    // (those are derived server-side from app_id). The mistake is
+    // queued for POST /api/game/mistake.
     state.pendingMistakes.push({
-      subject: "math",
       problem: state.currentQuestion.display,
       errorType: state.currentQuestion.errorType,  // v0.7 (#16): declared by the generator
-      userAnswer: user,
-      correctAnswer: correct,
-      level: state.currentQuestion.level,           // v0.7 (#16): also declared
+      userAnswer: String(user),
+      correctAnswer: String(correct),
       syncedToServer: false,
       ts: Date.now(),
     });
+    // v0.8 (#99, T3 prep): if this wrong answer was a mistake picked
+    // from the 30% review-mix, queue it for the cascade-review
+    // endpoint (T3 = #100, not yet implemented — endpoint is a no-op
+    // until T3 lands). The cascade bookkeeping is harmless if the
+    // server doesn't have the endpoint yet: syncMistakeReviews silently
+    // no-ops on 404.
+    if (state.currentQuestion.fromMistake && state.currentQuestion.mistakeId) {
+      state.pendingMistakeReviews.push({
+        mistakeId: state.currentQuestion.mistakeId,
+        correct: false,
+      });
+    }
   }
   // v0.6.1: 自适应阶梯 — 根据对错更新 level
   const next = updateAdaptiveLevel(state.level, state.streak, state.wrongStreak, isCorrect);
@@ -700,23 +771,26 @@ document.querySelectorAll("#keypad button").forEach(btn => {
   });
 });
 
-// ============== 错题同步 (跟 v0.5b 一致) ==============
+// ============== 错题同步 (跟 v0.8 一致) ==============
 async function syncToServer() {
   for (const m of state.pendingMistakes) {
     if (m.syncedToServer) continue;
     try {
       // v0.7 (issue #21): use shared fetch (auto-serialises body, sets
       // Content-Type, throws on non-2xx).
+      // v0.8 (#99, #34a-2): contract changed — string user/correct
+      // answer, no subject/level (server derives them from source +
+      // app context). Returns {id, created} not {mistakeId}. The
+      // dedupe is server-side via UNIQUE (child_id, problem).
       await StudyBuddy.fetch(API_BASE + "/api/game/mistake", {
         method: "POST",
         body: {
           childId: "default",
-          subject: m.subject,
           problem: m.problem,
           errorType: m.errorType,
           userAnswer: m.userAnswer,
           correctAnswer: m.correctAnswer,
-          level: m.level,
+          source: "candy-math-island",
         },
       });
       m.syncedToServer = true;
@@ -724,6 +798,24 @@ async function syncToServer() {
       // 4xx/5xx (e.status set): 标记为 synced, 避免无限重试.
       // network error (no e.status): 保留 unsynced, 下次重试.
       if (e && e.status) m.syncedToServer = true;
+    }
+  }
+  // v0.8 (#99, T3 prep): sync the cascade-review queue. T3 (#100)
+  // implements the server endpoint; until then a 404 just means the
+  // queue is dropped (no harm — the cascade is best-effort). We
+  // intentionally don't fail the whole sync if this rejects.
+  if (state.pendingMistakeReviews.length > 0) {
+    try {
+      await StudyBuddy.fetch(API_BASE + "/api/game/mistake-review", {
+        method: "POST",
+        body: {
+          childId: "default",
+          results: state.pendingMistakeReviews.slice(),
+        },
+      });
+      state.pendingMistakeReviews = [];
+    } catch {
+      /* endpoint not yet implemented (T3) or network blip — drop */
     }
   }
   // 持久化到 localStorage（包括已同步的，给错题本用）
