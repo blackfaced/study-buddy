@@ -40,7 +40,7 @@ export class MiniMaxVisionClient implements VisionClient {
     this.signal = opts.signal;
   }
 
-  async chat(params: { system: string; user: string; imageBase64: string }): Promise<{
+  async chat(params: { system: string; user: string; imageBase64: string; signal?: AbortSignal }): Promise<{
     content: string;
     raw: unknown;
   }> {
@@ -70,7 +70,7 @@ export class MiniMaxVisionClient implements VisionClient {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: this.signal,
+      signal: params.signal ?? this.signal,
     });
 
     if (!resp.ok) {

@@ -20,7 +20,7 @@ export async function reviewHandwritingImage(
   client: VisionClient,
   imageBase64: string,
   localAssessment: Record<string, unknown>,
-  options: { model?: string } = {},
+  options: { model?: string; signal?: AbortSignal } = {},
 ): Promise<HandwritingReview> {
   const structure = isRecord(localAssessment.breakdown)
     ? localAssessment.breakdown.structure
@@ -29,6 +29,7 @@ export async function reviewHandwritingImage(
     system: SYSTEM_PROMPT,
     user: `本地结构可信度：${typeof structure === "number" ? structure.toFixed(2) : "未知"}。请只看图片给结构建议。`,
     imageBase64,
+    signal: options.signal,
   });
   return {
     status: "completed",
@@ -40,6 +41,9 @@ export async function reviewHandwritingImage(
 function sanitizeSuggestion(content: string): string {
   const compact = content.replace(/\s+/g, " ").trim();
   if (!compact) return "结构暂时无法复评";
+  if (/(笔顺|顺序|方向|倒笔|先写|后写|漏笔|少.{0,3}笔|多.{0,3}笔|完整性|方格|位置|分数|评分|档位)/u.test(compact)) {
+    return "结构暂时无法复评";
+  }
   return Array.from(compact).slice(0, 30).join("");
 }
 

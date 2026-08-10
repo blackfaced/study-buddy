@@ -34,6 +34,7 @@ export const DEFAULT_HANDWRITING_POLICY = Object.freeze({
     structureMax: 0.8,
     bandWindow: 4,
   }),
+  hints: Object.freeze({ startDirectionAt: 2, animateAt: 3, maxLevel: 3 }),
 });
 
 export function referenceFromHanziData(
@@ -47,7 +48,9 @@ export function referenceFromHanziData(
 ) {
   if (
     !Array.isArray(characterData?.medians) ||
-    characterData.medians.length === 0
+    characterData.medians.length === 0 ||
+    (Array.isArray(characterData?.strokes) &&
+      characterData.strokes.length !== characterData.medians.length)
   ) {
     return { strokes: [] };
   }
@@ -90,7 +93,13 @@ export function createHandwritingCoach({
   policy = {},
 }) {
   const config = mergePolicy(policy);
-  const referenceStrokes = normalizeStrokes(reference?.strokes);
+  const rawReferenceStrokes = Array.isArray(reference?.strokes) ? reference.strokes : [];
+  const normalizedReferenceStrokes = normalizeStrokes(rawReferenceStrokes);
+  const referenceStrokes =
+    normalizedReferenceStrokes.length === rawReferenceStrokes.length &&
+    normalizedReferenceStrokes.every((stroke) => stroke.length >= 2 && pathLength(stroke) > 0)
+      ? normalizedReferenceStrokes
+      : [];
   const referenceVariants = [
     referenceStrokes,
     ...(Array.isArray(reference?.variants)
@@ -127,6 +136,7 @@ export function createHandwritingCoach({
           matchedStrokeIndex: null,
           expected: referenceStrokes.at(-1),
           errorCounts,
+          hintPolicy: config.hints,
         });
       }
 
@@ -183,6 +193,7 @@ export function createHandwritingCoach({
           matchedStrokeIndex: bestFuture.index,
           expected,
           errorCounts,
+          hintPolicy: config.hints,
         });
       }
 
@@ -203,6 +214,7 @@ export function createHandwritingCoach({
           matchedStrokeIndex: expectedStrokeIndex,
           expected,
           errorCounts,
+          hintPolicy: config.hints,
         });
       }
 
@@ -274,15 +286,21 @@ export function createHandwritingCoach({
       const requiresRewrite =
         processErrors >= 2 ||
         reasons.some((reason) => reason.severity === "rewrite");
-      const requiresIndependentRetry = processErrors > 0 && !independentRetry;
+      const requiresIndependentRetry =
+        processErrors > 0 && !independentRetry && !followupRetry;
       const requiresRetry =
-        requiresRewrite && !requiresIndependentRetry && !followupRetry;
+        requiresRewrite &&
+        !requiresIndependentRetry &&
+        !independentRetry &&
+        !followupRetry;
+      const retryFailed =
+        (independentRetry && (processErrors > 0 || requiresRewrite)) ||
+        (followupRetry && (processErrors > 0 || requiresRewrite));
       const nextAction = requiresIndependentRetry
         ? "independent_retry"
         : requiresRetry
           ? "rewrite"
-          : (independentRetry && processErrors > 0) ||
-              (followupRetry && requiresRewrite)
+          : retryFailed
             ? "review_later"
             : "continue";
       const reviewRecommended =
@@ -306,6 +324,13 @@ export function createHandwritingCoach({
         requiresIndependentRetry,
         requiresRetry,
         nextAction,
+        reviewNeeded: nextAction === "review_later",
+        retryOutcome:
+          independentRetry || followupRetry
+            ? retryFailed
+              ? "failed"
+              : "passed"
+            : null,
         reviewRecommended,
         algorithmVersion: ALGORITHM_VERSION,
       };
@@ -321,9 +346,10 @@ function rejectedStrokeDecision({
   matchedStrokeIndex,
   expected,
   errorCounts,
+  hintPolicy,
 }) {
   const priorErrors = Number(errorCounts?.[expectedStrokeIndex] ?? 0);
-  const level = Math.min(priorErrors + 1, 3);
+  const level = Math.min(priorErrors + 1, hintPolicy.maxLevel);
   return {
     status: "incorrect",
     accept: false,
@@ -335,9 +361,9 @@ function rejectedStrokeDecision({
     hint: {
       level,
       points: expected,
-      showStart: level >= 2,
-      showDirection: level >= 2,
-      animate: level >= 3,
+      showStart: level >= hintPolicy.startDirectionAt,
+      showDirection: level >= hintPolicy.startDirectionAt,
+      animate: level >= hintPolicy.animateAt,
     },
   };
 }
@@ -400,6 +426,7 @@ function mergePolicy(policy) {
       ...(policy.reasonThresholds ?? {}),
     },
     review: { ...DEFAULT_HANDWRITING_POLICY.review, ...(policy.review ?? {}) },
+    hints: { ...DEFAULT_HANDWRITING_POLICY.hints, ...(policy.hints ?? {}) },
   };
 }
 
@@ -495,23 +522,25 @@ function placementScore(kid, reference, stageSize, policy) {
 function strokeQualityScore(kid, reference, stageSize) {
   return roundScore(
     average(
-      kid.map((stroke, index) => {
-        const expected = reference[index];
-        const lengthScore =
-          1 - relativeError(pathLength(stroke), pathLength(expected));
-        const directionScore = (directionCosine(stroke, expected) + 1) / 2;
-        const actualShape = translateToOrigin(resample(stroke));
-        const expectedShape = translateToOrigin(resample(expected));
-        const shapeError =
-          pairedDistance(actualShape, expectedShape) / stageSize;
-        const shapeScore = clamp(1 - shapeError / 0.08, 0, 1);
-        return clamp(
-          lengthScore * 0.4 + directionScore * 0.3 + shapeScore * 0.3,
-          0,
-          1,
-        );
-      }),
+      kid.map((stroke, index) =>
+        singleStrokeQuality(stroke, reference[index], stageSize),
+      ),
     ),
+  );
+}
+
+function singleStrokeQuality(stroke, expected, stageSize) {
+  const lengthScore =
+    1 - relativeError(pathLength(stroke), pathLength(expected));
+  const directionScore = (directionCosine(stroke, expected) + 1) / 2;
+  const actualShape = translateToOrigin(resample(stroke));
+  const expectedShape = translateToOrigin(resample(expected));
+  const shapeError = pairedDistance(actualShape, expectedShape) / stageSize;
+  const shapeScore = clamp(1 - shapeError / 0.08, 0, 1);
+  return clamp(
+    lengthScore * 0.4 + directionScore * 0.3 + shapeScore * 0.3,
+    0,
+    1,
   );
 }
 
@@ -521,8 +550,40 @@ function overallShapeScore(kid, reference, stageSize) {
       pairedDistance(resample(stroke), resample(reference[index])) / stageSize,
   );
   const error = average(errors);
-  if (error <= 0.03) return 1;
-  return roundScore(clamp(1 - (error - 0.03) / 0.17, 0, 1));
+  const distanceScore =
+    error <= 0.03 ? 1 : clamp(1 - (error - 0.03) / 0.17, 0, 1);
+  const overlapScore = centerlineIoU(kid, reference, stageSize);
+  return roundScore(distanceScore * 0.85 + overlapScore * 0.15);
+}
+
+function centerlineIoU(actual, expected, stageSize) {
+  const actualCells = occupiedCells(actual, stageSize);
+  const expectedCells = occupiedCells(expected, stageSize);
+  if (actualCells.size === 0 || expectedCells.size === 0) return 0;
+  let intersection = 0;
+  for (const cell of actualCells) {
+    if (expectedCells.has(cell)) intersection++;
+  }
+  const union = actualCells.size + expectedCells.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function occupiedCells(strokes, stageSize, gridSize = 60) {
+  const cells = new Set();
+  for (const point of strokes.flatMap((stroke) => resample(stroke, 48))) {
+    const x = Math.floor((point.x / stageSize) * gridSize);
+    const y = Math.floor((point.y / stageSize) * gridSize);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const cellX = x + dx;
+        const cellY = y + dy;
+        if (cellX >= 0 && cellX < gridSize && cellY >= 0 && cellY < gridSize) {
+          cells.add(`${cellX}:${cellY}`);
+        }
+      }
+    }
+  }
+  return cells;
 }
 
 function buildReasons(breakdown, kid, reference, stageSize, policy) {
@@ -559,16 +620,27 @@ function buildReasons(breakdown, kid, reference, stageSize, policy) {
       message: "先比较各部分的宽窄和高低",
       priority: 4,
       severity: "suggestion",
-      overlay: { kind: "bounds" },
+      overlay: {
+        kind: "bounds",
+        actual: boundsOf(kid),
+        expected: boundsOf(reference),
+      },
     });
   }
   if (breakdown.strokeQuality < policy.reasonThresholds.strokeQuality) {
+    const strokeScores = kid.map((stroke, index) =>
+      singleStrokeQuality(stroke, reference[index], stageSize),
+    );
+    const strokeIndex = strokeScores.reduce(
+      (worst, score, index) => (score < strokeScores[worst] ? index : worst),
+      0,
+    );
     reasons.push({
       code: "stroke_geometry",
       message: "再看看每一笔的方向和长短",
       priority: 5,
       severity: "suggestion",
-      overlay: { kind: "stroke" },
+      overlay: { kind: "stroke", strokeIndex },
     });
   }
   if (breakdown.shape < policy.reasonThresholds.shape) {
@@ -577,7 +649,7 @@ function buildReasons(breakdown, kid, reference, stageSize, policy) {
       message: "整体形状还可以再接近范字一些",
       priority: 6,
       severity: "suggestion",
-      overlay: { kind: "character" },
+      overlay: { kind: "character", expected: boundsOf(reference) },
     });
   }
   return reasons.sort((a, b) => a.priority - b.priority);
@@ -587,36 +659,67 @@ function buildProcessReasons(process) {
   const orderErrors = Number(process.orderErrors ?? 0);
   const directionErrors = Number(process.directionErrors ?? 0);
   if (orderErrors > 0) {
+    const review = lastStrokeReview(process, "stroke_order_wrong");
     return [
       {
         code: "stroke_order_wrong",
         message: "笔顺改对了，再独立写一次记牢它",
         priority: 1,
         severity: orderErrors >= 2 ? "rewrite" : "blocking",
-        overlay: { kind: "stroke-order" },
+        overlay: {
+          kind: "stroke-order",
+          strokeIndex: review?.expectedStrokeIndex ?? null,
+          points: review?.expectedPoints ?? [],
+        },
       },
     ];
   }
   if (directionErrors > 0) {
+    const review = lastStrokeReview(process, "stroke_direction_reversed");
     return [
       {
         code: "stroke_direction_reversed",
         message: "注意落笔方向，再独立写一次",
         priority: 1,
         severity: directionErrors >= 2 ? "rewrite" : "blocking",
-        overlay: { kind: "stroke-direction" },
+        overlay: {
+          kind: "stroke-direction",
+          strokeIndex: review?.expectedStrokeIndex ?? null,
+          points: review?.expectedPoints ?? [],
+        },
       },
     ];
   }
   return [];
 }
 
+function lastStrokeReview(process, reasonCode) {
+  return Array.isArray(process.strokeReviews)
+    ? [...process.strokeReviews].reverse().find((review) => review?.reasonCode === reasonCode)
+    : null;
+}
+
 function placementDrift(kid, reference, stageSize) {
-  const actual = centerOf(kid);
-  const expected = centerOf(reference);
-  const dx = actual.x - expected.x;
-  const dy = actual.y - expected.y;
-  return { dx, dy, fraction: Math.max(Math.abs(dx), Math.abs(dy)) / stageSize };
+  const displacements = [
+    displacement(centerOf(kid), centerOf(reference)),
+    ...kid.map((stroke, index) =>
+      displacement(centerOf([stroke]), centerOf([reference[index]])),
+    ),
+  ];
+  const worst = displacements.reduce((current, candidate) =>
+    Math.max(Math.abs(candidate.dx), Math.abs(candidate.dy)) >
+    Math.max(Math.abs(current.dx), Math.abs(current.dy))
+      ? candidate
+      : current,
+  );
+  return {
+    ...worst,
+    fraction: Math.max(Math.abs(worst.dx), Math.abs(worst.dy)) / stageSize,
+  };
+}
+
+function displacement(actual, expected) {
+  return { dx: actual.x - expected.x, dy: actual.y - expected.y };
 }
 
 function centerOf(strokes) {
@@ -774,6 +877,9 @@ function unscorableResult() {
     reasons: [reason],
     requiresRewrite: false,
     reviewRecommended: false,
+    nextAction: "continue",
+    reviewNeeded: false,
+    retryOutcome: null,
     algorithmVersion: ALGORITHM_VERSION,
   };
 }
@@ -807,6 +913,9 @@ function incompleteResult(actual, referenceStrokes) {
     nextStroke: missing > 0 ? referenceStrokes[actual] : null,
     requiresRewrite: extra > 0,
     reviewRecommended: false,
+    nextAction: "continue",
+    reviewNeeded: false,
+    retryOutcome: null,
     algorithmVersion: ALGORITHM_VERSION,
   };
 }

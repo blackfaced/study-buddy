@@ -50,8 +50,8 @@ afterAll(() => {
 afterEach(() => {
   unstubFetch();
   cleanupPhoto();
-  // mcp-server's local DB doesn't have writing_attempts / writing_words
-  // — those live in study-buddy server's DB. No local cleanup needed.
+  db.exec("DELETE FROM writing_attempts");
+  db.exec("DELETE FROM writing_words");
 });
 
 describe("extract_words_from_image (mcp tool, issue #57 v0.2)", () => {

@@ -73,6 +73,15 @@ function runMigrations(inst: Database.Database) {
     "ALTER TABLE mistakes ADD COLUMN source TEXT DEFAULT 'study-buddy'",
     "ALTER TABLE mistakes ADD COLUMN user_answer TEXT",
     "ALTER TABLE mistakes ADD COLUMN correct_answer TEXT",
+    // Explainable handwriting attempts (mirror server/src/db-migrate.ts).
+    "ALTER TABLE writing_attempts ADD COLUMN score INTEGER",
+    "ALTER TABLE writing_attempts ADD COLUMN display_band TEXT",
+    "ALTER TABLE writing_attempts ADD COLUMN status TEXT",
+    "ALTER TABLE writing_attempts ADD COLUMN strokes_json TEXT",
+    "ALTER TABLE writing_attempts ADD COLUMN assessment_json TEXT",
+    "ALTER TABLE writing_attempts ADD COLUMN process_json TEXT",
+    "ALTER TABLE writing_attempts ADD COLUMN algorithm_version TEXT",
+    "ALTER TABLE writing_attempts ADD COLUMN model_review_json TEXT",
   ];
   for (const sql of alters) {
     try { inst.exec(sql); } catch { /* column already exists */ }
@@ -177,11 +186,35 @@ function runMigrations(inst: Database.Database) {
       FOREIGN KEY (child_id) REFERENCES children(id)
     );
 
+    CREATE TABLE IF NOT EXISTS writing_words (
+      char TEXT PRIMARY KEY,
+      added_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      added_by TEXT DEFAULT 'parent'
+    );
+
+    CREATE TABLE IF NOT EXISTS writing_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      char TEXT NOT NULL,
+      level REAL NOT NULL,
+      stroke_path TEXT,
+      score INTEGER,
+      display_band TEXT,
+      status TEXT,
+      strokes_json TEXT,
+      assessment_json TEXT,
+      process_json TEXT,
+      algorithm_version TEXT,
+      model_review_json TEXT,
+      ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      FOREIGN KEY (char) REFERENCES writing_words(char) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sessions_child ON sessions(child_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posture_session ON posture_events(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_turns(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_mistakes_session ON mistakes(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_game_sessions_child ON game_sessions(child_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
   `);
 }
 

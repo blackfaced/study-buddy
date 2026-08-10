@@ -139,6 +139,9 @@ describe("POST /api/write/attempts", () => {
       reasons: [{ code: "placement_right", message: "整体向左一点" }],
       process: { orderErrors: 0, rejectedStrokes: 0 },
       algorithmVersion: "handwriting-coach-v1",
+      nextAction: "review_later",
+      retryOutcome: "failed",
+      reviewNeeded: true,
       modelReview: { status: "skipped" },
     };
 
@@ -156,6 +159,9 @@ describe("POST /api/write/attempts", () => {
       algorithmVersion: "handwriting-coach-v1",
       reasons: assessment.reasons,
       process: assessment.process,
+      nextAction: "review_later",
+      retryOutcome: "failed",
+      reviewNeeded: true,
     });
   });
 
@@ -175,6 +181,52 @@ describe("POST /api/write/attempts", () => {
         strokes: [[{ x: "not-a-number", y: 20 }]],
         breakdown: { structure: 0.8, placement: 0.8, strokeQuality: 0.8, shape: 0.8 },
         reasons: [],
+        process: {},
+        algorithmVersion: "handwriting-coach-v1",
+      },
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("round-trips an unscorable attempt without inventing a low score", async () => {
+    await request(app).post("/api/write/words").send({ chars: "永" });
+    const created = await request(app).post("/api/write/attempts").send({
+      char: "永",
+      level: 1,
+      assessment: {
+        status: "unscorable",
+        score: null,
+        band: "暂时无法判断",
+        strokes: [[{ x: 10, y: 10 }, { x: 20, y: 20 }]],
+        breakdown: null,
+        reasons: [{ code: "reference_unavailable", message: "这次暂时无法判断" }],
+        process: {},
+        algorithmVersion: "handwriting-coach-v1",
+      },
+    });
+
+    expect(created.status).toBe(200);
+    const history = await request(app).get("/api/write/words/永/attempts");
+    expect(history.body.attempts[0]).toMatchObject({
+      status: "unscorable",
+      score: null,
+      displayBand: "暂时无法判断",
+    });
+  });
+
+  it("rejects semantically contradictory assessment states", async () => {
+    await request(app).post("/api/write/words").send({ chars: "永" });
+    const res = await request(app).post("/api/write/attempts").send({
+      char: "永",
+      level: 1,
+      assessment: {
+        status: "unscorable",
+        score: 100,
+        band: "写得很好",
+        strokes: [[{ x: 10, y: 10 }, { x: 20, y: 20 }]],
+        breakdown: { structure: 1, placement: 1, strokeQuality: 1, shape: 1 },
+        reasons: [{ code: "reference_unavailable", message: "暂时无法判断" }],
         process: {},
         algorithmVersion: "handwriting-coach-v1",
       },
@@ -270,6 +322,30 @@ describe("handwriting visual review", () => {
 
     expect(res.status).toBe(502);
     expect(res.body.error).toMatch(/upstream timeout/);
+  });
+
+  it("enforces a server-side deadline when the provider never resolves", async () => {
+    const reviewApp = express();
+    reviewApp.use(express.json({ limit: "1mb" }));
+    registerWriteRoutes(reviewApp, {
+      db,
+      logger: silentLogger(),
+      mistakesDir,
+      handwritingReviewTimeoutMs: 20,
+      visionClient: {
+        async chat() {
+          return new Promise(() => {});
+        },
+      },
+    });
+
+    const res = await request(reviewApp).post("/api/write/review").send({
+      imageBase64: "abc123",
+      localAssessment: { breakdown: { structure: 0.6 } },
+    });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/timeout/);
   });
 
 });

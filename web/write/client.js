@@ -30,6 +30,11 @@ import {
   referenceFromHanziData,
   VALIDATED_STROKE_ORDERS,
 } from "./handwriting-coach.js";
+import {
+  buildVisualReviewPayload,
+  childFacingVisualSuggestion,
+} from "./visual-review.js";
+import { presentationForAttempt } from "./attempt-presentation.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -202,6 +207,7 @@ function setPhase(next) {
 
 async function startWord(item, opts = {}) {
   clearPendingTimers();
+  const presentation = presentationForAttempt(opts);
   // v0.8.3 (issue #85): when reviewing a previous char (keepStrokes),
   // don't clear item.strokes — we want to redraw the kid's ink
   // alongside the reference. The caller (prevBtn handler) passes
@@ -234,7 +240,7 @@ async function startWord(item, opts = {}) {
     // edge. The visual centering on the stage grid is now the
     // char-center module's job, not padding's.
     padding: 100,
-    showCharacter: true,
+    showCharacter: presentation.showCharacter,
     showOutline: false,
     strokeColor: "#4caf50",
     radicalColor: "#388e3c",
@@ -291,6 +297,15 @@ async function startWord(item, opts = {}) {
   item.shownOpacity = level;
   applyCharacterOpacity(level);
 
+  if (!presentation.animateReference) {
+    item.writer.hideCharacter();
+    applyCharacterOpacity(0);
+    setPhase(presentation.initialPhase);
+    againBtn.style.display = "none";
+    statusEl.textContent = presentation.status;
+    return;
+  }
+
   // v0.8.2 (issue #68): replace the inline setTimeout(100) hack with
   // runShowFlow. The v0.8.1 timing fired "showing" 100ms after
   // startWord was called, regardless of whether animateCharacter
@@ -299,8 +314,8 @@ async function startWord(item, opts = {}) {
   // still being drawn. runShowFlow drives transitions off the
   // animDone promise, so the show window starts only when the
   // character is actually static. Tested in show-flow.test.js.
-  setPhase("animating");
-  statusEl.textContent = "看笔顺 ↓";
+  setPhase(presentation.initialPhase);
+  statusEl.textContent = presentation.status;
   applyCharacterOpacity(1.0);  // start fully visible during animation
   const animDone = new Promise((resolve) => {
     writer.animateCharacter({ onComplete: () => resolve() });
@@ -353,6 +368,8 @@ function createAttemptProcess({ independentRetry = false, followupRetry = false 
     errorsByStroke: {},
     hintCounts: [],
     strokeReviews: [],
+    manualUndos: 0,
+    undoEvents: [],
     independentRetry,
     followupRetry,
   };
@@ -387,7 +404,9 @@ async function reviewCompletedStroke(item, stroke) {
     candidate: stroke.points,
     errorCounts: process.errorsByStroke,
   });
+  const reviewId = (process.strokeReviews?.length ?? 0) + 1;
   (process.strokeReviews ??= []).push({
+    id: reviewId,
     path: stroke.d,
     points: stroke.points,
     verdict: decision.status,
@@ -397,12 +416,19 @@ async function reviewCompletedStroke(item, stroke) {
     expectedStrokeIndex: decision.expectedStrokeIndex,
     matchedStrokeIndex: decision.matchedStrokeIndex,
     hintLevel: decision.hint?.level ?? null,
+    expectedPoints: decision.hint?.points ?? null,
   });
+  stroke.reviewId = reviewId;
 
   if (decision.accept) {
     item.strokes.push(stroke);
     if (decision.status === "uncertain") process.uncertainStrokes++;
     clearCoachOverlay();
+    if (scoreEl) {
+      scoreEl.style.display = "none";
+      scoreEl.textContent = "";
+      scoreEl.title = "";
+    }
     statusEl.textContent = decision.status === "uncertain"
       ? decision.reason.message
       : `第 ${item.strokes.length} 笔写好了`;
@@ -490,6 +516,13 @@ function undoLastStroke() {
   const item = session.currentItem;
   if (!item || !item.strokes || item.strokes.length === 0) return;
   const last = item.strokes.pop();
+  const process = item.process ?? (item.process = createAttemptProcess());
+  process.manualUndos = Number(process.manualUndos ?? 0) + 1;
+  (process.undoEvents ??= []).push({
+    reviewId: last?.reviewId ?? null,
+    path: last?.d ?? null,
+    atStrokeIndex: item.strokes.length,
+  });
   if (last && last.pathEl && last.pathEl.parentNode === kidSvg) {
     kidSvg.removeChild(last.pathEl);
   }
@@ -527,10 +560,14 @@ async function submitCurrent() {
     reasons: assessment.reasons,
     process: item.process ?? {},
     algorithmVersion: assessment.algorithmVersion,
+    nextAction: assessment.nextAction,
+    retryOutcome: assessment.retryOutcome,
+    reviewNeeded: assessment.reviewNeeded,
     modelReview: { status: assessment.reviewRecommended ? "pending" : "skipped" },
   };
 
   let attemptId = null;
+  item.latestAttemptId = null;
   try {
     const saved = await window.StudyBuddy.fetch(API + "/attempts", {
       method: "POST",
@@ -542,6 +579,7 @@ async function submitCurrent() {
       },
     });
     attemptId = saved?.attemptId ?? null;
+    item.latestAttemptId = attemptId;
   } catch (e) {
     console.error("[write] submitCurrent: attempt POST failed", e);
   }
@@ -580,19 +618,13 @@ function renderAssessment(assessment) {
   const messages = [assessment.primaryReason?.message, assessment.secondaryReason?.message]
     .filter(Boolean);
   scoreEl.textContent = [assessment.band, ...messages].join(" · ");
-  scoreEl.title = assessment.breakdown
-    ? `结构 ${percent(assessment.breakdown.structure)} · 位置 ${percent(assessment.breakdown.placement)} · 单笔 ${percent(assessment.breakdown.strokeQuality)} · 整体 ${percent(assessment.breakdown.shape)}`
-    : assessment.primaryReason?.message ?? assessment.band;
+  scoreEl.title = messages.join("；") || assessment.band;
   renderAssessmentOverlay(assessment.primaryReason?.overlay);
 }
 
-function percent(value) {
-  return `${Math.round(Number(value ?? 0) * 100)}`;
-}
-
 function renderAssessmentOverlay(overlay) {
-  if (!overlay) return;
   clearCoachOverlay();
+  if (!overlay) return;
   if (overlay.kind === "translation") {
     const line = createSvgElement("line");
     line.setAttribute("data-coach-overlay", "true");
@@ -604,7 +636,50 @@ function renderAssessmentOverlay(overlay) {
     line.setAttribute("stroke-width", "12");
     line.setAttribute("stroke-linecap", "round");
     kidSvg.appendChild(line);
+  } else if (overlay.kind === "bounds") {
+    appendBoundsOverlay(overlay.expected, "#4caf50", "18 12");
+    appendBoundsOverlay(overlay.actual, "#ff9800", "none");
+  } else if (overlay.kind === "stroke") {
+    const stroke = session.currentItem?.strokes?.[overlay.strokeIndex];
+    if (stroke?.d) {
+      const path = createSvgElement("path");
+      path.setAttribute("data-coach-overlay", "true");
+      path.setAttribute("d", stroke.d);
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", "#ff9800");
+      path.setAttribute("stroke-width", "18");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("opacity", "0.55");
+      kidSvg.insertBefore(path, kidSvg.firstChild);
+    }
+  } else if (overlay.kind === "character") {
+    appendBoundsOverlay(overlay.expected, "#ff9800", "18 12");
+  } else if (overlay.kind === "stroke-order" || overlay.kind === "stroke-direction") {
+    renderCoachHint({
+      hint: {
+        level: overlay.kind === "stroke-direction" ? 2 : 1,
+        points: overlay.points,
+        showStart: overlay.kind === "stroke-direction",
+        showDirection: overlay.kind === "stroke-direction",
+      },
+    });
   }
+}
+
+function appendBoundsOverlay(bounds, color, dash) {
+  if (!bounds) return;
+  const rect = createSvgElement("rect");
+  rect.setAttribute("data-coach-overlay", "true");
+  rect.setAttribute("x", String(bounds.minX));
+  rect.setAttribute("y", String(bounds.minY));
+  rect.setAttribute("width", String(Math.max(bounds.width, 1)));
+  rect.setAttribute("height", String(Math.max(bounds.height, 1)));
+  rect.setAttribute("fill", "none");
+  rect.setAttribute("stroke", color);
+  rect.setAttribute("stroke-width", "8");
+  rect.setAttribute("stroke-dasharray", dash);
+  rect.setAttribute("opacity", "0.8");
+  kidSvg.appendChild(rect);
 }
 
 async function requestVisualReview(item, assessment, attemptId) {
@@ -612,20 +687,21 @@ async function requestVisualReview(item, assessment, attemptId) {
   const timeout = setTimeout(() => controller.abort(), 4_000);
   try {
     const imageBase64 = captureAttemptImage(item.strokes ?? []);
+    const payload = buildVisualReviewPayload({ assessment, imageBase64 });
+    if (!payload) return;
     const review = await window.StudyBuddy.fetch(API + "/review", {
       method: "POST",
       signal: controller.signal,
-      body: {
-        imageBase64,
-        localAssessment: {
-          band: assessment.band,
-          breakdown: assessment.breakdown,
-          reasons: assessment.reasons,
-        },
-      },
+      body: payload,
     });
-    if (session.currentItem === item && phase === "submitted" && review?.suggestion) {
-      scoreEl.textContent += ` · ${review.suggestion}`;
+    const suggestion = childFacingVisualSuggestion(assessment, review);
+    if (
+      session.currentItem === item &&
+      item.latestAttemptId === attemptId &&
+      phase === "submitted" &&
+      suggestion
+    ) {
+      scoreEl.textContent += ` · ${suggestion}`;
     }
     await persistModelReview(attemptId, review);
   } catch (error) {

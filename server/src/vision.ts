@@ -23,6 +23,7 @@ export interface VisionClient {
     system: string;
     user: string;
     imageBase64: string;
+    signal?: AbortSignal;
   }): Promise<{ content: string; raw: unknown }>;
 }
 

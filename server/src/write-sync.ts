@@ -36,6 +36,9 @@ export interface WritingAttempt {
   strokes: unknown[] | null;
   breakdown: Record<string, unknown> | null;
   reasons: unknown[] | null;
+  nextAction: string | null;
+  retryOutcome: string | null;
+  reviewNeeded: boolean;
   process: Record<string, unknown> | null;
   algorithmVersion: string | null;
   modelReview: Record<string, unknown> | null;
@@ -51,6 +54,9 @@ export interface HandwritingAssessmentInput {
   reasons: unknown[];
   process: Record<string, unknown>;
   algorithmVersion: string;
+  nextAction?: string | null;
+  retryOutcome?: string | null;
+  reviewNeeded?: boolean;
   modelReview?: Record<string, unknown> | null;
 }
 
@@ -143,6 +149,10 @@ export function listWritingAttempts(
       strokes: parseJsonArray(row.strokesJson),
       breakdown: isRecord(assessment?.breakdown) ? assessment.breakdown : null,
       reasons: Array.isArray(assessment?.reasons) ? assessment.reasons : null,
+      nextAction: typeof assessment?.nextAction === "string" ? assessment.nextAction : null,
+      retryOutcome:
+        typeof assessment?.retryOutcome === "string" ? assessment.retryOutcome : null,
+      reviewNeeded: assessment?.reviewNeeded === true,
       process: parseJsonObject(row.processJson),
       algorithmVersion:
         typeof row.algorithmVersion === "string" ? row.algorithmVersion : null,
@@ -182,7 +192,13 @@ export function recordWritingAttempt(
       stringifyJson(input.assessment?.strokes),
       stringifyJson(
         input.assessment
-          ? { breakdown: input.assessment.breakdown, reasons: input.assessment.reasons }
+          ? {
+              breakdown: input.assessment.breakdown,
+              reasons: input.assessment.reasons,
+              nextAction: input.assessment.nextAction ?? null,
+              retryOutcome: input.assessment.retryOutcome ?? null,
+              reviewNeeded: input.assessment.reviewNeeded === true,
+            }
           : null,
       ),
       stringifyJson(input.assessment?.process),

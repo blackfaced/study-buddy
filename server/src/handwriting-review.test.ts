@@ -40,4 +40,18 @@ describe("reviewHandwritingImage", () => {
     expect(prompts[0].system).toContain("不得评价或改写笔顺");
     expect(prompts[0].user).not.toContain("孩子");
   });
+
+  it("drops model text that tries to override local stroke-order rules", async () => {
+    const client = {
+      async chat() {
+        return { content: "笔顺写错了，应该先写竖。", raw: {} };
+      },
+    };
+
+    const result = await reviewHandwritingImage(client, "abc123", {
+      breakdown: { structure: 0.6 },
+    });
+
+    expect(result.suggestion).toBe("结构暂时无法复评");
+  });
 });

@@ -42,10 +42,18 @@ export interface WriteRouteDeps {
   mistakesDir: string;
   /** Vision client for /api/write/extract-words. If null, returns 503. */
   visionClient: VisionClient | null;
+  /** Optional visual-review deadline override for tests. */
+  handwritingReviewTimeoutMs?: number;
 }
 
 export function registerWriteRoutes(app: Express, deps: WriteRouteDeps): void {
-  const { db, logger, mistakesDir, visionClient } = deps;
+  const {
+    db,
+    logger,
+    mistakesDir,
+    visionClient,
+    handwritingReviewTimeoutMs = 4_000,
+  } = deps;
 
   // 1MB photo upload for extract-words. Different from the chat
   // module's 500KB limit because writing lists can be larger.
@@ -151,8 +159,21 @@ export function registerWriteRoutes(app: Express, deps: WriteRouteDeps): void {
     ) {
       return res.status(400).json({ error: "imageBase64 and localAssessment are required" });
     }
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
-      const review = await reviewHandwritingImage(visionClient, imageBase64, localAssessment);
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error("timeout"));
+        }, handwritingReviewTimeoutMs);
+      });
+      const review = await Promise.race([
+        reviewHandwritingImage(visionClient, imageBase64, localAssessment, {
+          signal: controller.signal,
+        }),
+        deadline,
+      ]);
       res.json({
         status: review.status,
         suggestion: review.suggestion,
@@ -161,6 +182,8 @@ export function registerWriteRoutes(app: Express, deps: WriteRouteDeps): void {
     } catch (error: any) {
       logger.warn("handwriting visual review failed", { error: error.message });
       res.status(502).json({ error: `vision failed: ${error.message}` });
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   });
 
@@ -189,7 +212,8 @@ export function registerWriteRoutes(app: Express, deps: WriteRouteDeps): void {
 function parseHandwritingAssessment(value: unknown): HandwritingAssessmentInput | null {
   if (value === undefined || value === null) return null;
   if (!isRecord(value)) return null;
-  if (!["scored", "unscorable", "incomplete"].includes(String(value.status))) return null;
+  const status = String(value.status);
+  if (!["scored", "unscorable", "incomplete"].includes(status)) return null;
   if (value.score !== null && (!Number.isFinite(value.score) || Number(value.score) < 0 || Number(value.score) > 100)) {
     return null;
   }
@@ -198,12 +222,44 @@ function parseHandwritingAssessment(value: unknown): HandwritingAssessmentInput 
   if (!isBreakdown(value.breakdown)) return null;
   if (!isReasonList(value.reasons)) return null;
   if (!isRecord(value.process)) return null;
-  if (typeof value.algorithmVersion !== "string" || value.algorithmVersion.length === 0) return null;
+  if (
+    typeof value.algorithmVersion !== "string" ||
+    value.algorithmVersion.length === 0 ||
+    value.algorithmVersion.length > 80
+  ) return null;
+  if (
+    (value.nextAction !== undefined &&
+      value.nextAction !== null &&
+      !["continue", "independent_retry", "rewrite", "review_later"].includes(
+        value.nextAction,
+      )) ||
+    (value.retryOutcome !== undefined &&
+      value.retryOutcome !== null &&
+      !["passed", "failed"].includes(value.retryOutcome)) ||
+    (value.reviewNeeded !== undefined && typeof value.reviewNeeded !== "boolean")
+  ) return null;
   if (value.modelReview !== undefined && value.modelReview !== null && !isRecord(value.modelReview)) {
     return null;
   }
+  const scoredBands = ["需要再观察", "基本正确", "写得规范", "写得很好"];
+  if (
+    (status === "scored" &&
+      (typeof value.score !== "number" ||
+        value.breakdown === null ||
+        value.strokes.length === 0 ||
+        !scoredBands.includes(value.band))) ||
+    (status === "unscorable" &&
+      (value.score !== null ||
+        value.breakdown !== null ||
+        value.band !== "暂时无法判断" ||
+        !value.reasons.some((reason: any) => reason.code === "reference_unavailable"))) ||
+    (status === "incomplete" &&
+      (value.score !== null || value.breakdown !== null || value.band !== "需要再观察"))
+  ) {
+    return null;
+  }
   return {
-    status: String(value.status),
+    status,
     score: value.score === null ? null : Number(value.score),
     band: value.band,
     strokes: value.strokes,
@@ -211,6 +267,9 @@ function parseHandwritingAssessment(value: unknown): HandwritingAssessmentInput 
     reasons: value.reasons,
     process: value.process,
     algorithmVersion: value.algorithmVersion,
+    nextAction: typeof value.nextAction === "string" ? value.nextAction : null,
+    retryOutcome: typeof value.retryOutcome === "string" ? value.retryOutcome : null,
+    reviewNeeded: value.reviewNeeded === true,
     modelReview: (value.modelReview as Record<string, unknown> | null | undefined) ?? null,
   };
 }

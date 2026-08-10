@@ -183,6 +183,20 @@ test("guided errors require one independent rewrite without creating an infinite
   assert.equal(independentFailure.requiresIndependentRetry, false);
 });
 
+test("multiple errors during the independent retry still end in review-later", () => {
+  const coach = createHandwritingCoach({ reference, stageSize: 600 });
+  const result = coach.assess({
+    strokes: reference.strokes,
+    process: { orderErrors: 2, rejectedStrokes: 2, independentRetry: true },
+  });
+
+  assert.equal(result.requiresIndependentRetry, false);
+  assert.equal(result.requiresRetry, false);
+  assert.equal(result.nextAction, "review_later");
+  assert.equal(result.reviewNeeded, true);
+  assert.equal(result.retryOutcome, "failed");
+});
+
 test("a character more than fifteen percent off-center requires one rewrite, not a loop", () => {
   const coach = createHandwritingCoach({ reference, stageSize: 600 });
   const shifted = reference.strokes.map((stroke) =>
@@ -200,6 +214,31 @@ test("a character more than fifteen percent off-center requires one rewrite, not
   assert.equal(first.nextAction, "rewrite");
   assert.equal(followup.requiresRetry, false);
   assert.equal(followup.nextAction, "review_later");
+});
+
+test("one key stroke leaving its intended region cannot hide behind an unchanged centroid", () => {
+  const coach = createHandwritingCoach({ reference, stageSize: 600 });
+  const spreadApart = [
+    reference.strokes[0].map((point) => ({ x: point.x - 120, y: point.y })),
+    reference.strokes[1].map((point) => ({ x: point.x + 120, y: point.y })),
+  ];
+
+  const result = coach.assess({ strokes: spreadApart, process: {} });
+
+  assert.ok(result.breakdown.placement <= 0.3);
+  assert.equal(result.requiresRewrite, true);
+  assert.match(result.primaryReason.code, /^placement_(left|right)$/);
+});
+
+test("disjoint trajectories receive a low overall-shape result", () => {
+  const coach = createHandwritingCoach({ reference, stageSize: 600 });
+  const disjoint = reference.strokes.map((stroke) =>
+    stroke.map((point) => ({ x: point.x - 260, y: point.y - 240 })),
+  );
+
+  const result = coach.assess({ strokes: disjoint, process: {} });
+
+  assert.ok(result.breakdown.shape < 0.35);
 });
 
 test("missing strokes block submission and extra strokes are rejected immediately", () => {
@@ -283,6 +322,17 @@ test("missing reference data is unscorable and never becomes a child failure", (
   assert.equal(result.band, "暂时无法判断");
   assert.equal(result.primaryReason.code, "reference_unavailable");
   assert.equal(result.reasons[0].code, "reference_unavailable");
+});
+
+test("a partially degenerate reference is unscorable instead of silently dropping strokes", () => {
+  const coach = createHandwritingCoach({
+    reference: { strokes: [[], reference.strokes[0]] },
+    stageSize: 600,
+  });
+  const result = coach.assess({ strokes: [reference.strokes[0]], process: {} });
+
+  assert.equal(result.status, "unscorable");
+  assert.equal(result.score, null);
 });
 
 test("an explicitly validated stroke-order variant is accepted without weakening the canonical rule", () => {

@@ -300,8 +300,7 @@ const VIEWPORT = process.env.VIEWPORT || "mobile";
   // (issue #65): "看笔顺 ↓" during animating, "看 3 秒后字会消失"
   // during showing, "字消失啦，开始写 ↓" during writing. We just
   // check that we're in one of those valid phases — the per-phase
-  // timing is covered by verify-write-v08-flow.js and
-  // verify-write-v082-fix.js.
+  // timing is covered by web/write/show-flow.test.js.
   const status = await page.textContent("#status");
   console.log(`step 6: status = "${status}"`);
   const validStatuses = ["看笔顺 ↓", "看 3 秒后字会消失", "字消失啦，开始写 ↓"];
@@ -310,7 +309,11 @@ const VIEWPORT = process.env.VIEWPORT || "mobile";
     process.exit(1);
   }
 
-  // 7. Regression: the completed stroke must be assessed through the\n  // structured handwriting coach, with a descriptive band and reason.\n  // The old star/bitmap scorer has been removed.\n  //\n  // The submit button has the .cta class which triggers a CSS pulse
+  // 7. Regression: the completed stroke must be assessed through the
+  // structured handwriting coach, with a descriptive band and reason.
+  // The old star/bitmap scorer has been removed.
+  //
+  // The submit button has the .cta class which triggers a CSS pulse
   // animation; force:true skips Playwright's stability check.
   await page.click("#submit-btn", { force: true });
   await page.waitForTimeout(500);

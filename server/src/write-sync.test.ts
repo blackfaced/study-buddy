@@ -151,8 +151,17 @@ describe("recordWritingAttempt", () => {
       strokes: [[{ x: 100, y: 120 }, { x: 220, y: 120 }]],
       breakdown: { structure: 0.8, placement: 0.9, strokeQuality: 0.75, shape: 0.8 },
       reasons: [{ code: "stroke_length", message: "第一横再短一点" }],
-      process: { orderErrors: 1, rejectedStrokes: 1, hintCounts: [1] },
+      process: {
+        orderErrors: 1,
+        rejectedStrokes: 1,
+        hintCounts: [1],
+        manualUndos: 1,
+        undoEvents: [{ reviewId: 2, atStrokeIndex: 0 }],
+      },
       algorithmVersion: "handwriting-coach-v1",
+      nextAction: "review_later",
+      retryOutcome: "failed",
+      reviewNeeded: true,
       modelReview: { status: "skipped" },
     };
 
@@ -173,6 +182,9 @@ describe("recordWritingAttempt", () => {
       breakdown: assessment.breakdown,
       reasons: assessment.reasons,
       process: assessment.process,
+      nextAction: "review_later",
+      retryOutcome: "failed",
+      reviewNeeded: true,
       modelReview: assessment.modelReview,
     });
   });
