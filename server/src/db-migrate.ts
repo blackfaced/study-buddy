@@ -38,6 +38,23 @@ export function migrateSchema(db: Database.Database): void {
   // childId; missing/empty defaults to 'default' for backwards compat.
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN child_id TEXT NOT NULL DEFAULT 'default'`); } catch {}
 
+  // v0.8 (#34a-1, issue #98): deduplicate existing rows before building
+  // the UNIQUE index below. Older versions of the app could insert many
+  // mistakes with the same `problem` (e.g. candy-math-island sync fired
+  // every wrong answer), and now that child_id is filled with 'default'
+  // they would all collide on (default, problem). Keep the earliest row
+  // (smallest id) per (child_id, problem) and drop the rest. This is
+  // a one-time migration; subsequent inserts go through the new deduped
+  // /api/game/mistake endpoint so no further dupes can be created.
+  db.exec(`
+    DELETE FROM mistakes
+    WHERE id NOT IN (
+      SELECT MIN(id)
+      FROM mistakes
+      GROUP BY child_id, problem
+    );
+  `);
+
   // 初始化 schema
   db.exec(`
     CREATE TABLE IF NOT EXISTS children (
