@@ -310,31 +310,18 @@ const VIEWPORT = process.env.VIEWPORT || "mobile";
     process.exit(1);
   }
 
-  // 7. Regression: refStrokes must be the real stroke count, not
-  // HanziWriter's internal sub-path count. For "一" the kid draws
-  // 1 stroke and the ref has 1 stroke; if client.js misuses
-  // refSvg.querySelectorAll("path").length (which is 6 because
-  // HanziWriter splits "一" into 6 sub-paths for the animation),
-  // strokesScore becomes ~0.17 and the final score is 0 — even
-  // when the kid drew a perfect horizontal stroke. We assert the
-  // score is at least 2 stars (total >= 0.4) after a well-placed
-  // stroke, which is only possible if the stroke-count match is
-  // correct.
-  //
-  // The submit button has the .cta class which triggers a CSS pulse
+  // 7. Regression: the completed stroke must be assessed through the\n  // structured handwriting coach, with a descriptive band and reason.\n  // The old star/bitmap scorer has been removed.\n  //\n  // The submit button has the .cta class which triggers a CSS pulse
   // animation; force:true skips Playwright's stability check.
   await page.click("#submit-btn", { force: true });
   await page.waitForTimeout(500);
   const scoreData = await page.evaluate(() => {
     const scoreText = document.getElementById("score")?.textContent || "";
-    const stars = (scoreText.match(/★/g) || []).length;
-    const totalMatch = scoreText.match(/(\d+(?:\.\d+)?)\s*分/);
-    const total = totalMatch ? parseFloat(totalMatch[1]) : 0;
-    return { scoreText, stars, total };
+    const bands = ["需要再观察", "基本正确", "写得规范", "写得很好", "暂时无法判断"];
+    return { scoreText, hasBand: bands.some((band) => scoreText.includes(band)) };
   });
-  console.log(`step 7: score text = ${JSON.stringify(scoreData.scoreText)}, stars=${scoreData.stars}, total=${scoreData.total}`);
-  if (scoreData.stars < 2) {
-    console.log(`FAIL: kid drew 1 stroke on "一" and got ${scoreData.stars} stars (total=${scoreData.total}) — refStrokes is probably wrong (regression of refSvg.querySelectorAll('path') bug, score.js sees 6 sub-paths instead of 1 stroke)`);
+  console.log(`step 7: assessment text = ${JSON.stringify(scoreData.scoreText)}`);
+  if (!scoreData.hasBand || /[★☆]/.test(scoreData.scoreText)) {
+    console.log("FAIL: expected a descriptive handwriting band without stars");
     process.exit(1);
   }
 

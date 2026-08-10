@@ -10,8 +10,8 @@
 //     ↓
 //   writing     → 字消失, kid 用手指/pen 写, 支持撤销
 //     ↓ (kid 点「提交」)
-//   submitted   → compare mode (绿字 + 红笔) + 打分 (1-3 ⭐)
-//                 出「重练」/「下一题」按钮
+//   submitted   → compare mode (绿字 + 红笔) + 可解释的规范书写档位
+//                 出「重练」/「下一题」按钮；有纠错时先独立重写一次
 //     ↓
 //     ├── 重练 → 清空 strokes, 回到 animating (同一字, 不前进 sessionIdx)
 //     └── 下一题 → sessionIdx++, presentCurrent (下一字)
@@ -19,14 +19,17 @@
 // Hanzi Writer is loaded as a global from the CDN <script> tag in
 // index.html, so we read it from window.HanziWriter.
 import { computeDisplayLevel } from "./grade.js";
-import { scoreStrokes } from "./score.js";
-import { paintPathsToCanvas, parseCTMString } from "./rasterize.js";
 import { runShowFlow } from "./show-flow.js";
 import { attachKidInput } from "./kid-input.js";
 import { createWriteSession } from "./session.js";
 import { attachHomeView } from "./home-view.js";
 import { renderProgressHeader } from "./progress-header.js";
 import { centerWhenReady, centerCharacter } from "./char-center.js";
+import {
+  createHandwritingCoach,
+  referenceFromHanziData,
+  VALIDATED_STROKE_ORDERS,
+} from "./handwriting-coach.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -209,7 +212,11 @@ async function startWord(item, opts = {}) {
   kidSvg.innerHTML = "";
   if (scoreEl) { scoreEl.textContent = ""; scoreEl.style.display = "none"; }
   if (!keepStrokes) {
-    item.strokes = [];   // [{pathEl, d}] for the current attempt
+    item.strokes = [];   // [{pathEl, d, points}] for the current attempt
+    item.process = createAttemptProcess({
+      independentRetry: !!opts.independentRetry,
+      followupRetry: !!opts.followupRetry,
+    });
   }
 
   const writer = HanziWriter.create(hanziTarget, item.char, {
@@ -235,6 +242,24 @@ async function startWord(item, opts = {}) {
     delayBetweenStrokes: 200,
   });
   item.writer = writer;
+  if (!keepStrokes) {
+    item.coachPromise = HanziWriter.loadCharacterData(item.char)
+      .then((characterData) =>
+        createHandwritingCoach({
+          reference: referenceFromHanziData(characterData, {
+            stageSize: STAGE_SIZE,
+            padding: 100,
+            variantOrders: VALIDATED_STROKE_ORDERS[item.char] ?? [],
+          }),
+          stageSize: STAGE_SIZE,
+        }),
+      )
+      .catch((error) => {
+        console.warn("[write] reference unavailable", error);
+        return createHandwritingCoach({ reference: { strokes: [] }, stageSize: STAGE_SIZE });
+      });
+    item.reviewQueue = Promise.resolve();
+  }
 
   // v0.9 (issue: phone "字看不全"): center the character on the
   // stage grid and scale to fit. Different viewports (phone ~358
@@ -319,145 +344,146 @@ function applyCharacterOpacity(opacity) {
 const SVG_NS = "http://www.w3.org/2000/svg";
 const createSvgElement = (tag) => document.createElementNS(SVG_NS, tag);
 
+function createAttemptProcess({ independentRetry = false, followupRetry = false } = {}) {
+  return {
+    orderErrors: 0,
+    directionErrors: 0,
+    rejectedStrokes: 0,
+    uncertainStrokes: 0,
+    errorsByStroke: {},
+    hintCounts: [],
+    strokeReviews: [],
+    independentRetry,
+    followupRetry,
+  };
+}
+
 const kidInput = attachKidInput({
   svg: kidSvg,
   stageSize: STAGE_SIZE,
   isWritingPhase: () => phase === "writing",
   onStroke: (s) => {
-    // Route the completed stroke into the current session item.
     const item = session.currentItem;
-    if (item) item.strokes.push(s);
+    if (!item) return;
+    item.reviewQueue = (item.reviewQueue ?? Promise.resolve())
+      .then(() => reviewCompletedStroke(item, s))
+      .catch((error) => {
+        console.error("[write] stroke review failed", error);
+        // A system failure is not a child error. Keep the stroke and
+        // let submit return an unscorable result if needed.
+        item.strokes.push(s);
+      });
   },
   createElement: createSvgElement,
 });
 const enableKidInput = () => kidInput.attach();
 const disableKidInput = () => kidInput.detach();
 
-// ===========================================================================
-//  Rasterise — kid + ref SVG paths → SIZE*SIZE bitmap masks for IoU
-// ===========================================================================
+async function reviewCompletedStroke(item, stroke) {
+  const coach = await item.coachPromise;
+  const process = item.process ?? (item.process = createAttemptProcess());
+  const decision = coach.reviewStroke({
+    acceptedStrokes: item.strokes.map((saved) => saved.points),
+    candidate: stroke.points,
+    errorCounts: process.errorsByStroke,
+  });
+  (process.strokeReviews ??= []).push({
+    path: stroke.d,
+    points: stroke.points,
+    verdict: decision.status,
+    accepted: decision.accept,
+    confidence: decision.confidence,
+    reasonCode: decision.reason?.code ?? null,
+    expectedStrokeIndex: decision.expectedStrokeIndex,
+    matchedStrokeIndex: decision.matchedStrokeIndex,
+    hintLevel: decision.hint?.level ?? null,
+  });
 
-/**
- * Rasterise both the kid's strokes and the reference character's
- * strokes into SIZE*SIZE bitmap masks so scoreStrokes() can compute
- * IoU (intersection over union).
- *
- * v0.8.1 (issue #66): this replaces the old "bbox overlap" approach
- * that scored messy-but-large ink higher than accurate-but-small
- * ink. IoU on the actual rasterised shape is what "did the kid
- * write the right shape" really means.
- *
- * Trick: HanziWriter's reference path has stroke-width="200" inside
- * a 600 viewBox, while the kid's strokes are 6 wide. If we naively
- * drawImage both, the ref is ~33× wider than the kid in pixels and
- * the IoU is dominated by the ref's area. We normalise both to
- * stroke-width 6 before rasterising so a 1-stroke-wide ref pixel
- * matches a 1-stroke-wide kid pixel.
- */
-async function rasterizeStrokes(strokes, item) {
-  const SIZE = 100;
-  const c = document.createElement("canvas");
-  c.width = SIZE;
-  c.height = SIZE;
-  const ctx = c.getContext("2d");
-  ctx.imageSmoothingEnabled = false;  // sharp edges; we want pixel-accurate mask
-
-  // Canvas is 100x100, SVG viewBox is 600x600. Scale 1/6 makes a
-  // HanziWriter stroke-width="200" in 600 viewBox become 33 pixels
-  // wide in the canvas, which dominates any kid stroke. We instead
-  // draw both sides at a NORMALISED stroke width: the kid's 6
-  // (6/600 * 100 = 1px) and the ref's 200 (200/600 * 100 = 33px)
-  // would not be comparable. So we use the same Path2D + ctx.stroke
-  // path for both, with the same line width and caps, and let the
-  // d-strings themselves encode where ink goes.
-  const scale = SIZE / STAGE_SIZE;
-
-  // 1. Kid strokes. kid-svg is in the DOM with paths drawn by
-  //    onpointerup. We re-rasterise from the d-strings so the
-  //    bitmap is in the same coordinate system (600 viewBox) as
-  //    the ref (after scale = 1/6). No CTM — the kid's paths are
-  //    written in canvas coordinates directly.
-  ctx.save();
-  ctx.scale(scale, scale);
-  ctx.strokeStyle = "#000";
-  ctx.fillStyle = "#000";
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  const kidDs = strokes.map((s) => s.pathEl.getAttribute("d")).filter(Boolean);
-  // deviceLineWidth=1 → 1 device pixel stroke in the 100x100 mask
-  // (no ctm, so paintPathsToCanvas doesn't scale).
-  paintPathsToCanvas(ctx, kidDs, null, 1);
-  ctx.restore();
-  const kidBitmap = bitmapFromCanvas(ctx, SIZE);
-
-  // 2. Ref strokes. v0.8.2 (issue #68): HanziWriter nests its paths
-  //    inside <g transform="translate(...) scale(...)">. The raw d
-  //    values are in unscaled SVG coordinates — without applying
-  //    the transform, the bitmap lands at the wrong place and IoU
-  //    is ~0 (the "score is always 0" bug the user caught on the
-  //    iPad). We parse the transform string and apply it via
-  //    ctx.transform. (Real <g>.getCTM() works in chromium but
-  //    not in some mobile browsers, so we read the attribute and
-  //    compute the matrix ourselves — this is what rasterize.js
-  //    test-cases pin down.)
-  ctx.clearRect(0, 0, SIZE, SIZE);
-  let refStrokes = 0;
-  const refSvg = hanziTarget ? hanziTarget.querySelector("svg") : null;
-  if (refSvg) {
-    // v0.8.2.1 (issue: phone score 0): refStrokes must be the REAL
-    // stroke count, not the HanziWriter sub-path count. The library
-    // splits each stroke into multiple sub-paths for the animation
-    // (e.g. "一" → 6 sub-paths), so refSvg.querySelectorAll("path")
-    // returns 6 for a single-stroke character. The kid drew 1
-    // stroke → strokesScore = 1 - |1-6|/6 = 0.17 → final score
-    // ~0.1 → "0 分" even for a perfect stroke. The right answer is
-    // HanziWriter.loadCharacterData(char).strokes.length.
-    try {
-      const refCharData = await HanziWriter.loadCharacterData(item.char);
-      refStrokes = (refCharData && refCharData.strokes) ? refCharData.strokes.length : 0;
-    } catch (e) {
-      // HanziWriter CDN hiccup — fall back to the (wrong) sub-path
-      // count rather than 0, which would make every score a hard 0.
-      refStrokes = refSvg.querySelectorAll("path").length;
-    }
-    // Find the first <g> with a transform attribute; that's the
-    // HanziWriter's glyph group. We compose any chained transforms.
-    const g = refSvg.querySelector("g[transform]");
-    const ctm = g ? parseCTMString(g.getAttribute("transform")) : null;
-    ctx.save();
-    ctx.scale(scale, scale);
-    ctx.strokeStyle = "#000";
-    ctx.fillStyle = "#000";
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    const refDs = Array.from(refSvg.querySelectorAll("path"))
-      .map((p) => p.getAttribute("d"))
-      .filter(Boolean);
-    // deviceLineWidth=1 → 1 device pixel stroke in the 100x100 mask
-    // (matches the kid's stroke width after paintPathsToCanvas
-    // divides by |ctm.scale|). Without the normalisation in
-    // paintPathsToCanvas the ref stroke was 1/0.39 ≈ 2.5x wider
-    // than the kid's and IoU never reached 1.0.
-    paintPathsToCanvas(ctx, refDs, ctm, 1);
-    ctx.restore();
+  if (decision.accept) {
+    item.strokes.push(stroke);
+    if (decision.status === "uncertain") process.uncertainStrokes++;
+    clearCoachOverlay();
+    statusEl.textContent = decision.status === "uncertain"
+      ? decision.reason.message
+      : `第 ${item.strokes.length} 笔写好了`;
+    return;
   }
-  const refBitmap = bitmapFromCanvas(ctx, SIZE);
 
-  return { kidBitmap, refBitmap, refStrokes, size: SIZE };
+  removeStrokeElement(stroke);
+  const index = decision.expectedStrokeIndex;
+  process.errorsByStroke[index] = Number(process.errorsByStroke[index] ?? 0) + 1;
+  process.rejectedStrokes++;
+  process.hintCounts[index] = decision.hint?.level ?? 1;
+  if (decision.reason.code === "stroke_order_wrong") process.orderErrors++;
+  if (decision.reason.code === "stroke_direction_reversed") process.directionErrors++;
+  renderCoachHint(decision);
+  statusEl.textContent = decision.reason.message;
+  if (decision.hint?.animate && typeof item.writer?.animateStroke === "function") {
+    item.writer.animateStroke(index);
+  }
 }
 
-/** Convert a canvas's current RGBA pixels to a SIZE*SIZE 0/1 mask. */
-function bitmapFromCanvas(ctx, size) {
-  const data = ctx.getImageData(0, 0, size, size).data;
-  const out = new Uint8Array(size * size);
-  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-    out[j] = data[i + 3] > 0 ? 1 : 0;
+function removeStrokeElement(stroke) {
+  if (stroke?.pathEl?.parentNode === kidSvg) kidSvg.removeChild(stroke.pathEl);
+}
+
+function clearCoachOverlay() {
+  for (const node of kidSvg.querySelectorAll("[data-coach-overlay]")) node.remove();
+}
+
+function renderCoachHint(decision) {
+  clearCoachOverlay();
+  const points = decision.hint?.points ?? [];
+  if (points.length === 0) return;
+  const path = createSvgElement("path");
+  path.setAttribute("data-coach-overlay", "true");
+  path.setAttribute(
+    "d",
+    points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" "),
+  );
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "#ff9800");
+  path.setAttribute("stroke-width", "12");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-dasharray", decision.hint.level === 1 ? "18 14" : "none");
+  path.setAttribute("opacity", "0.75");
+  kidSvg.appendChild(path);
+
+  if (decision.hint.showStart) {
+    const start = points[0];
+    const marker = createSvgElement("circle");
+    marker.setAttribute("data-coach-overlay", "true");
+    marker.setAttribute("cx", String(start.x));
+    marker.setAttribute("cy", String(start.y));
+    marker.setAttribute("r", "16");
+    marker.setAttribute("fill", "#ff9800");
+    marker.setAttribute("opacity", "0.9");
+    kidSvg.appendChild(marker);
   }
-  return out;
+
+  if (decision.hint.showDirection && points.length > 1) {
+    const end = points[Math.min(points.length - 1, Math.max(1, Math.floor(points.length / 3)))];
+    const start = points[0];
+    const angle = Math.atan2(end.y - start.y, end.x - start.x);
+    const tip = { x: end.x, y: end.y };
+    const wing = 18;
+    const arrow = createSvgElement("polygon");
+    arrow.setAttribute("data-coach-overlay", "true");
+    arrow.setAttribute(
+      "points",
+      [
+        tip,
+        { x: tip.x - wing * Math.cos(angle - 0.55), y: tip.y - wing * Math.sin(angle - 0.55) },
+        { x: tip.x - wing * Math.cos(angle + 0.55), y: tip.y - wing * Math.sin(angle + 0.55) },
+      ].map((point) => `${point.x},${point.y}`).join(" "),
+    );
+    arrow.setAttribute("fill", "#ff9800");
+    kidSvg.appendChild(arrow);
+  }
 }
 
 // ===========================================================================
-//  Submit / Undo / Score
+//  Submit / Undo / Coach assessment
 // ===========================================================================
 
 function undoLastStroke() {
@@ -473,65 +499,182 @@ function undoLastStroke() {
 async function submitCurrent() {
   const item = session.currentItem;
   if (!item) return;
+  await (item.reviewQueue ?? Promise.resolve());
   const strokes = item.strokes || [];
-  // Concatenate all stroke d-strings into one path the server can
-  // accept (we use SVG's M..L space — multiple subpaths work).
   const combined = strokes.map((s) => s.d).join(" ");
-
-  // 1. Compute the score client-side. v0.8.1 (issue #66): switched
-  //    from "bbox overlap of the kid's union vs the ref's bbox" to
-  //    "IoU of the rasterised kid path vs the rasterised ref path".
-  //    v0.8's bbox overlap made "draw a big messy blob covering the
-  //    whole 田字格" beat "draw a small accurate stroke", because it
-  //    measured AREA coverage, not SHAPE similarity. The iPad live
-  //    test caught it — kid wrote ugly but scored 3★, dad wrote
-  //    accurately but scored 1★. Rasterising both sides to a 100×100
-  //    canvas and computing intersection-over-union reflects what
-  //    "matches" actually means.
-  // rasterizeStrokes is async (it awaits HanziWriter.loadCharacterData
-  // for the real stroke count). Without await here we destructure a
-  // Promise and get kidBitmap=undefined, refBitmap=undefined,
-  // refStrokes=0 → score.js short-circuits to 1★ "0 分". Bug caught
-  // on the v0.8.2.1 phone live test (issue: phone score always 0).
-  const { kidBitmap, refBitmap, refStrokes, size } = await rasterizeStrokes(strokes, item);
-  const { stars, breakdown } = scoreStrokes({
-    kidStrokes: strokes.length,
-    refStrokes: Math.max(refStrokes, 1),  // if writer gave 0, pretend 1 so 0 kid → 0 score
-    kidBitmap,
-    refBitmap,
-    size,
+  const coach = await item.coachPromise;
+  const assessment = coach.assess({
+    strokes: strokes.map((stroke) => stroke.points),
+    process: item.process ?? {},
   });
-  showScore(stars, breakdown);
 
-  // 2. Submit the attempt to the server. Best-effort — a server
-  //    failure shouldn't block the visual compare flow.
+  if (!assessment.canSubmit) {
+    renderAssessment(assessment);
+    statusEl.textContent = assessment.primaryReason.message;
+    if (assessment.nextStroke) {
+      renderCoachHint({ hint: { level: 1, points: assessment.nextStroke } });
+    }
+    return;
+  }
+
+  renderAssessment(assessment);
+  const persistedAssessment = {
+    status: assessment.status,
+    score: assessment.score,
+    band: assessment.band,
+    strokes: strokes.map((stroke) => stroke.points),
+    breakdown: assessment.breakdown,
+    reasons: assessment.reasons,
+    process: item.process ?? {},
+    algorithmVersion: assessment.algorithmVersion,
+    modelReview: { status: assessment.reviewRecommended ? "pending" : "skipped" },
+  };
+
+  let attemptId = null;
   try {
-    await window.StudyBuddy.fetch(API + "/attempts", {
+    const saved = await window.StudyBuddy.fetch(API + "/attempts", {
       method: "POST",
-      body: { char: item.char, level: item.opacity, strokePath: combined },
+      body: {
+        char: item.char,
+        level: item.opacity,
+        strokePath: combined,
+        assessment: persistedAssessment,
+      },
     });
+    attemptId = saved?.attemptId ?? null;
   } catch (e) {
     console.error("[write] submitCurrent: attempt POST failed", e);
   }
 
-  // 3. Compare mode: re-show the reference at full opacity next to
-  //    the kid's strokes. Disable further input.
   if (item.writer) {
     item.writer.showCharacter();
     applyCharacterOpacity(1.0);
   }
   disableKidInput();
   setPhase("submitted");
-  statusEl.textContent = `对比看完了？点「重练」或「下一题」`;
+  item.requiresIndependentRetry = assessment.requiresIndependentRetry;
+  item.requiresRewrite = assessment.requiresRetry;
+  if (assessment.requiresIndependentRetry) {
+    retryBtn.textContent = "独立再写一次";
+    nextBtn.style.display = "none";
+    statusEl.textContent = "改对了。现在不看提示，独立写一次";
+  } else if (assessment.requiresRetry) {
+    retryBtn.textContent = "重新观察再写一次";
+    nextBtn.style.display = "none";
+    statusEl.textContent = "位置偏得有点多，重新观察方格后再写一次";
+  } else if (assessment.nextAction === "review_later") {
+    statusEl.textContent = "这次先记下来，下次再练";
+  } else {
+    retryBtn.textContent = "重练";
+    statusEl.textContent = "看完原因，可以重练或写下一个字";
+  }
+
+  if (assessment.reviewRecommended && attemptId) {
+    void requestVisualReview(item, assessment, attemptId);
+  }
 }
 
-function showScore(stars, breakdown) {
+function renderAssessment(assessment) {
   if (!scoreEl) return;
   scoreEl.style.display = "";
-  const star = "★";
-  const empty = "☆";
-  scoreEl.textContent = `${star.repeat(stars)}${empty.repeat(3 - stars)}  ${(breakdown.total * 100).toFixed(0)} 分`;
-  scoreEl.title = `笔画数 ${(breakdown.strokes * 100).toFixed(0)} · 形状重合 ${(breakdown.iou * 100).toFixed(0)}`;
+  const messages = [assessment.primaryReason?.message, assessment.secondaryReason?.message]
+    .filter(Boolean);
+  scoreEl.textContent = [assessment.band, ...messages].join(" · ");
+  scoreEl.title = assessment.breakdown
+    ? `结构 ${percent(assessment.breakdown.structure)} · 位置 ${percent(assessment.breakdown.placement)} · 单笔 ${percent(assessment.breakdown.strokeQuality)} · 整体 ${percent(assessment.breakdown.shape)}`
+    : assessment.primaryReason?.message ?? assessment.band;
+  renderAssessmentOverlay(assessment.primaryReason?.overlay);
+}
+
+function percent(value) {
+  return `${Math.round(Number(value ?? 0) * 100)}`;
+}
+
+function renderAssessmentOverlay(overlay) {
+  if (!overlay) return;
+  clearCoachOverlay();
+  if (overlay.kind === "translation") {
+    const line = createSvgElement("line");
+    line.setAttribute("data-coach-overlay", "true");
+    line.setAttribute("x1", "300");
+    line.setAttribute("y1", "300");
+    line.setAttribute("x2", String(300 + overlay.dx));
+    line.setAttribute("y2", String(300 + overlay.dy));
+    line.setAttribute("stroke", "#ff9800");
+    line.setAttribute("stroke-width", "12");
+    line.setAttribute("stroke-linecap", "round");
+    kidSvg.appendChild(line);
+  }
+}
+
+async function requestVisualReview(item, assessment, attemptId) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4_000);
+  try {
+    const imageBase64 = captureAttemptImage(item.strokes ?? []);
+    const review = await window.StudyBuddy.fetch(API + "/review", {
+      method: "POST",
+      signal: controller.signal,
+      body: {
+        imageBase64,
+        localAssessment: {
+          band: assessment.band,
+          breakdown: assessment.breakdown,
+          reasons: assessment.reasons,
+        },
+      },
+    });
+    if (session.currentItem === item && phase === "submitted" && review?.suggestion) {
+      scoreEl.textContent += ` · ${review.suggestion}`;
+    }
+    await persistModelReview(attemptId, review);
+  } catch (error) {
+    console.info("[write] optional visual review skipped", error);
+    try {
+      await persistModelReview(attemptId, { status: "failed" });
+    } catch {
+      // Best effort: local coaching already completed and is authoritative.
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function persistModelReview(attemptId, modelReview) {
+  return window.StudyBuddy.fetch(`${API}/attempts/${attemptId}/model-review`, {
+    method: "PATCH",
+    body: { modelReview },
+  });
+}
+
+function captureAttemptImage(strokes) {
+  const size = 300;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = "#d7e2f2";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(size / 2, 0);
+  ctx.lineTo(size / 2, size);
+  ctx.moveTo(0, size / 2);
+  ctx.lineTo(size, size / 2);
+  ctx.stroke();
+  ctx.save();
+  ctx.scale(size / STAGE_SIZE, size / STAGE_SIZE);
+  ctx.strokeStyle = "#111";
+  ctx.lineWidth = 10;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const stroke of strokes) {
+    if (!stroke.d) continue;
+    ctx.stroke(new Path2D(stroke.d));
+  }
+  ctx.restore();
+  return canvas.toDataURL("image/jpeg", 0.82).split(",")[1] ?? "";
 }
 
 // ===========================================================================
@@ -571,8 +714,12 @@ retryBtn.onclick = () => {
   if (phase !== "submitted") return;
   const item = session.currentItem;
   if (item) item.attemptCount = (item.attemptCount || 0) + 1;  // attempts++; opacity goes down next time
+  const independentRetry = !!item?.requiresIndependentRetry;
+  const followupRetry = !!item?.requiresRewrite;
+  if (item) item.requiresIndependentRetry = false;
+  if (item) item.requiresRewrite = false;
   enableKidInput();
-  startWord(item);
+  startWord(item, { independentRetry, followupRetry });
 };
 
 nextBtn.onclick = () => {

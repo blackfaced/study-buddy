@@ -185,6 +185,10 @@ test("kid-input: pointerup calls onStroke with the d-string + path element", () 
 
   assert.equal(strokes.length, 1);
   assert.match(strokes[0].d, /M 100 100 L 200 200/);
+  assert.deepEqual(strokes[0].points, [
+    { x: 100, y: 100 },
+    { x: 200, y: 200 },
+  ]);
   assert.equal(strokes[0].pathEl, activePath);
   assert.equal(activePath.getAttribute("opacity"), "0.85");
 });

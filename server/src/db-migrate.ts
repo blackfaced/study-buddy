@@ -61,6 +61,18 @@ export function migrateSchema(db: Database.Database): void {
     /* fresh DB — mistakes table doesn't exist yet, nothing to dedupe */
   }
 
+  // Explainable handwriting coach attempt payload (issues #103/#108).
+  // Keep the legacy level/stroke_path columns so old rows and callers
+  // remain readable during the expand-contract rollout.
+  try { db.exec(`ALTER TABLE writing_attempts ADD COLUMN score INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE writing_attempts ADD COLUMN display_band TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE writing_attempts ADD COLUMN status TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE writing_attempts ADD COLUMN strokes_json TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE writing_attempts ADD COLUMN assessment_json TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE writing_attempts ADD COLUMN process_json TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE writing_attempts ADD COLUMN algorithm_version TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE writing_attempts ADD COLUMN model_review_json TEXT`); } catch {}
+
   // 初始化 schema
   db.exec(`
     CREATE TABLE IF NOT EXISTS children (
@@ -178,6 +190,14 @@ export function migrateSchema(db: Database.Database): void {
       char TEXT NOT NULL,
       level REAL NOT NULL,
       stroke_path TEXT,
+      score INTEGER,
+      display_band TEXT,
+      status TEXT,
+      strokes_json TEXT,
+      assessment_json TEXT,
+      process_json TEXT,
+      algorithm_version TEXT,
+      model_review_json TEXT,
       ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
       FOREIGN KEY (char) REFERENCES writing_words(char) ON DELETE CASCADE
     );

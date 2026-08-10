@@ -30,7 +30,28 @@ export interface WritingAttempt {
   char: string;
   level: number;
   strokePath: string | null;
+  score: number | null;
+  displayBand: string | null;
+  status: string | null;
+  strokes: unknown[] | null;
+  breakdown: Record<string, unknown> | null;
+  reasons: unknown[] | null;
+  process: Record<string, unknown> | null;
+  algorithmVersion: string | null;
+  modelReview: Record<string, unknown> | null;
   ts: number;
+}
+
+export interface HandwritingAssessmentInput {
+  status: string;
+  score: number | null;
+  band: string;
+  strokes: unknown[];
+  breakdown: Record<string, unknown> | null;
+  reasons: unknown[];
+  process: Record<string, unknown>;
+  algorithmVersion: string;
+  modelReview?: Record<string, unknown> | null;
 }
 
 /** List all words in the library, newest first, with attempt counts. */
@@ -92,28 +113,120 @@ export function listWritingAttempts(
   char: string,
   limit: number = 50,
 ): WritingAttempt[] {
-  return db
+  const rows = db
     .prepare(
-      `SELECT id, char, level, stroke_path as strokePath, ts
+      `SELECT id, char, level, stroke_path as strokePath, score,
+              display_band as displayBand, status,
+              strokes_json as strokesJson,
+              assessment_json as assessmentJson,
+              process_json as processJson,
+              algorithm_version as algorithmVersion,
+              model_review_json as modelReviewJson,
+              ts
          FROM writing_attempts
          WHERE char = ?
          ORDER BY ts DESC
          LIMIT ?`,
     )
-    .all(char, limit) as WritingAttempt[];
+    .all(char, limit) as Array<Record<string, unknown>>;
+
+  return rows.map((row) => {
+    const assessment = parseJsonObject(row.assessmentJson);
+    return {
+      id: Number(row.id),
+      char: String(row.char),
+      level: Number(row.level),
+      strokePath: typeof row.strokePath === "string" ? row.strokePath : null,
+      score: typeof row.score === "number" ? row.score : null,
+      displayBand: typeof row.displayBand === "string" ? row.displayBand : null,
+      status: typeof row.status === "string" ? row.status : null,
+      strokes: parseJsonArray(row.strokesJson),
+      breakdown: isRecord(assessment?.breakdown) ? assessment.breakdown : null,
+      reasons: Array.isArray(assessment?.reasons) ? assessment.reasons : null,
+      process: parseJsonObject(row.processJson),
+      algorithmVersion:
+        typeof row.algorithmVersion === "string" ? row.algorithmVersion : null,
+      modelReview: parseJsonObject(row.modelReviewJson),
+      ts: Number(row.ts),
+    };
+  });
 }
 
 /** Record one writing attempt. Returns the inserted row id. */
 export function recordWritingAttempt(
   db: Database.Database,
-  input: { char: string; level: number; strokePath: string | null },
+  input: {
+    char: string;
+    level: number;
+    strokePath: string | null;
+    assessment?: HandwritingAssessmentInput | null;
+  },
 ): number {
   // Same Date.now() reasoning as addWritingWords — sub-second precision
   // ordering matters for the "newest first" attempts list.
   const info = db
     .prepare(
-      "INSERT INTO writing_attempts (char, level, stroke_path, ts) VALUES (?, ?, ?, ?)",
+      `INSERT INTO writing_attempts (
+         char, level, stroke_path, score, display_band, status,
+         strokes_json, assessment_json, process_json,
+         algorithm_version, model_review_json, ts
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(input.char, input.level, input.strokePath, Date.now());
+    .run(
+      input.char,
+      input.level,
+      input.strokePath,
+      input.assessment?.score ?? null,
+      input.assessment?.band ?? null,
+      input.assessment?.status ?? null,
+      stringifyJson(input.assessment?.strokes),
+      stringifyJson(
+        input.assessment
+          ? { breakdown: input.assessment.breakdown, reasons: input.assessment.reasons }
+          : null,
+      ),
+      stringifyJson(input.assessment?.process),
+      input.assessment?.algorithmVersion ?? null,
+      stringifyJson(input.assessment?.modelReview),
+      Date.now(),
+    );
   return Number(info.lastInsertRowid);
+}
+
+export function updateWritingAttemptModelReview(
+  db: Database.Database,
+  attemptId: number,
+  modelReview: Record<string, unknown>,
+): boolean {
+  const info = db
+    .prepare("UPDATE writing_attempts SET model_review_json = ? WHERE id = ?")
+    .run(JSON.stringify(modelReview), attemptId);
+  return info.changes > 0;
+}
+
+function stringifyJson(value: unknown): string | null {
+  return value === undefined || value === null ? null : JSON.stringify(value);
+}
+
+function parseJson(value: unknown): unknown {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonArray(value: unknown): unknown[] | null {
+  const parsed = parseJson(value);
+  return Array.isArray(parsed) ? parsed : null;
+}
+
+function parseJsonObject(value: unknown): Record<string, any> | null {
+  const parsed = parseJson(value);
+  return isRecord(parsed) ? parsed : null;
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

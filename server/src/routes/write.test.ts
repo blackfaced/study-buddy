@@ -128,10 +128,150 @@ describe("POST /api/write/attempts", () => {
     expect(res.body.attemptId).toBeTruthy();
   });
 
+  it("accepts and returns an explainable handwriting assessment", async () => {
+    await request(app).post("/api/write/words").send({ chars: "永" });
+    const assessment = {
+      status: "scored",
+      score: 82,
+      band: "写得规范",
+      strokes: [[{ x: 100, y: 100 }, { x: 200, y: 100 }]],
+      breakdown: { structure: 0.8, placement: 0.9, strokeQuality: 0.75, shape: 0.8 },
+      reasons: [{ code: "placement_right", message: "整体向左一点" }],
+      process: { orderErrors: 0, rejectedStrokes: 0 },
+      algorithmVersion: "handwriting-coach-v1",
+      modelReview: { status: "skipped" },
+    };
+
+    const created = await request(app)
+      .post("/api/write/attempts")
+      .send({ char: "永", level: 1, strokePath: "M 100 100 L 200 100", assessment });
+    expect(created.status).toBe(200);
+
+    const history = await request(app).get("/api/write/words/永/attempts");
+    expect(history.status).toBe(200);
+    expect(history.body.attempts[0]).toMatchObject({
+      status: "scored",
+      score: 82,
+      displayBand: "写得规范",
+      algorithmVersion: "handwriting-coach-v1",
+      reasons: assessment.reasons,
+      process: assessment.process,
+    });
+  });
+
   it("returns 400 when fields are missing or wrong type", async () => {
     const res = await request(app).post("/api/write/attempts").send({});
     expect(res.status).toBe(400);
   });
+  it("rejects malformed nested stroke data instead of persisting it", async () => {
+    await request(app).post("/api/write/words").send({ chars: "永" });
+    const res = await request(app).post("/api/write/attempts").send({
+      char: "永",
+      level: 1,
+      assessment: {
+        status: "scored",
+        score: 80,
+        band: "写得规范",
+        strokes: [[{ x: "not-a-number", y: 20 }]],
+        breakdown: { structure: 0.8, placement: 0.8, strokeQuality: 0.8, shape: 0.8 },
+        reasons: [],
+        process: {},
+        algorithmVersion: "handwriting-coach-v1",
+      },
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+});
+
+describe("handwriting visual review", () => {
+  it("returns 503 when visual review is not configured", async () => {
+    const res = await request(app).post("/api/write/review").send({
+      imageBase64: "abc123",
+      localAssessment: { breakdown: { structure: 0.6 } },
+    });
+
+    expect(res.status).toBe(503);
+  });
+
+  it("reviews structure without blocking and persists the resulting metadata", async () => {
+    const reviewApp = express();
+    reviewApp.use(express.json({ limit: "1mb" }));
+    registerWriteRoutes(reviewApp, {
+      db,
+      logger: silentLogger(),
+      mistakesDir,
+      visionClient: {
+        async chat() {
+          return { content: "左右两边再靠近一点。", raw: { stub: true } };
+        },
+      },
+    });
+    await request(reviewApp).post("/api/write/words").send({ chars: "永" });
+    const attempt = await request(reviewApp).post("/api/write/attempts").send({
+      char: "永",
+      level: 1,
+      strokePath: "M 1 1 L 2 2",
+      assessment: {
+        status: "scored",
+        score: 74,
+        band: "基本正确",
+        strokes: [[{ x: 1, y: 1 }, { x: 2, y: 2 }]],
+        breakdown: { structure: 0.6, placement: 0.8, strokeQuality: 0.8, shape: 0.7 },
+        reasons: [{ code: "structure_proportion", message: "看看宽窄" }],
+        process: {},
+        algorithmVersion: "handwriting-coach-v1",
+        modelReview: { status: "pending" },
+      },
+    });
+
+    const reviewed = await request(reviewApp).post("/api/write/review").send({
+      imageBase64: "abc123",
+      localAssessment: { breakdown: { structure: 0.6 } },
+    });
+    expect(reviewed.status).toBe(200);
+    expect(reviewed.body).toMatchObject({
+      status: "completed",
+      suggestion: "左右两边再靠近一点。",
+      model: "MiniMax-M3",
+    });
+    expect(reviewed.body.raw).toBeUndefined();
+
+    const updated = await request(reviewApp)
+      .patch(`/api/write/attempts/${attempt.body.attemptId}/model-review`)
+      .send({ modelReview: reviewed.body });
+    expect(updated.status).toBe(200);
+
+    const history = await request(reviewApp).get("/api/write/words/永/attempts");
+    expect(history.body.attempts[0].modelReview).toMatchObject({
+      status: "completed",
+      suggestion: "左右两边再靠近一点。",
+    });
+  });
+  it("returns a retryable error when visual review fails", async () => {
+    const reviewApp = express();
+    reviewApp.use(express.json({ limit: "1mb" }));
+    registerWriteRoutes(reviewApp, {
+      db,
+      logger: silentLogger(),
+      mistakesDir,
+      visionClient: {
+        async chat() {
+          throw new Error("upstream timeout");
+        },
+      },
+    });
+
+    const res = await request(reviewApp).post("/api/write/review").send({
+      imageBase64: "abc123",
+      localAssessment: { breakdown: { structure: 0.6 } },
+    });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/upstream timeout/);
+  });
+
 });
 
 // --- /api/write/extract-words ---------------------------------------

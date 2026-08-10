@@ -141,6 +141,41 @@ describe("recordWritingAttempt", () => {
     const a = listWritingAttempts(db, "一").find((x) => x.id === id);
     expect(a?.strokePath).toBeNull();
   });
+
+  it("round-trips an explainable handwriting assessment", () => {
+    addWritingWords(db, ["永"]);
+    const assessment = {
+      status: "scored",
+      score: 82,
+      band: "写得规范",
+      strokes: [[{ x: 100, y: 120 }, { x: 220, y: 120 }]],
+      breakdown: { structure: 0.8, placement: 0.9, strokeQuality: 0.75, shape: 0.8 },
+      reasons: [{ code: "stroke_length", message: "第一横再短一点" }],
+      process: { orderErrors: 1, rejectedStrokes: 1, hintCounts: [1] },
+      algorithmVersion: "handwriting-coach-v1",
+      modelReview: { status: "skipped" },
+    };
+
+    const id = recordWritingAttempt(db, {
+      char: "永",
+      level: 1,
+      strokePath: "M 100 120 L 220 120",
+      assessment,
+    });
+
+    const saved = listWritingAttempts(db, "永").find((attempt) => attempt.id === id);
+    expect(saved).toMatchObject({
+      status: "scored",
+      score: 82,
+      displayBand: "写得规范",
+      algorithmVersion: "handwriting-coach-v1",
+      strokes: assessment.strokes,
+      breakdown: assessment.breakdown,
+      reasons: assessment.reasons,
+      process: assessment.process,
+      modelReview: assessment.modelReview,
+    });
+  });
 });
 
 describe("listWritingAttempts", () => {

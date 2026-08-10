@@ -66,6 +66,7 @@ export function attachKidInput({
   /** Active path being drawn right now. null between strokes. */
   let activePath = null;
   let activeD = "";
+  let activePoints = [];
 
   function makePath(d) {
     // Real SVG-namespaced path element — the previous PR #70 refactor
@@ -96,6 +97,7 @@ export function attachKidInput({
     }
     const p = getPos(e);
     activeD = `M ${p.x} ${p.y}`;
+    activePoints = [p];
     activePath = makePath(activeD);
     svg.appendChild(activePath);
   }
@@ -105,15 +107,17 @@ export function attachKidInput({
     if (typeof e.preventDefault === "function") e.preventDefault();
     const p = getPos(e);
     activeD += ` L ${p.x} ${p.y}`;
+    activePoints.push(p);
     activePath.setAttribute("d", activeD);
   }
 
   function finishStroke() {
     if (!activePath) return;
-    onStroke({ pathEl: activePath, d: activeD });
+    onStroke({ pathEl: activePath, d: activeD, points: activePoints.map((point) => ({ ...point })) });
     activePath.setAttribute("opacity", "0.85");
     activePath = null;
     activeD = "";
+    activePoints = [];
   }
 
   function onUp(_e) {

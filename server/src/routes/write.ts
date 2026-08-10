@@ -27,11 +27,14 @@ import type { VisionClient } from "../vision.js";
 import {
   addWritingWords,
   deleteWritingWord,
+  type HandwritingAssessmentInput,
   listWritingAttempts,
   listWritingWords,
   recordWritingAttempt,
+  updateWritingAttemptModelReview,
 } from "../write-sync.js";
 import { extractCharsImage } from "../vision.js";
+import { reviewHandwritingImage } from "../handwriting-review.js";
 
 export interface WriteRouteDeps {
   db: Database.Database;
@@ -95,7 +98,7 @@ export function registerWriteRoutes(app: Express, deps: WriteRouteDeps): void {
   });
 
   app.post("/api/write/attempts", (req: Request, res: Response) => {
-    const { char, level, strokePath } = req.body ?? {};
+    const { char, level, strokePath, assessment } = req.body ?? {};
     if (typeof char !== "string" || !/^[\u4E00-\u9FFF]$/.test(char)) {
       return res.status(400).json({ error: "char must be a single CJK character" });
     }
@@ -105,6 +108,10 @@ export function registerWriteRoutes(app: Express, deps: WriteRouteDeps): void {
     if (strokePath !== null && strokePath !== undefined && typeof strokePath !== "string") {
       return res.status(400).json({ error: "strokePath must be a string or null" });
     }
+    const parsedAssessment = parseHandwritingAssessment(assessment);
+    if (assessment !== undefined && parsedAssessment === null) {
+      return res.status(400).json({ error: "assessment has an invalid shape" });
+    }
     // FK enforcement: if the char is not in the library, the INSERT
     // will fail. The client should always add to the library first.
     try {
@@ -112,10 +119,48 @@ export function registerWriteRoutes(app: Express, deps: WriteRouteDeps): void {
         char,
         level,
         strokePath: strokePath ?? null,
+        assessment: parsedAssessment,
       });
       res.json({ attemptId });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.patch("/api/write/attempts/:id/model-review", (req: Request, res: Response) => {
+    const attemptId = Number(req.params.id);
+    const { modelReview } = req.body ?? {};
+    if (!Number.isInteger(attemptId) || attemptId <= 0 || !isRecord(modelReview)) {
+      return res.status(400).json({ error: "valid attempt id and modelReview are required" });
+    }
+    const updated = updateWritingAttemptModelReview(db, attemptId, modelReview);
+    if (!updated) return res.status(404).json({ error: "attempt not found" });
+    res.json({ ok: true });
+  });
+
+  app.post("/api/write/review", async (req: Request, res: Response) => {
+    if (!visionClient) {
+      return res.status(503).json({ error: "vision not configured" });
+    }
+    const { imageBase64, localAssessment } = req.body ?? {};
+    if (
+      typeof imageBase64 !== "string" ||
+      imageBase64.length === 0 ||
+      imageBase64.length > 900_000 ||
+      !isRecord(localAssessment)
+    ) {
+      return res.status(400).json({ error: "imageBase64 and localAssessment are required" });
+    }
+    try {
+      const review = await reviewHandwritingImage(visionClient, imageBase64, localAssessment);
+      res.json({
+        status: review.status,
+        suggestion: review.suggestion,
+        model: review.model,
+      });
+    } catch (error: any) {
+      logger.warn("handwriting visual review failed", { error: error.message });
+      res.status(502).json({ error: `vision failed: ${error.message}` });
     }
   });
 
@@ -139,4 +184,85 @@ export function registerWriteRoutes(app: Express, deps: WriteRouteDeps): void {
       }
     },
   );
+}
+
+function parseHandwritingAssessment(value: unknown): HandwritingAssessmentInput | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) return null;
+  if (!["scored", "unscorable", "incomplete"].includes(String(value.status))) return null;
+  if (value.score !== null && (!Number.isFinite(value.score) || Number(value.score) < 0 || Number(value.score) > 100)) {
+    return null;
+  }
+  if (typeof value.band !== "string" || value.band.length === 0) return null;
+  if (!isStrokeCollection(value.strokes)) return null;
+  if (!isBreakdown(value.breakdown)) return null;
+  if (!isReasonList(value.reasons)) return null;
+  if (!isRecord(value.process)) return null;
+  if (typeof value.algorithmVersion !== "string" || value.algorithmVersion.length === 0) return null;
+  if (value.modelReview !== undefined && value.modelReview !== null && !isRecord(value.modelReview)) {
+    return null;
+  }
+  return {
+    status: String(value.status),
+    score: value.score === null ? null : Number(value.score),
+    band: value.band,
+    strokes: value.strokes,
+    breakdown: value.breakdown as Record<string, unknown> | null,
+    reasons: value.reasons,
+    process: value.process,
+    algorithmVersion: value.algorithmVersion,
+    modelReview: (value.modelReview as Record<string, unknown> | null | undefined) ?? null,
+  };
+}
+
+function isStrokeCollection(value: unknown): value is unknown[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 64 &&
+    value.every(
+      (stroke) =>
+        Array.isArray(stroke) &&
+        stroke.length > 0 &&
+        stroke.length <= 5_000 &&
+        stroke.every(
+          (point) =>
+            isRecord(point) &&
+            typeof point.x === "number" &&
+            Number.isFinite(point.x) &&
+            typeof point.y === "number" &&
+            Number.isFinite(point.y),
+        ),
+    )
+  );
+}
+
+function isBreakdown(value: unknown): value is Record<string, unknown> | null {
+  if (value === null) return true;
+  if (!isRecord(value)) return false;
+  return ["structure", "placement", "strokeQuality", "shape"].every(
+    (key) =>
+      typeof value[key] === "number" &&
+      Number.isFinite(value[key]) &&
+      value[key] >= 0 &&
+      value[key] <= 1,
+  );
+}
+
+function isReasonList(value: unknown): value is unknown[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 10 &&
+    value.every(
+      (reason) =>
+        isRecord(reason) &&
+        typeof reason.code === "string" &&
+        typeof reason.message === "string" &&
+        reason.code.length <= 80 &&
+        reason.message.length <= 200,
+    )
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

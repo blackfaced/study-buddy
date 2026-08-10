@@ -152,6 +152,62 @@ describe("migrateSchema", () => {
     db.close();
   });
 
+  it("adds explainable handwriting assessment fields without replacing legacy attempt columns", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const cols = db.prepare("PRAGMA table_info(writing_attempts)").all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "level",
+        "stroke_path",
+        "score",
+        "display_band",
+        "status",
+        "strokes_json",
+        "assessment_json",
+        "process_json",
+        "algorithm_version",
+        "model_review_json",
+      ]),
+    );
+    db.close();
+  });
+
+  it("upgrades a legacy writing_attempts table in place", () => {
+    const db = freshDb();
+    db.exec(`
+      CREATE TABLE writing_words (
+        char TEXT PRIMARY KEY,
+        added_at INTEGER NOT NULL,
+        added_by TEXT
+      );
+      CREATE TABLE writing_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        char TEXT NOT NULL,
+        level REAL NOT NULL,
+        stroke_path TEXT,
+        ts INTEGER NOT NULL
+      );
+    `);
+
+    expect(() => (globalThis as any).__migrateSchema(db)).not.toThrow();
+    const cols = db.prepare("PRAGMA table_info(writing_attempts)").all() as Array<{ name: string }>;
+    expect(cols.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "score",
+        "display_band",
+        "status",
+        "strokes_json",
+        "assessment_json",
+        "process_json",
+        "algorithm_version",
+        "model_review_json",
+      ]),
+    );
+    db.close();
+  });
+
   it("writing_attempts cascades on writing_words delete (FK)", () => {
     const db = freshDb();
     (globalThis as any).__migrateSchema(db);
