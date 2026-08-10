@@ -24,6 +24,7 @@ import { registerChatRoutes, defaultCallMinimax, classifyTopic } from "./routes/
 import { registerGameRoutes } from "./routes/game.js";
 import { registerWriteRoutes } from "./routes/write.js";
 import { registerWhoamiRoutes } from "./routes/whoami.js";
+import { registerMistakeRoutes } from "./routes/mistake-api.js";
 
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
@@ -122,6 +123,7 @@ export function createApp(opts: AppOptions): express.Express {
     visionClient: opts.visionClient === undefined ? null : opts.visionClient,
   });
   registerWhoamiRoutes(app, { db, version: "0.1.0" });
+  registerMistakeRoutes(app, { db });
 
   return app;
 }
