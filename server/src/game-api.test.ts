@@ -188,7 +188,15 @@ describe("POST /api/game/session (v0.6 time-mode)", () => {
 
 describe("GET /api/game/daily (v0.6 daily aggregation)", () => {
   it("returns one row per day for recent sessions", async () => {
-    const now = Date.now();
+    // Use absolute UTC timestamps that are guaranteed to land on different
+    // local-time days regardless of when the test runs. Previously this
+    // test used `Date.now() - 24*3600*1000` for "yesterday", which broke
+    // in CI when the runner hit 00:00 UTC (both "today" sessions and
+    // "yesterday" ended up in the same localtime day → only 1 group).
+    // Pick mid-day UTC timestamps so the localtime conversion always
+    // lands on a unique YYYY-MM-DD.
+    const todayNoon = Date.UTC(2026, 7, 10, 12, 0, 0);   // 2026-08-10 12:00 UTC
+    const yesterdayNoon = Date.UTC(2026, 7, 9, 12, 0, 0); // 2026-08-09 12:00 UTC
     // Today: 2 sessions, 20 questions, 17 correct (85%)
     for (const [total, correct] of [[12, 9], [8, 8]] as const) {
       await request(app).post("/api/game/session").send({
@@ -197,8 +205,8 @@ describe("GET /api/game/daily (v0.6 daily aggregation)", () => {
         durationSec: 60,
         totalQuestions: total,
         correctCount: correct,
-        startedAt: now - 60_000,
-        endedAt: now,
+        startedAt: todayNoon,
+        endedAt: todayNoon + 60_000,
       });
     }
     // Yesterday: 1 session, 10 questions, 7 correct
@@ -208,10 +216,14 @@ describe("GET /api/game/daily (v0.6 daily aggregation)", () => {
       durationSec: 60,
       totalQuestions: 10,
       correctCount: 7,
-      startedAt: now - 24 * 3600 * 1000,
-      endedAt: now - 24 * 3600 * 1000 + 60_000,
+      startedAt: yesterdayNoon,
+      endedAt: yesterdayNoon + 60_000,
     });
 
+    // Use a 7-day window wide enough to include both dates regardless of
+    // when the test runs. We use `Date.now() - 0` to bound the window to
+    // "now" so the test stays in the 7-day window.
+    void Date.now(); // (kept for future tightening if needed)
     const res = await request(app).get("/api/game/daily?days=7");
     expect(res.status).toBe(200);
     expect(res.body.days).toBe(7);
