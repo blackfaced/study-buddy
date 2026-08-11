@@ -3,7 +3,7 @@ import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeFile, readFile } from "node:fs/promises";
-import { drainOutbox, type NexusClient } from "./nexus-worker.js";
+import { drainOutbox, runFromCli, type NexusClient } from "./nexus-worker.js";
 import { appendOutbox, readPendingOutbox, type OutboxEntry } from "./outbox.js";
 
 let dir: string;
@@ -114,5 +114,23 @@ describe("drainOutbox", () => {
     const r = await drainOutbox({ nexus, outboxPath, processedPath });
     expect(r.processed).toBe(1);
     expect(r.failed).toBe(0);
+  });
+});
+
+describe("legacy worker cutover guard (#105)", () => {
+  it("refuses even a one-shot delivery after cutover", async () => {
+    const markerPath = join(dir, "source-feed-cutover.json");
+    await writeFile(markerPath, '{"version":1,"enabled":true}\n', "utf8");
+
+    await expect(
+      runFromCli([
+        "--once",
+        "--no-nexus",
+        "--outbox",
+        outboxPath,
+        "--cutover-marker",
+        markerPath,
+      ]),
+    ).rejects.toThrow("legacy JSONL delivery is retired");
   });
 });

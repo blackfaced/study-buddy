@@ -21,6 +21,7 @@
 #   NEXUS_PIDFILE default data/nexus-worker.pid
 #   NEXUS_LOGFILE default data/logs/nexus-worker.log
 #   NEXUS_POLL_MS default 30000
+#   SOURCE_FEED_CUTOVER_MARKER default data/source-feed-cutover.json
 
 set -euo pipefail
 
@@ -38,6 +39,7 @@ OUTBOX="${NEXUS_OUTBOX:-$ROOT/server/data/nexus-outbox.jsonl}"
 PIDFILE="${NEXUS_PIDFILE:-$ROOT/server/data/nexus-worker.pid}"
 LOGFILE="${NEXUS_LOGFILE:-$ROOT/server/data/logs/nexus-worker.log}"
 POLL_MS="${NEXUS_POLL_MS:-30000}"
+CUTOVER_MARKER="${SOURCE_FEED_CUTOVER_MARKER:-$ROOT/data/source-feed-cutover.json}"
 
 # The actual worker is a small tsx script. We keep the script tiny so
 # it can be re-run / hot-swapped without restarting the daemon.
@@ -70,7 +72,7 @@ cmd_start() {
   mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")" "$(dirname "$OUTBOX")"
   info "starting nexus-worker (outbox=$OUTBOX poll=${POLL_MS}ms log=$LOGFILE)"
   nohup npx --prefix "$ROOT/server" tsx "$WORKER" \
-    --outbox "$OUTBOX" --poll-ms "$POLL_MS" \
+    --outbox "$OUTBOX" --poll-ms "$POLL_MS" --cutover-marker "$CUTOVER_MARKER" \
     >>"$LOGFILE" 2>&1 &
   local pid=$!
   echo "$pid" > "$PIDFILE"
@@ -119,7 +121,7 @@ cmd_once() {
     exit 4
   fi
   npx --prefix "$ROOT/server" tsx "$WORKER" \
-    --outbox "$OUTBOX" --poll-ms 0 --once \
+    --outbox "$OUTBOX" --poll-ms 0 --once --cutover-marker "$CUTOVER_MARKER" \
     >>"$LOGFILE" 2>&1
 }
 
@@ -130,6 +132,7 @@ cmd_env() {
   printf "  PIDFILE=%s\n" "$PIDFILE"
   printf "  LOGFILE=%s\n" "$LOGFILE"
   printf "  POLL_MS=%s\n" "$POLL_MS"
+  printf "  CUTOVER_MARKER=%s\n" "$CUTOVER_MARKER"
   printf "  WORKER=%s\n" "$WORKER"
 }
 

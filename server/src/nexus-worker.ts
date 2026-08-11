@@ -13,6 +13,7 @@
 import { dirname, join } from "node:path";
 import { createNexusClient, noopNexusClient, type NexusClient, type NexusEntry } from "./nexus.js";
 import { readPendingOutbox, markOutboxProcessed, type OutboxEntry } from "./outbox.js";
+import { assertLegacyWorkerCanRun } from "./legacy-cutover.js";
 
 export type { NexusClient };
 
@@ -85,6 +86,7 @@ export async function drainOutbox(opts: DrainOptions): Promise<DrainResult> {
  */
 export async function runFromCli(argv: string[]): Promise<number> {
   const args = parseArgs(argv);
+  await assertLegacyWorkerCanRun(args.cutoverMarker);
   const nexus: NexusClient = args.noNexus
     ? noopNexusClient()
     : createNexusClient({
@@ -129,6 +131,7 @@ export async function runFromCli(argv: string[]): Promise<number> {
 interface CliArgs {
   outbox: string;
   processed: string;
+  cutoverMarker: string;
   once: boolean;
   pollMs: number;
   noNexus: boolean;
@@ -137,11 +140,15 @@ interface CliArgs {
 function parseArgs(argv: string[]): CliArgs {
   const outbox = (readFlag(argv, "--outbox") ?? join(process.cwd(), "data/nexus-outbox.jsonl"));
   const processed = (readFlag(argv, "--processed") ?? join(process.cwd(), "data/nexus-outbox.processed.jsonl"));
+  const cutoverMarker = (
+    readFlag(argv, "--cutover-marker") ??
+    join(process.cwd(), "data/source-feed-cutover.json")
+  );
   const once = argv.includes("--once");
   const noNexus = argv.includes("--no-nexus");
   const pollRaw = readFlag(argv, "--poll-ms");
   const pollMs = pollRaw != null ? Number(pollRaw) : 30000;
-  return { outbox, processed, once, pollMs, noNexus };
+  return { outbox, processed, cutoverMarker, once, pollMs, noNexus };
 }
 
 function readFlag(argv: string[], flag: string): string | undefined {
