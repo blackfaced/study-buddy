@@ -4,6 +4,9 @@ import type Database from "better-sqlite3";
 import {
   DEFAULT_SOURCE_EVENT_PAGE_SIZE,
   MAX_SOURCE_EVENT_PAGE_SIZE,
+  chatTurnRecordId,
+  parseChatSessionRef,
+  parseChatTurnRecordId,
   readSourceEventPage,
   SourceEventContractError,
   SOURCE_EVENT_SCHEMA_VERSION,
@@ -11,6 +14,7 @@ import {
 
 const MAX_CHAT_TURN_REFERENCES = 50;
 const MAX_CHAT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+const MAX_CHAT_RESPONSE_CHARS = 128_000;
 
 export interface IntegrationRouteDeps {
   db: Database.Database;
@@ -91,15 +95,20 @@ export function registerIntegrationRoutes(
         return;
       }
 
-      const sessionId = request.sessionRef.slice("session:".length);
-      const ids = request.turnRefs.map((ref) => Number(ref.slice("chat_turn:".length)));
+      const sessionId = parseChatSessionRef(request.sessionRef)!;
+      const ids = request.turnRefs.map((ref) => parseChatTurnRecordId(ref)!);
       const placeholders = ids.map(() => "?").join(", ");
       const rows = deps.db.prepare(
-        `SELECT id, session_id, ts, role, content
-         FROM chat_turns
-         WHERE session_id = ?
-           AND id IN (${placeholders})
-           AND ts >= ? AND ts <= ?`,
+        `SELECT ct.id, ct.session_id, ct.ts, ct.role, ct.content
+         FROM chat_turns AS ct
+         INNER JOIN source_events AS se
+           ON se.record_type = 'chat_turn'
+          AND se.record_id = 'chat_turn:' || ct.id
+          AND se.revision = 1
+          AND se.event_type = 'chat_turn_recorded'
+         WHERE ct.session_id = ?
+           AND ct.id IN (${placeholders})
+           AND ct.ts >= ? AND ct.ts <= ?`,
       ).all(sessionId, ...ids, request.from, request.to) as Array<{
         id: number;
         session_id: string;
@@ -110,6 +119,14 @@ export function registerIntegrationRoutes(
       const byId = new Map(rows.map((row) => [row.id, row]));
       if (rows.length !== ids.length) {
         res.status(404).json({ error: "one or more requested chat references are unknown" });
+        return;
+      }
+      const responseChars = rows.reduce(
+        (total, row) => total + (row.content?.length ?? 0),
+        0,
+      );
+      if (responseChars > MAX_CHAT_RESPONSE_CHARS) {
+        res.status(413).json({ error: "requested chat content exceeds response limit" });
         return;
       }
 
@@ -123,7 +140,7 @@ export function registerIntegrationRoutes(
         turns: ids.map((id) => {
           const row = byId.get(id)!;
           return {
-            turnRef: `chat_turn:${row.id}`,
+            turnRef: chatTurnRecordId(row.id),
             role: row.role,
             content: row.content ?? "",
             occurredAt: new Date(row.ts).toISOString(),
@@ -164,13 +181,15 @@ function parseChatTurnRequest(value: unknown): ChatTurnRequest | null {
   if (body.schemaVersion !== SOURCE_EVENT_SCHEMA_VERSION) return null;
   if (
     typeof body.sessionRef !== "string" ||
-    !/^session:[A-Za-z0-9_-]{1,128}$/.test(body.sessionRef)
+    parseChatSessionRef(body.sessionRef) === null
   ) return null;
   if (
     !Array.isArray(body.turnRefs) ||
     body.turnRefs.length < 1 ||
     body.turnRefs.length > MAX_CHAT_TURN_REFERENCES ||
-    body.turnRefs.some((ref) => typeof ref !== "string" || !/^chat_turn:[1-9][0-9]*$/.test(ref)) ||
+    body.turnRefs.some((ref) =>
+      typeof ref !== "string" || parseChatTurnRecordId(ref) === null
+    ) ||
     new Set(body.turnRefs).size !== body.turnRefs.length
   ) return null;
   if (!body.window || typeof body.window !== "object" || Array.isArray(body.window)) {
@@ -178,11 +197,11 @@ function parseChatTurnRequest(value: unknown): ChatTurnRequest | null {
   }
   const window = body.window as Record<string, unknown>;
   if (typeof window.from !== "string" || typeof window.to !== "string") return null;
-  const from = Date.parse(window.from);
-  const to = Date.parse(window.to);
+  const from = parseIsoTimestamp(window.from);
+  const to = parseIsoTimestamp(window.to);
   if (
-    !Number.isFinite(from) ||
-    !Number.isFinite(to) ||
+    from === null ||
+    to === null ||
     to < from ||
     to - from > MAX_CHAT_WINDOW_MS
   ) return null;
@@ -192,6 +211,13 @@ function parseChatTurnRequest(value: unknown): ChatTurnRequest | null {
     from,
     to,
   };
+}
+
+function parseIsoTimestamp(value: string): number | null {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value
+    ? parsed
+    : null;
 }
 
 function parseBoundedInteger(

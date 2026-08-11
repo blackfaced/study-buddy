@@ -10,7 +10,7 @@
 // (errorType = carry/borrow/sign/compute, not the study-buddy natural-
 // language error_type bucket).
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendLearningAttemptSourceEvent,
   appendLearningSessionSourceEvent,
@@ -151,18 +151,48 @@ export async function recordGameSession(
       `recordGameSession: correctCount (${input.correctCount}) must be in [0, totalQuestions] (${input.totalQuestions})`
     );
   }
+  if (!Number.isFinite(input.startedAt) || !Number.isFinite(input.endedAt) ||
+    input.startedAt < 0 || input.endedAt < input.startedAt) {
+    throw new Error("recordGameSession: timestamps must be finite and ordered");
+  }
+  if (!Number.isFinite(input.durationSec) || input.durationSec < 0) {
+    throw new Error("recordGameSession: durationSec must be a non-negative number");
+  }
   // Sanity: make sure the child exists (FK enforces but a friendlier error helps).
   const child = db.prepare("SELECT id FROM children WHERE id = ?").get(input.childId);
   if (!child) {
     throw new Error(`recordGameSession: child '${input.childId}' not found`);
   }
 
+  const sourceRecordId = gameSessionSourceRecordId(input);
   return db.transaction(() => {
+    const existing = db.prepare(
+      `SELECT id, child_id, app_id, duration_sec, total_questions, correct_count,
+              started_at, ended_at
+       FROM game_sessions WHERE source_record_id = ?`,
+    ).get(sourceRecordId) as {
+      id: number;
+      child_id: string;
+      app_id: string;
+      duration_sec: number;
+      total_questions: number;
+      correct_count: number;
+      started_at: number;
+      ended_at: number;
+    } | undefined;
+    if (existing) {
+      if (!sameGameSession(existing, input)) {
+        throw new Error("recordGameSession: retry conflicts with the existing session");
+      }
+      return existing.id;
+    }
     const result = db.prepare(
       `INSERT INTO game_sessions
-         (child_id, app_id, duration_sec, total_questions, correct_count, started_at, ended_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (source_record_id, child_id, app_id, duration_sec, total_questions,
+          correct_count, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
+      sourceRecordId,
       input.childId,
       input.appId,
       input.durationSec,
@@ -173,7 +203,7 @@ export async function recordGameSession(
     );
     const id = Number(result.lastInsertRowid);
     appendLearningSessionSourceEvent(db, {
-      recordId: `game_session:${id}`,
+      recordId: sourceRecordId,
       childId: input.childId,
       occurredAt: input.endedAt,
       revision: 1,
@@ -191,6 +221,41 @@ export async function recordGameSession(
     });
     return id;
   })();
+}
+
+function gameSessionSourceRecordId(input: GameSessionInput): string {
+  const stableKey = JSON.stringify([
+    input.childId,
+    input.appId,
+    input.durationSec,
+    input.totalQuestions,
+    input.correctCount,
+    input.startedAt,
+    input.endedAt,
+  ]);
+  const digest = createHash("sha256").update(stableKey).digest("hex").slice(0, 32);
+  return `game_session:${digest}`;
+}
+
+function sameGameSession(
+  row: {
+    child_id: string;
+    app_id: string;
+    duration_sec: number;
+    total_questions: number;
+    correct_count: number;
+    started_at: number;
+    ended_at: number;
+  },
+  input: GameSessionInput,
+): boolean {
+  return row.child_id === input.childId &&
+    row.app_id === input.appId &&
+    row.duration_sec === input.durationSec &&
+    row.total_questions === input.totalQuestions &&
+    row.correct_count === input.correctCount &&
+    row.started_at === input.startedAt &&
+    row.ended_at === input.endedAt;
 }
 
 /**

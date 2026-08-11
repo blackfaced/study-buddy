@@ -124,6 +124,10 @@ describe("bounded chat references and retrieval (#107)", () => {
         ...valid,
         window: { from: "2026-01-01T00:00:00.000Z", to: "2026-02-01T00:00:00.000Z" },
       },
+      {
+        ...valid,
+        window: { from: "2026-01-01", to: "2026-01-02" },
+      },
     ];
     for (const body of invalidBodies) {
       expect((await retrieve(body)).status).toBe(400);
@@ -131,6 +135,19 @@ describe("bounded chat references and retrieval (#107)", () => {
     expect(
       (await retrieve({ ...valid, turnRefs: ["chat_turn:999999"] })).status,
     ).toBe(404);
+  });
+
+  it("rejects guessed chat rows that were never published in the Source feed", async () => {
+    const { events } = await seedChat("published");
+    const sessionId = events[0].payload.sessionRef.slice("session:".length);
+    const ts = Date.parse(events[0].occurredAt);
+    const unpublishedId = Number(db.prepare(
+      `INSERT INTO chat_turns (session_id, ts, role, content, topic)
+       VALUES (?, ?, 'child', 'legacy unpublished text', 'learning')`,
+    ).run(sessionId, ts).lastInsertRowid);
+    const body = retrievalBody(events);
+    body.turnRefs = [`chat_turn:${unpublishedId}`];
+    expect((await retrieve(body)).status).toBe(404);
   });
 
   it("requires the independent credential and loopback origin", async () => {

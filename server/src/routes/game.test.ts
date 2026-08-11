@@ -91,6 +91,30 @@ describe("POST /api/game/session", () => {
     expect(res.body.correctRate).toBe(80);
   });
 
+  it("returns the same session id when the client retries the same run", async () => {
+    const now = Date.now();
+    const sourceEventsBefore = (db.prepare(
+      "SELECT COUNT(*) AS count FROM source_events",
+    ).get() as { count: number }).count;
+    const body = {
+      childId: "default",
+      appId: "candy-math-island",
+      durationSec: 60,
+      totalQuestions: 10,
+      correctCount: 8,
+      startedAt: now - 60_000,
+      endedAt: now,
+    };
+    const first = await request(app).post("/api/game/session").send(body);
+    const retry = await request(app).post("/api/game/session").send(body);
+    expect(retry.status).toBe(200);
+    expect(retry.body.sessionId).toBe(first.body.sessionId);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM game_sessions").get())
+      .toEqual({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM source_events").get())
+      .toEqual({ count: sourceEventsBefore + 1 });
+  });
+
   it("returns 400 on validation errors thrown by recordGameSession", async () => {
     const res = await request(app)
       .post("/api/game/session")

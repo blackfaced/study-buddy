@@ -10,11 +10,36 @@ import {
   computeRecoveryRate,
   type ChatTurn,
 } from "./chat-stats.js";
+import {
+  appendMcpChatTurnSourceEvent,
+  appendMcpMistakeSourceEvent,
+  appendMcpSessionSourceEvent,
+} from "./source-events.js";
 
 /** HTTP base for the study-buddy server. Used by get_apps to fetch the
  *  live apps registry; the mcp-server doesn't maintain its own copy so
  *  the two processes can't drift. */
 export const STUDY_BUDDY_BASE = process.env.STUDY_BUDDY_BASE || "http://127.0.0.1:3000";
+
+function requireSession(sessionId: string): { id: string; child_id: string } {
+  const session = db.prepare(
+    "SELECT id, child_id FROM sessions WHERE id = ?",
+  ).get(sessionId) as { id: string; child_id: string } | undefined;
+  if (!session) throw new Error("Session not found");
+  return session;
+}
+
+function mcpSessionResponse(session: any) {
+  return {
+    sessionId: session.id,
+    durationMin: session.total_minutes,
+    avgFocusScore: Math.round(session.avg_focus_score || 0),
+    postureWarningCount: session.posture_warning_count || 0,
+    offtopicCount: session.offtopic_count || 0,
+    offtopicRecovered: session.offtopic_recovered || 0,
+    revision: session.source_revision,
+  };
+}
 
 /** MCP 工具定义（schema + description）。 */
 export const TOOLS = [
@@ -220,65 +245,66 @@ export async function handleTool(name: string, args: any) {
 
     case "end_session": {
       const sessionId = args.sessionId;
-      const session = db
-        .prepare("SELECT * FROM sessions WHERE id = ?")
-        .get(sessionId) as any;
-      if (!session) throw new Error("Session not found");
+      return db.transaction(() => {
+        const session = db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId) as any;
+        if (!session) throw new Error("Session not found");
+        if (session.source_withdrawn_at != null) throw new Error("Session withdrawn");
+        if (session.ended_at != null && session.source_revision > 0) {
+          return mcpSessionResponse(session);
+        }
 
-      const endedAt = Date.now();
-      const durationMin = Math.max(
-        1,
-        Math.round((endedAt - session.started_at) / 60000)
-      );
+        const endedAt = session.ended_at ?? Date.now();
+        const durationMin = session.ended_at == null
+          ? Math.max(1, Math.round((endedAt - session.started_at) / 60000))
+          : session.total_minutes;
+        const postureStats = db.prepare(
+          `SELECT AVG(score) AS avg_score,
+                  SUM(CASE WHEN warning IS NOT NULL THEN 1 ELSE 0 END) AS warnings
+           FROM posture_events WHERE session_id = ?`,
+        ).get(sessionId) as any;
+        const chatRows = db.prepare(
+          "SELECT role, topic, redirected, state FROM chat_turns WHERE session_id = ?",
+        ).all(sessionId) as ChatTurn[];
+        const chatStats = computeChatStats(chatRows);
+        const averageFocusScore = session.ended_at == null
+          ? (postureStats.avg_score ?? 0)
+          : session.avg_focus_score;
+        const postureWarningCount = session.ended_at == null
+          ? (postureStats.warnings ?? 0)
+          : session.posture_warning_count;
+        const offTopicCount = session.ended_at == null
+          ? chatStats.offtopic
+          : session.offtopic_count;
+        const offTopicRecovered = session.ended_at == null
+          ? chatStats.recovered
+          : session.offtopic_recovered;
+        const writingTurns = session.ended_at == null
+          ? chatStats.writingTurns
+          : session.writing_turns;
 
-      // 聚合坐姿
-      const postureStats = db
-        .prepare(
-          `
-        SELECT
-          COUNT(*) as count,
-          AVG(score) as avg_score,
-          SUM(CASE WHEN warning IS NOT NULL THEN 1 ELSE 0 END) as warnings
-        FROM posture_events WHERE session_id = ?
-      `
-        )
-        .get(sessionId) as any;
-
-      // 聚合对话（用 chat-stats 纯函数，自动过滤 freechat，且语义对：跑偏率=offtopic/writingTurns）
-      const chatRows = db
-        .prepare(
-          `SELECT role, topic, redirected, state FROM chat_turns WHERE session_id = ?`
-        )
-        .all(sessionId) as ChatTurn[];
-      const chatStats = computeChatStats(chatRows);
-
-      db.prepare(
-        `
-        UPDATE sessions SET
-          ended_at = ?, total_minutes = ?, avg_focus_score = ?,
-          posture_warning_count = ?, offtopic_count = ?, offtopic_recovered = ?,
-          writing_turns = ?
-        WHERE id = ?
-      `
-      ).run(
-        endedAt,
-        durationMin,
-        postureStats.avg_score || 0,
-        postureStats.warnings || 0,
-        chatStats.offtopic,
-        chatStats.recovered,
-        chatStats.writingTurns,
-        sessionId
-      );
-
-      return {
-        sessionId,
-        durationMin,
-        avgFocusScore: Math.round(postureStats.avg_score || 0),
-        postureWarningCount: postureStats.warnings || 0,
-        offtopicCount: chatStats.offtopic,
-        offtopicRecovered: chatStats.recovered,
-      };
+        db.prepare(
+          `UPDATE sessions SET ended_at = ?, total_minutes = ?, avg_focus_score = ?,
+             posture_warning_count = ?, offtopic_count = ?, offtopic_recovered = ?,
+             writing_turns = ?, source_revision = 1 WHERE id = ?`,
+        ).run(
+          endedAt, durationMin, averageFocusScore, postureWarningCount,
+          offTopicCount, offTopicRecovered, writingTurns, sessionId,
+        );
+        appendMcpSessionSourceEvent(db, {
+          sessionId,
+          childId: session.child_id,
+          occurredAt: endedAt,
+          subject: session.subject,
+          startedAt: session.started_at,
+          endedAt,
+          durationMinutes: durationMin,
+          averageFocusScore: Math.round(averageFocusScore),
+          postureWarningCount,
+          offTopicCount,
+          offTopicRecovered,
+        });
+        return mcpSessionResponse(db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId));
+      })();
     }
 
     case "log_posture": {
@@ -291,33 +317,53 @@ export async function handleTool(name: string, args: any) {
     }
 
     case "log_chat": {
-      const id = db
-        .prepare(
-          "INSERT INTO chat_turns (session_id, role, content, topic, redirected) VALUES (?, ?, ?, ?, ?)"
-        )
-        .run(
-          args.sessionId,
-          args.role,
-          args.content,
-          args.topic,
-          args.redirected ? 1 : 0
-        ).lastInsertRowid;
-      return { id, ts: Date.now() };
+      if (args.role !== "child" && args.role !== "agent") {
+        throw new Error("log_chat: role must be child or agent");
+      }
+      return db.transaction(() => {
+        const session = requireSession(args.sessionId);
+        const occurredAt = Date.now();
+        const id = Number(db.prepare(
+          `INSERT INTO chat_turns
+             (session_id, ts, role, content, topic, redirected)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        ).run(
+          args.sessionId, occurredAt, args.role, args.content,
+          args.topic, args.redirected ? 1 : 0,
+        ).lastInsertRowid);
+        appendMcpChatTurnSourceEvent(db, {
+          turnId: id,
+          sessionId: args.sessionId,
+          childId: session.child_id,
+          occurredAt,
+          role: args.role,
+        });
+        return { id, ts: occurredAt };
+      })();
     }
 
     case "log_mistake": {
-      const id = db
-        .prepare(
-          "INSERT INTO mistakes (session_id, subject, problem, error_type, hint) VALUES (?, ?, ?, ?, ?)"
-        )
-        .run(
-          args.sessionId,
-          args.subject,
-          args.problem,
-          args.errorType,
-          args.hint || null
-        ).lastInsertRowid;
-      return { id, ts: Date.now() };
+      return db.transaction(() => {
+        const session = requireSession(args.sessionId);
+        const occurredAt = Date.now();
+        const id = Number(db.prepare(
+          `INSERT INTO mistakes
+             (session_id, child_id, ts, subject, problem, error_type, hint, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'study-buddy')`,
+        ).run(
+          args.sessionId, session.child_id, occurredAt, args.subject,
+          args.problem, args.errorType, args.hint || null,
+        ).lastInsertRowid);
+        appendMcpMistakeSourceEvent(db, {
+          mistakeId: id,
+          childId: session.child_id,
+          occurredAt,
+          subject: args.subject,
+          problem: args.problem,
+          mistakeType: args.errorType,
+        });
+        return { id, ts: occurredAt };
+      })();
     }
 
     case "get_today_report": {

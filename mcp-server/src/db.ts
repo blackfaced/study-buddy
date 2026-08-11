@@ -86,6 +86,7 @@ function runMigrations(inst: Database.Database) {
     "ALTER TABLE sessions ADD COLUMN writing_turns INTEGER DEFAULT 0",
     "ALTER TABLE sessions ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE sessions ADD COLUMN source_withdrawn_at INTEGER",
+    "ALTER TABLE game_sessions ADD COLUMN source_record_id TEXT",
     // v0.5: vision-mistake columns
     "ALTER TABLE mistakes ADD COLUMN image_path TEXT",
     "ALTER TABLE mistakes ADD COLUMN vision_input TEXT",
@@ -96,6 +97,7 @@ function runMigrations(inst: Database.Database) {
     "ALTER TABLE mistakes ADD COLUMN source TEXT DEFAULT 'study-buddy'",
     "ALTER TABLE mistakes ADD COLUMN user_answer TEXT",
     "ALTER TABLE mistakes ADD COLUMN correct_answer TEXT",
+    "ALTER TABLE mistakes ADD COLUMN child_id TEXT NOT NULL DEFAULT 'default'",
     // Explainable handwriting attempts (mirror server/src/db-migrate.ts).
     "ALTER TABLE writing_attempts ADD COLUMN score INTEGER",
     "ALTER TABLE writing_attempts ADD COLUMN display_band TEXT",
@@ -177,6 +179,7 @@ function runMigrations(inst: Database.Database) {
       source TEXT DEFAULT 'study-buddy',
       user_answer TEXT,
       correct_answer TEXT,
+      child_id TEXT NOT NULL DEFAULT 'default',
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
@@ -202,6 +205,7 @@ function runMigrations(inst: Database.Database) {
     -- v0.6: per-game-session summary (mirror of server/src/db-migrate.ts)
     CREATE TABLE IF NOT EXISTS game_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_record_id TEXT,
       child_id TEXT NOT NULL,
       app_id TEXT NOT NULL,
       duration_sec INTEGER NOT NULL,
@@ -256,6 +260,8 @@ function runMigrations(inst: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_turns(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_mistakes_session ON mistakes(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_game_sessions_child ON game_sessions(child_id, started_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_game_sessions_source_record
+      ON game_sessions(source_record_id) WHERE source_record_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
 
     CREATE TRIGGER IF NOT EXISTS source_installation_immutable_update

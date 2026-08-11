@@ -5,6 +5,9 @@ export const SOURCE_EVENT_SCHEMA_VERSION = 1;
 export const DEFAULT_SOURCE_EVENT_PAGE_SIZE = 50;
 export const MAX_SOURCE_EVENT_PAGE_SIZE = 100;
 
+const CHAT_SESSION_REF_PREFIX = "session:";
+const CHAT_TURN_REF_PREFIX = "chat_turn:";
+
 export type SourceRecordType =
   | "learning_attempt"
   | "learning_session"
@@ -21,6 +24,7 @@ export interface LearningAttemptSourceInput {
   mistakeId: number;
   childId: string;
   occurredAt: number;
+  subject?: string;
   problem: string;
   submittedAnswer: string;
   expectedAnswer: string | null;
@@ -89,7 +93,7 @@ export type SourceEventPayload =
   | {
       kind: "learning_attempt";
       subjectRef: string;
-      subject: "math";
+      subject: string;
       problem: string;
       submittedAnswer: string;
       expectedAnswer: string | null;
@@ -127,6 +131,7 @@ interface SourceEventRow {
   occurred_at: number;
   source_product: string;
   source_installation_id: string;
+  subject_ref: string;
   record_type: string;
   record_id: string;
   revision: number;
@@ -150,7 +155,7 @@ export function appendLearningAttemptSourceEvent(
     payload: {
       kind: "learning_attempt",
       subjectRef,
-      subject: "math",
+      subject: input.subject ?? "math",
       problem: input.problem,
       submittedAnswer: input.submittedAnswer,
       expectedAnswer: input.expectedAnswer,
@@ -185,19 +190,39 @@ export function appendChatTurnSourceEvent(
   appendSourceEvent(db, {
     subjectRef,
     recordType: "chat_turn",
-    recordId: `chat_turn:${input.turnId}`,
+    recordId: chatTurnRecordId(input.turnId),
     revision: 1,
     occurredAt: input.occurredAt,
     eventType: "chat_turn_recorded",
     payload: {
       kind: "chat_turn_reference",
       subjectRef,
-      sessionRef: `session:${input.sessionId}`,
-      turnRef: `chat_turn:${input.turnId}`,
+      sessionRef: chatSessionRef(input.sessionId),
+      turnRef: chatTurnRecordId(input.turnId),
       role: input.role,
       occurredAt,
     },
   });
+}
+
+export function chatSessionRef(sessionId: string): string {
+  return `${CHAT_SESSION_REF_PREFIX}${sessionId}`;
+}
+
+export function chatTurnRecordId(turnId: number): string {
+  return `${CHAT_TURN_REF_PREFIX}${turnId}`;
+}
+
+export function parseChatSessionRef(value: string): string | null {
+  return /^session:[A-Za-z0-9_-]{1,128}$/.test(value)
+    ? value.slice(CHAT_SESSION_REF_PREFIX.length)
+    : null;
+}
+
+export function parseChatTurnRecordId(value: string): number | null {
+  if (!/^chat_turn:[1-9][0-9]*$/.test(value)) return null;
+  const id = Number(value.slice(CHAT_TURN_REF_PREFIX.length));
+  return Number.isSafeInteger(id) ? id : null;
 }
 
 export function appendSourceWithdrawal(
@@ -287,7 +312,7 @@ export function readSourceEventPage(
   const rows = db
     .prepare(
       `SELECT seq AS sequence, event_id, event_type, event_schema_version,
-              occurred_at, source_product, source_installation_id, record_type, record_id,
+              occurred_at, source_product, source_installation_id, subject_ref, record_type, record_id,
               revision, payload_json
        FROM source_events
        WHERE seq > ?
@@ -309,8 +334,17 @@ function sourceEventFromRow(row: SourceEventRow): SourceEvent {
   if (
     row.event_schema_version !== SOURCE_EVENT_SCHEMA_VERSION ||
     row.source_product !== "study_buddy" ||
+    typeof row.source_installation_id !== "string" ||
+    row.source_installation_id.length === 0 ||
+    typeof row.subject_ref !== "string" ||
+    row.subject_ref.length === 0 ||
     !isRecordType(row.record_type) ||
-    !isEventType(row.event_type)
+    !isEventType(row.event_type) ||
+    typeof row.record_id !== "string" ||
+    row.record_id.length === 0 ||
+    !Number.isSafeInteger(row.revision) ||
+    row.revision < 1 ||
+    !isTimestamp(row.occurred_at)
   ) {
     throw new SourceEventContractError("unsupported stored source event");
   }
@@ -318,7 +352,12 @@ function sourceEventFromRow(row: SourceEventRow): SourceEvent {
   if ((row.event_type === "source_record_withdrawn") !== (payload === null)) {
     throw new SourceEventContractError("withdrawal payload contract violated");
   }
-  if (!isCompatiblePayload(row.record_type, row.event_type, payload)) {
+  if (!isCompatiblePayload(
+    row.record_type,
+    row.event_type,
+    payload,
+    row.subject_ref,
+  )) {
     throw new SourceEventContractError("source event payload contract violated");
   }
   return {
@@ -377,6 +416,7 @@ function isCompatiblePayload(
   recordType: SourceRecordType,
   eventType: SourceEventType,
   payload: SourceEventPayload,
+  subjectRef: string,
 ): boolean {
   if (eventType === "source_record_withdrawn") {
     return payload === null && recordType !== "learning_attempt";
@@ -385,24 +425,66 @@ function isCompatiblePayload(
   if (recordType === "learning_attempt") {
     return eventType === "learning_attempt_recorded" &&
       payload.kind === "learning_attempt" &&
-      typeof payload.subjectRef === "string" &&
+      payload.subjectRef === subjectRef &&
+      typeof payload.subject === "string" && payload.subject.length > 0 &&
       typeof payload.problem === "string" &&
-      typeof payload.submittedAnswer === "string";
+      typeof payload.submittedAnswer === "string" &&
+      isStringOrNull(payload.expectedAnswer) &&
+      isStringOrNull(payload.mistakeType) &&
+      typeof payload.source === "string";
   }
   if (recordType === "learning_session") {
-    return ["learning_session_completed", "source_record_corrected"].includes(eventType) &&
-      payload.kind === "learning_session" &&
-      typeof payload.subjectRef === "string" &&
-      ["study", "game"].includes(payload.sessionKind) &&
-      Number.isFinite(payload.startedAt) &&
-      Number.isFinite(payload.endedAt) &&
-      Number.isFinite(payload.durationMinutes);
+    if (
+      !["learning_session_completed", "source_record_corrected"].includes(eventType) ||
+      payload.kind !== "learning_session" ||
+      payload.subjectRef !== subjectRef ||
+      !isTimestamp(payload.startedAt) ||
+      !isTimestamp(payload.endedAt) ||
+      payload.endedAt < payload.startedAt ||
+      !isNonNegativeNumber(payload.durationMinutes)
+    ) return false;
+    if (payload.sessionKind === "study") {
+      return isStringOrNull(payload.subject) &&
+        isNonNegativeNumber(payload.averageFocusScore) &&
+        isNonNegativeInteger(payload.postureWarningCount) &&
+        isNonNegativeInteger(payload.offTopicCount) &&
+        isNonNegativeInteger(payload.offTopicRecovered);
+    }
+    if (payload.sessionKind === "game") {
+      return typeof payload.appId === "string" && payload.appId.length > 0 &&
+        isNonNegativeInteger(payload.totalQuestions) && payload.totalQuestions > 0 &&
+        isNonNegativeInteger(payload.correctCount) &&
+        payload.correctCount <= payload.totalQuestions;
+    }
+    return false;
   }
   return eventType === "chat_turn_recorded" &&
     payload.kind === "chat_turn_reference" &&
-    typeof payload.subjectRef === "string" &&
-    typeof payload.sessionRef === "string" &&
-    typeof payload.turnRef === "string" &&
+    payload.subjectRef === subjectRef &&
+    parseChatSessionRef(payload.sessionRef) !== null &&
+    parseChatTurnRecordId(payload.turnRef) !== null &&
     ["child", "agent"].includes(payload.role) &&
-    Number.isFinite(Date.parse(payload.occurredAt));
+    isIsoTimestamp(payload.occurredAt);
+}
+
+function isStringOrNull(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return isNonNegativeNumber(value) && Number.isInteger(value);
+}
+
+function isTimestamp(value: unknown): value is number {
+  return isNonNegativeNumber(value) && !Number.isNaN(new Date(value).valueOf());
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }

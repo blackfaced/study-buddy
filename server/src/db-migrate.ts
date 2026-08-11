@@ -44,6 +44,7 @@ export function migrateSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE sessions ADD COLUMN writing_turns INTEGER DEFAULT 0`); } catch {}
   try { db.exec(`ALTER TABLE sessions ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 0`); } catch {}
   try { db.exec(`ALTER TABLE sessions ADD COLUMN source_withdrawn_at INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE game_sessions ADD COLUMN source_record_id TEXT`); } catch {}
   // v0.5: vision-mistake columns
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN image_path TEXT`); } catch {}
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN vision_input TEXT`); } catch {}
@@ -190,6 +191,7 @@ export function migrateSchema(db: Database.Database): void {
     -- Used for daily correct-rate + questions-completed aggregations.
     CREATE TABLE IF NOT EXISTS game_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_record_id TEXT,
       child_id TEXT NOT NULL,
       app_id TEXT NOT NULL,
       duration_sec INTEGER NOT NULL,
@@ -249,6 +251,8 @@ export function migrateSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_turns(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_mistakes_session ON mistakes(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_game_sessions_child ON game_sessions(child_id, started_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_game_sessions_source_record
+      ON game_sessions(source_record_id) WHERE source_record_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
     -- v0.8 (#34a-1, issue #98): UNIQUE on (child_id, problem) — the
     -- foundation for "auto-record once, dedupe across multiple wrong

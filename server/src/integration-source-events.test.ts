@@ -330,7 +330,7 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
          record_type, record_id, revision, occurred_at, event_type,
          event_schema_version, payload_json
        ) VALUES (?, 'study_buddy', ?, ?, 'learning_session', ?, 1, ?,
-         'learning_session_completed', 2, ?)`,
+         'learning_session_completed', 1, ?)`,
     ).run(
       "malformed-event",
       source.source_installation_id,

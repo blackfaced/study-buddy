@@ -196,7 +196,7 @@ describe("recordGameSession", () => {
   });
 
   it("commits a game learning-session Source Event", async () => {
-    const id = await recordGameSession(db, {
+    await recordGameSession(db, {
       childId: "default",
       appId: "candy-math-island",
       durationSec: 60,
@@ -209,7 +209,7 @@ describe("recordGameSession", () => {
       "SELECT record_type, record_id, event_type, payload_json FROM source_events",
     ).get() as any;
     expect(event.record_type).toBe("learning_session");
-    expect(event.record_id).toBe(`game_session:${id}`);
+    expect(event.record_id).toMatch(/^game_session:[a-f0-9]{32}$/);
     expect(event.event_type).toBe("learning_session_completed");
     expect(JSON.parse(event.payload_json)).toMatchObject({
       kind: "learning_session",
@@ -218,6 +218,25 @@ describe("recordGameSession", () => {
       totalQuestions: 5,
       correctCount: 4,
     });
+  });
+
+  it("returns the same session and Source Record for an identical retry", async () => {
+    const input = {
+      childId: "default",
+      appId: "candy-math-island",
+      durationSec: 60,
+      totalQuestions: 5,
+      correctCount: 4,
+      startedAt: Date.now() - 60_000,
+      endedAt: Date.now(),
+    };
+    const first = await recordGameSession(db, input);
+    const retry = await recordGameSession(db, input);
+    expect(retry).toBe(first);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM game_sessions").get())
+      .toEqual({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM source_events").get())
+      .toEqual({ count: 1 });
   });
 
   it("rejects a session with totalQuestions=0 (nothing to record)", async () => {

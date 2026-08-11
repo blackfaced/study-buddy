@@ -17,6 +17,10 @@ const workerPidPaths = [
   join(root, "data/feishu-notify.pid"),
   join(root, "data/webhook-notify.pid"),
 ];
+const producerPidPaths = [
+  process.env.STUDY_BUDDY_PIDFILE ?? join(root, "data/study-buddy-server.pid"),
+  join(root, "server/data/study-buddy-server.pid"),
+];
 const defaultLegacyFiles = [
   join(root, "server/data/nexus-outbox.jsonl"),
   join(root, "server/data/nexus-outbox.processed.jsonl"),
@@ -35,6 +39,7 @@ export async function runLegacyCutoverCli(argv: string[]): Promise<number> {
     const result = await enableSourceFeedCutover({
       markerPath,
       workerPidPaths,
+      producerPidPaths,
       legacyFiles,
     });
     console.log(JSON.stringify({ marker: result.marker, inventory: result.inventory }, null, 2));

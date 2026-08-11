@@ -27,6 +27,7 @@ export interface LegacyInventory {
 export interface EnableCutoverOptions {
   markerPath: string;
   workerPidPaths: string[];
+  producerPidPaths?: string[];
   legacyFiles: string[];
   isProcessRunning?: (pid: number) => boolean;
   producerEnabled?: boolean;
@@ -96,6 +97,12 @@ export async function enableSourceFeedCutover(
     const pid = await readPid(pidPath);
     if (pid !== null && isProcessRunning(pid)) {
       throw new Error("legacy JSONL worker is still running");
+    }
+  }
+  for (const pidPath of options.producerPidPaths ?? []) {
+    const pid = await readPid(pidPath);
+    if (pid !== null && isProcessRunning(pid)) {
+      throw new Error("legacy JSONL producer process may still be running");
     }
   }
 
@@ -213,6 +220,7 @@ function unmappableReason(value: unknown): string | null {
     return "invalid_timestamp";
   }
   if (typeof entry.kind !== "string" || entry.kind.length === 0) return "missing_type";
+  if (!SUPPORTED_LEGACY_KINDS.has(entry.kind)) return "unsupported_type";
   if (typeof entry.entityId !== "string" || entry.entityId.length === 0) {
     return "missing_entity_reference";
   }
@@ -221,6 +229,8 @@ function unmappableReason(value: unknown): string | null {
   }
   return null;
 }
+
+const SUPPORTED_LEGACY_KINDS = new Set(["math_mistake", "game-session"]);
 
 async function readPid(path: string): Promise<number | null> {
   try {

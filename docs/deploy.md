@@ -84,6 +84,11 @@ bin/source-feed-cutover.sh inventory
 bin/source-feed-cutover.sh enable
 ```
 
+`enable` is intentionally conservative: stop the HTTP server and every legacy
+delivery worker first. An active HTTP PID is treated as a possible old JSONL
+producer because a pre-cutover process cannot prove which code version it is
+running. Restart the current server after the marker is written.
+
 `enable` is a coordinated release gate: it refuses while the legacy worker is running. Once enabled, `bin/nexus-worker.sh start` and `once` refuse to deliver; legacy JSONL remains untouched for the paired Adapter migration.
 
 ## Upgrading to a system service (when you need it)

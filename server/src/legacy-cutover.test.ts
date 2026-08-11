@@ -44,6 +44,13 @@ describe("legacy JSONL dry-run inventory (#105)", () => {
         payload: { correctCount: 2 },
       }),
       JSON.stringify({ id: "missing-fields", payload: {} }),
+      JSON.stringify({
+        id: "unknown-kind",
+        ts: Date.UTC(2026, 7, 3),
+        kind: "private-child-secret-kind",
+        entityId: "child:default",
+        payload: {},
+      }),
       "not-json",
       "",
     ].join("\n");
@@ -54,14 +61,18 @@ describe("legacy JSONL dry-run inventory (#105)", () => {
     expect(report).toMatchObject({
       dryRun: true,
       totals: {
-        records: 4,
+        records: 5,
         mappableRecords: 2,
-        unmappableRecords: 2,
+        unmappableRecords: 3,
         malformedRecords: 1,
         firstOccurredAt: "2026-08-01T00:00:00.000Z",
         lastOccurredAt: "2026-08-02T00:00:00.000Z",
         types: { math_mistake: 1, "game-session": 1 },
-        unmappableReasons: { invalid_timestamp: 1, malformed_json: 1 },
+        unmappableReasons: {
+          invalid_timestamp: 1,
+          malformed_json: 1,
+          unsupported_type: 1,
+        },
       },
     });
     expect(readFileSync(path, "utf8")).toBe(original);
@@ -70,6 +81,7 @@ describe("legacy JSONL dry-run inventory (#105)", () => {
     expect(diagnostics).not.toContain("private problem");
     expect(diagnostics).not.toContain("credential-value");
     expect(diagnostics).not.toContain("child:default");
+    expect(diagnostics).not.toContain("private-child-secret-kind");
   });
 
   it("treats a missing legacy file as an empty read-only input", async () => {
@@ -108,6 +120,21 @@ describe("source-feed cutover gate (#105)", () => {
         producerEnabled: true,
       }),
     ).rejects.toThrow("legacy JSONL producer is still enabled");
+  });
+
+  it("refuses cutover while an old HTTP producer process may still be running", async () => {
+    const dir = tempDir();
+    const pidPath = join(dir, "study-buddy-server.pid");
+    writeFileSync(pidPath, "5252\n");
+    await expect(
+      enableSourceFeedCutover({
+        markerPath: join(dir, "cutover.json"),
+        workerPidPaths: [],
+        producerPidPaths: [pidPath],
+        legacyFiles: [],
+        isProcessRunning: (pid) => pid === 5252,
+      }),
+    ).rejects.toThrow("legacy JSONL producer process may still be running");
   });
 
   it("writes a content-free marker after inventory and permanently blocks the old worker", async () => {
