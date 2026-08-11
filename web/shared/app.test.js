@@ -18,7 +18,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_SRC = readFileSync(join(__dirname, "app.js"), "utf8");
 
 /** Build a fresh mock window + DOM and load shared/app.js into it. */
-function loadFresh() {
+function loadFresh(href = "https://mac-mini.local:3000/buddy/") {
   const listeners = new WeakMap();
   const eventTarget = () => ({
     _listeners: [],
@@ -57,8 +57,16 @@ function loadFresh() {
   const window = {
     speechSynthesis: ss,
     StudyBuddy: undefined,
+    location: new URL(href),
+  };
+  const stored = new Map();
+  const localStorage = {
+    getItem(key) { return stored.has(key) ? stored.get(key) : null; },
+    setItem(key, value) { stored.set(key, String(value)); },
+    removeItem(key) { stored.delete(key); },
   };
   window.speechSynthesis = ss;
+  window.localStorage = localStorage;
 
   const ctx = {
     window,
@@ -70,6 +78,8 @@ function loadFresh() {
     console,
     FormData: class FormData {},
     Blob: class Blob {},
+    URL,
+    localStorage,
   };
   vm.createContext(ctx);
   vm.runInContext(APP_SRC, ctx);
@@ -119,6 +129,47 @@ test("fetch: sets Accept: application/json by default and parses JSON", async ()
   const call = env.fetchCalls[0];
   assert.equal(call.url, "/api/x");
   assert.equal(call.init.headers.Accept, "application/json");
+});
+
+test("fetch: sends only the persisted device credential as bearer auth", async () => {
+  const env = loadFresh();
+  env.window.StudyBuddy.auth.setCredential("sb_device-secret");
+
+  await env.window.StudyBuddy.fetch("/api/session/active");
+
+  assert.equal(env.fetchCalls[0].init.headers.Authorization, "Bearer sb_device-secret");
+  assert.equal(env.window.localStorage.getItem("study-buddy.device-credential"), "sb_device-secret");
+  assert.deepEqual(Object.keys(env.fetchCalls[0].init.headers).sort(), ["Accept", "Authorization"]);
+});
+
+test("fetch: refuses to send a credential over non-loopback HTTP", async () => {
+  const env = loadFresh("http://mac-mini.local:3000/buddy/");
+  env.window.StudyBuddy.auth.setCredential("sb_device-secret");
+
+  await assert.rejects(
+    env.window.StudyBuddy.fetch("/api/session/active"),
+    /secure same-origin transport/,
+  );
+  assert.equal(env.fetchCalls.length, 0);
+});
+
+test("fetch: refuses to send a credential to another origin", async () => {
+  const env = loadFresh();
+  env.window.StudyBuddy.auth.setCredential("sb_device-secret");
+
+  await assert.rejects(
+    env.window.StudyBuddy.fetch("https://example.com/api/session/active"),
+    /secure same-origin transport/,
+  );
+  assert.equal(env.fetchCalls.length, 0);
+});
+
+test("fetch: permits credential use on loopback HTTP for local development", async () => {
+  const env = loadFresh("http://127.0.0.1:3000/buddy/");
+  env.window.StudyBuddy.auth.setCredential("sb_device-secret");
+
+  await env.window.StudyBuddy.fetch("/api/session/active");
+  assert.equal(env.fetchCalls[0].init.headers.Authorization, "Bearer sb_device-secret");
 });
 
 test("fetch: serialises plain-object body and sets Content-Type", async () => {

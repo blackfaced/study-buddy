@@ -6,89 +6,111 @@
 // Owns:
 //   - POST /api/session/start
 //   - POST /api/session/end
-//   - getActiveSession(db)         shared helper used by chat/frame
-//   - getOrCreateActiveSession(db) shared helper used by chat/frame/mistake
+//   - GET /api/session/active
 //
-// The two helpers are exported because other route modules (chat,
-// frame, mistake) need to "find or start" an active session before
-// logging events. Centralising them here keeps the rule in one
-// place: "the active session is the most recent row where
-// ended_at IS NULL; create one if none exists".
+// findOwnedActiveSession is the shared boundary for chat and media writes:
+// callers must provide an explicit session id and authenticated device, and
+// the session must still belong to that device/child and remain active.
 //
-// Why these routes sit together: both are about the lifecycle of
-// a single study-buddy session. /start closes the previous one
-// and opens a new one; /end aggregates the events logged during
-// the session (posture focus scores, offtopic chat counts) into
-// the row so the parent dashboard has the rollup.
+// /start supersedes only the same device's active session for the same child;
+// /end aggregates the events logged during that exact owned session.
 //
-// Public API:
-//   - getActiveSession(db)
-//   - getOrCreateActiveSession(db)
-//   - registerSessionRoutes(app, { db, logger })
+// Public API: registerSessionRoutes(app, { db, logger, auth })
 // =====================================================================
 import crypto from "node:crypto";
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import type { Logger } from "../logger.js";
 import {
+  devicePrincipal,
+  type DevicePrincipal,
+  type DeviceRequestAuthenticator,
+} from "../device-auth.js";
+import {
   appendLearningSessionSourceEvent,
   appendSourceWithdrawal,
   type StudySessionPayloadInput,
 } from "../source-events.js";
+import { GAME_ONLY_SESSION_SUBJECT } from "../session-kind.js";
 
 export interface SessionRouteDeps {
   db: Database.Database;
   logger: Logger;
+  auth: DeviceRequestAuthenticator;
 }
 
-/** Read the most recent active session row, or undefined if none. */
-export function getActiveSession(db: Database.Database):
-  | { id: string; child_id: string; subject?: string | null }
-  | undefined {
-  return db
-    .prepare(
-      "SELECT id, child_id FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
-    )
-    .get() as { id: string; child_id: string } | undefined;
-}
+export type OwnedSessionResult =
+  | { status: "ok"; session: { id: string; child_id: string } }
+  | { status: "not-found" }
+  | { status: "forbidden" }
+  | { status: "ended" };
 
-/**
- * Get the active session, or auto-create one for the default child if
- * none exists. Lets the kid keep chatting / logging events after a
- * previous session was ended (e.g. after "写完啦"), instead of getting
- * 400 "no active session".
- *
- * Session stays open until a real /api/session/end call.
- */
-export function getOrCreateActiveSession(db: Database.Database): { id: string; child_id: string } {
-  const existing = getActiveSession(db);
-  if (existing) return existing;
-  const id = crypto.randomUUID();
-  db.prepare(
-    "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)"
-  ).run(id, "default", null);
-  return { id, child_id: "default" };
+export function findOwnedActiveSession(
+  db: Database.Database,
+  sessionId: string,
+  device: DevicePrincipal,
+): OwnedSessionResult {
+  const session = db.prepare(
+    `SELECT id, child_id, device_id, ended_at
+       FROM sessions WHERE id = ?`,
+  ).get(sessionId) as
+    | { id: string; child_id: string; device_id: string | null; ended_at: number | null }
+    | undefined;
+  if (!session) return { status: "not-found" };
+  if (session.child_id !== device.childId || session.device_id !== device.deviceId) {
+    return { status: "forbidden" };
+  }
+  const activeDevice = db.prepare(
+    `SELECT 1 FROM paired_devices
+      WHERE device_id = ? AND child_id = ? AND revoked_at IS NULL`,
+  ).get(device.deviceId, device.childId);
+  if (!activeDevice) return { status: "forbidden" };
+  if (session.ended_at !== null) return { status: "ended" };
+  return { status: "ok", session: { id: session.id, child_id: session.child_id } };
 }
 
 /**
  * Mount the session routes on the given Express app.
  */
 export function registerSessionRoutes(app: Express, deps: SessionRouteDeps): void {
-  const { db, logger } = deps;
+  const { db, logger, auth } = deps;
+
+  app.get("/api/session/active", auth.requireDevice, (_req: Request, res: Response) => {
+    const device = devicePrincipal(res);
+    const session = db.prepare(
+      `SELECT id AS sessionId, child_id AS childId, subject, started_at AS startedAt
+         FROM sessions
+        WHERE device_id = ? AND child_id = ? AND ended_at IS NULL
+        ORDER BY started_at DESC LIMIT 1`,
+    ).get(device.deviceId, device.childId) as
+      | { sessionId: string; childId: string; subject: string | null; startedAt: number }
+      | undefined;
+    return res.json({ session: session ?? null });
+  });
 
   // ============== 开始会话 ==============
-  app.post("/api/session/start", (req: Request, res: Response) => {
-    const { childId = "default", subject } = req.body;
+  app.post("/api/session/start", auth.requireDevice, (req: Request, res: Response) => {
+    const { childId = "default", subject } = req.body ?? {};
+    const device = devicePrincipal(res);
+    if (childId !== device.childId) {
+      return res.status(403).json({ error: "child does not belong to device" });
+    }
     const startedAt = Date.now();
     let sessionId: string;
     try {
       sessionId = db.transaction(() => {
-        const active = getActiveSession(db);
+        const active = db.prepare(
+          `SELECT id, child_id FROM sessions
+            WHERE ended_at IS NULL AND child_id = ? AND device_id = ?
+            ORDER BY started_at DESC LIMIT 1`,
+        ).get(childId, device.deviceId) as { id: string; child_id: string } | undefined;
         if (active) completeSession(db, active.id, startedAt);
+        adoptLegacySessions(db, childId, device.deviceId, startedAt);
         const id = crypto.randomUUID();
         db.prepare(
-          "INSERT INTO sessions (id, child_id, subject, started_at) VALUES (?, ?, ?, ?)"
-        ).run(id, childId, subject || null, startedAt);
+          `INSERT INTO sessions (id, child_id, device_id, subject, started_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(id, childId, device.deviceId, subject || null, startedAt);
         return id;
       })();
     } catch {
@@ -100,16 +122,21 @@ export function registerSessionRoutes(app: Express, deps: SessionRouteDeps): voi
   });
 
   // ============== 结束会话 ==============
-  app.post("/api/session/end", (req: Request, res: Response) => {
+  app.post("/api/session/end", auth.requireDevice, (req: Request, res: Response) => {
+    const device = devicePrincipal(res);
     const requestedId = typeof req.body?.sessionId === "string"
       ? req.body.sessionId
       : null;
-    const session = requestedId
-      ? db.prepare("SELECT id, child_id FROM sessions WHERE id = ?").get(requestedId) as
-          | { id: string; child_id: string }
-          | undefined
-      : getActiveSession(db);
-    if (!session) return res.status(400).json({ error: "no active session" });
+    if (!requestedId) return res.status(400).json({ error: "sessionId is required" });
+    const session = db.prepare(
+      "SELECT id, child_id, device_id FROM sessions WHERE id = ?",
+    ).get(requestedId) as
+      | { id: string; child_id: string; device_id: string | null }
+      | undefined;
+    if (!session) return res.status(404).json({ error: "session not found" });
+    if (session.child_id !== device.childId || session.device_id !== device.deviceId) {
+      return res.status(403).json({ error: "session does not belong to device" });
+    }
 
     try {
       res.json(completeSession(db, session.id, Date.now()));
@@ -118,13 +145,16 @@ export function registerSessionRoutes(app: Express, deps: SessionRouteDeps): voi
     }
   });
 
-  app.patch("/api/session/:sessionId", (req: Request, res: Response) => {
+  app.patch("/api/session/:sessionId", auth.requireDevice, (req: Request, res: Response) => {
     const sessionId = Array.isArray(req.params.sessionId)
       ? req.params.sessionId[0]
       : req.params.sessionId;
     const correction = parseSessionCorrection(req.body);
     if (!correction) {
       return res.status(400).json({ error: "invalid session correction" });
+    }
+    if (!isOwnedSession(db, sessionId, devicePrincipal(res))) {
+      return res.status(403).json({ error: "session does not belong to device" });
     }
     try {
       const result = correctSession(db, sessionId, correction, Date.now());
@@ -141,10 +171,13 @@ export function registerSessionRoutes(app: Express, deps: SessionRouteDeps): voi
     }
   });
 
-  app.delete("/api/session/:sessionId", (req: Request, res: Response) => {
+  app.delete("/api/session/:sessionId", auth.requireDevice, (req: Request, res: Response) => {
     const sessionId = Array.isArray(req.params.sessionId)
       ? req.params.sessionId[0]
       : req.params.sessionId;
+    if (!isOwnedSession(db, sessionId, devicePrincipal(res))) {
+      return res.status(403).json({ error: "session does not belong to device" });
+    }
     try {
       const result = withdrawSession(db, sessionId, Date.now());
       if (result === null) return res.status(404).json({ error: "session not found" });
@@ -156,6 +189,58 @@ export function registerSessionRoutes(app: Express, deps: SessionRouteDeps): voi
       res.status(500).json({ error: "session withdrawal failed" });
     }
   });
+}
+
+/**
+ * Close pre-pairing active sessions and bind every legacy session that has a
+ * published Source Event to the first paired device that starts a new epoch.
+ * This prevents nullable-device sessions from becoming active or corrective
+ * orphans after the ownership boundary is enabled.
+ */
+function adoptLegacySessions(
+  db: Database.Database,
+  childId: string,
+  deviceId: string,
+  endedAt: number,
+): void {
+  const activeLegacy = db.prepare(
+    `SELECT s.id FROM sessions s
+      WHERE s.child_id = ? AND s.device_id IS NULL AND s.ended_at IS NULL
+        AND COALESCE(s.subject, '') <> ?
+        AND NOT (
+          COALESCE(s.subject, '') = 'math'
+          AND EXISTS (
+            SELECT 1 FROM mistakes m
+             WHERE m.session_id = s.id AND m.source = 'game'
+          )
+          AND NOT EXISTS (SELECT 1 FROM chat_turns c WHERE c.session_id = s.id)
+          AND NOT EXISTS (SELECT 1 FROM posture_events p WHERE p.session_id = s.id)
+        )
+      ORDER BY s.started_at ASC`,
+  ).all(childId, GAME_ONLY_SESSION_SUBJECT) as Array<{ id: string }>;
+  for (const session of activeLegacy) completeSession(db, session.id, endedAt);
+  db.prepare(
+    `UPDATE sessions SET device_id = ?
+      WHERE child_id = ? AND device_id IS NULL AND source_revision > 0`,
+  ).run(deviceId, childId);
+}
+
+function isOwnedSession(
+  db: Database.Database,
+  sessionId: string,
+  device: { deviceId: string; childId: string },
+): boolean {
+  const owned = db.prepare(
+    `SELECT 1 FROM sessions
+      WHERE id = ? AND child_id = ? AND device_id = ?`,
+  ).get(sessionId, device.childId, device.deviceId);
+  if (owned) return true;
+  const claimed = db.prepare(
+    `UPDATE sessions SET device_id = ?
+      WHERE id = ? AND child_id = ? AND device_id IS NULL
+        AND source_revision > 0`,
+  ).run(device.deviceId, sessionId, device.childId);
+  return claimed.changes === 1;
 }
 
 interface SessionRow {

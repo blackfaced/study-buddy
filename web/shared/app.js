@@ -25,6 +25,26 @@
 // ====================================================================
 (function () {
   const SB = (window.StudyBuddy = window.StudyBuddy || {});
+  const DEVICE_CREDENTIAL_KEY = "study-buddy.device-credential";
+
+  SB.auth = {
+    getCredential() {
+      try {
+        return window.localStorage.getItem(DEVICE_CREDENTIAL_KEY);
+      } catch {
+        return null;
+      }
+    },
+    setCredential(credential) {
+      if (typeof credential !== "string" || !credential.startsWith("sb_")) {
+        throw new Error("StudyBuddy.auth: invalid device credential");
+      }
+      window.localStorage.setItem(DEVICE_CREDENTIAL_KEY, credential);
+    },
+    clearCredential() {
+      try { window.localStorage.removeItem(DEVICE_CREDENTIAL_KEY); } catch { /* ignore */ }
+    },
+  };
 
   // ---- 1. warmupTTS --------------------------------------------------
   /**
@@ -75,6 +95,13 @@
         init.body = JSON.stringify(init.body);
       }
     }
+    const credential = SB.auth.getCredential();
+    if (credential && !headers.Authorization && !headers.authorization) {
+      if (!isSecureSameOriginTarget(path)) {
+        throw new Error("StudyBuddy.fetch: device credential requires secure same-origin transport");
+      }
+      headers.Authorization = `Bearer ${credential}`;
+    }
     const resp = await fetch(path, init);
     if (!resp.ok) {
       let text = "";
@@ -88,6 +115,17 @@
     if (ct.includes("application/json")) return resp.json();
     return resp.text();
   };
+
+  function isSecureSameOriginTarget(path) {
+    const target = new URL(path, window.location.href);
+    if (target.origin !== window.location.origin) return false;
+    if (target.protocol === "https:") return true;
+    return target.protocol === "http:" && (
+      target.hostname === "localhost" ||
+      target.hostname === "127.0.0.1" ||
+      target.hostname === "[::1]"
+    );
+  }
 
   // ---- 3. cameraPause ------------------------------------------------
   /**

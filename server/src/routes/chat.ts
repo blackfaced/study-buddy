@@ -23,7 +23,7 @@
 //   - registerChatRoutes(app, deps)
 // =====================================================================
 import sharp from "sharp";
-import { writeFileSync } from "node:fs";
+import { unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Express, Request, Response } from "express";
@@ -35,7 +35,11 @@ import { detectNameChange } from "../child-name.js";
 import { parseEmotionTag, detectLoopFromTexts } from "../chat-signal.js";
 import { analyzeMistakeImage } from "../vision.js";
 import { appendChatTurnSourceEvent } from "../source-events.js";
-import { getOrCreateActiveSession } from "./session.js";
+import {
+  devicePrincipal,
+  type DeviceRequestAuthenticator,
+} from "../device-auth.js";
+import { findOwnedActiveSession } from "./session.js";
 
 const OFFTOPIC_KEYWORDS = [
   "奥特曼", "汪汪队", "冰雪奇缘", "艾莎", "公主", "巴啦啦",
@@ -69,10 +73,11 @@ export interface ChatRouteDeps {
   upload: any;
   /** LLM call. Injected so tests can stub it without hitting the network. */
   callMinimax: CallMinimax;
+  auth: DeviceRequestAuthenticator;
 }
 
 const FRAME_WARN_DEBOUNCE = 3;
-let videoModeEnabled = true;
+const videoDisabledSessions = new Set<string>();
 let frameCountForLog = 0;
 const warnStreak = new Map<string, number>();
 
@@ -112,20 +117,26 @@ export async function defaultCallMinimax(messages: any[]): Promise<string> {
 }
 
 export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
-  const { db, logger, visionClient, mistakesDir, upload, callMinimax } = deps;
+  const { db, logger, visionClient, mistakesDir, upload, callMinimax, auth } = deps;
 
   // ============== 摄像头帧 ==============
-  app.post("/api/video-mode", (req: Request, res: Response) => {
-    const { enabled } = req.body || {};
-    videoModeEnabled = !!enabled;
-    logger.info("video mode", { enabled: videoModeEnabled });
-    res.json({ ok: true, videoEnabled: videoModeEnabled });
+  app.post("/api/video-mode", auth.requireDevice, (req: Request, res: Response) => {
+    const session = ownedActiveSession(req, res, db);
+    if (!session) return;
+    const { enabled } = req.body ?? {};
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "enabled must be a boolean" });
+    }
+    if (enabled) videoDisabledSessions.delete(session.id);
+    else videoDisabledSessions.add(session.id);
+    logger.info("video mode", { sessionId: session.id, enabled });
+    res.json({ ok: true, videoEnabled: enabled });
   });
 
-  app.post("/api/frame", upload.single("frame"), async (req: Request, res: Response) => {
+  app.post("/api/frame", auth.requireDevice, upload.single("frame"), async (req: Request, res: Response) => {
+    const session = ownedActiveSession(req, res, db);
+    if (!session) return;
     if (!req.file) return res.status(400).json({ error: "no frame" });
-
-    const session = getOrCreateActiveSession(db);
     const sessionKey = session.id;
 
     frameCountForLog = (frameCountForLog || 0) + 1;
@@ -175,12 +186,14 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
         warnStreak.set(sessionKey, 0);
       }
 
-      if (!videoModeEnabled) {
+      if (videoDisabledSessions.has(session.id)) {
         shouldWarn = false;
         warnStreak.set(sessionKey, 0);
       }
 
       if (session && shouldWarn) {
+        const current = findOwnedActiveSession(db, session.id, devicePrincipal(res));
+        if (current.status !== "ok") return respondOwnedSessionFailure(res, current.status);
         db.prepare(
           "INSERT INTO posture_events (session_id, score, warning) VALUES (?, ?, ?)"
         ).run(session.id, score, warning);
@@ -198,13 +211,13 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
   });
 
   // ============== 对话 ==============
-  app.post("/api/chat", async (req: Request, res: Response) => {
-    const { text, state } = req.body;
+  app.post("/api/chat", auth.requireDevice, async (req: Request, res: Response) => {
+    const { text, state } = req.body ?? {};
     if (!text || typeof text !== "string" || text.length > 4000) {
       return res.status(400).json({ error: "no text" });
     }
-
-    const session = getOrCreateActiveSession(db);
+    const session = ownedActiveSession(req, res, db);
+    if (!session) return;
     const child = db.prepare("SELECT * FROM children WHERE id = ?").get(session.child_id) as
       | { name: string }
       | undefined;
@@ -253,6 +266,8 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
 
     try {
       db.transaction(() => {
+        const current = findOwnedActiveSession(db, session.id, devicePrincipal(res));
+        if (current.status !== "ok") throw new OwnedSessionChanged(current.status);
         const occurredAt = Date.now();
         const childTurn = db.prepare(
           `INSERT INTO chat_turns
@@ -280,7 +295,10 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
           role: "agent",
         });
       })();
-    } catch {
+    } catch (error) {
+      if (error instanceof OwnedSessionChanged) {
+        return respondOwnedSessionFailure(res, error.status);
+      }
       return res.status(500).json({ error: "chat turns could not be recorded" });
     }
 
@@ -295,7 +313,7 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
   });
 
   // ============== 语音（v0.1 占位） ==============
-  app.post("/api/voice", upload.single("audio"), async (req: Request, res: Response) => {
+  app.post("/api/voice", auth.requireDevice, upload.single("audio"), async (req: Request, res: Response) => {
     if (!req.file) return res.status(400).json({ error: "no audio" });
     const tmpPath = `/tmp/voice-${Date.now()}.webm`;
     writeFileSync(tmpPath, req.file.buffer);
@@ -310,34 +328,44 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
   // ============== 错题拍照（v0.5） ==============
   app.post(
     "/api/mistake-photo",
+    auth.requireDevice,
     upload.single("photo"),
     async (req: Request, res: Response) => {
+      const session = ownedActiveSession(req, res, db);
+      if (!session) return;
       if (!visionClient) {
         return res.status(503).json({
           error: "vision not configured (MINIMAX_API_KEY not set on the server)",
         });
       }
       if (!req.file) return res.status(400).json({ error: "no photo" });
-      const session = getOrCreateActiveSession(db);
 
       const mistakeId = randomUUID();
       const filename = `${mistakeId}.jpg`;
       const imagePath = join(mistakesDir, filename);
       try {
         writeFileSync(imagePath, req.file.buffer);
-      } catch (e: any) {
-        return res.status(500).json({ error: `failed to save photo: ${e.message}` });
+      } catch (error: any) {
+        logger.error("mistake photo save failed", { errorCode: error?.code ?? "unknown" });
+        return res.status(500).json({ error: "failed to save photo" });
       }
 
       const base64 = req.file.buffer.toString("base64");
       let analysis;
       try {
         analysis = await analyzeMistakeImage(visionClient, base64);
-      } catch (e: any) {
-        return res.status(502).json({ error: `vision failed: ${e.message}` });
+      } catch (error: any) {
+        cleanupPhoto(imagePath);
+        logger.error("mistake photo vision failed", { errorType: error?.name ?? "Error" });
+        return res.status(502).json({ error: "vision failed" });
       }
 
       const now = Date.now();
+      const current = findOwnedActiveSession(db, session.id, devicePrincipal(res));
+      if (current.status !== "ok") {
+        cleanupPhoto(imagePath);
+        return respondOwnedSessionFailure(res, current.status);
+      }
       try {
         db.prepare(
           `INSERT INTO mistakes
@@ -354,8 +382,10 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
           analysis.model,
           now
         );
-      } catch (e: any) {
-        return res.status(500).json({ error: `db insert failed: ${e.message}` });
+      } catch {
+        cleanupPhoto(imagePath);
+        logger.error("mistake photo database insert failed");
+        return res.status(500).json({ error: "mistake could not be recorded" });
       }
 
       res.json({
@@ -368,4 +398,45 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
       });
     },
   );
+}
+
+function ownedActiveSession(
+  req: Request,
+  res: Response,
+  db: Database.Database,
+): { id: string; child_id: string } | null {
+  const sessionId = typeof req.body?.sessionId === "string" ? req.body.sessionId : "";
+  if (!sessionId) {
+    res.status(400).json({ error: "sessionId is required" });
+    return null;
+  }
+  const result = findOwnedActiveSession(db, sessionId, devicePrincipal(res));
+  if (result.status !== "ok") {
+    respondOwnedSessionFailure(res, result.status);
+    return null;
+  }
+  return result.session;
+}
+
+function cleanupPhoto(imagePath: string): void {
+  try { unlinkSync(imagePath); } catch { /* best-effort orphan cleanup */ }
+}
+
+type OwnedSessionFailure = Exclude<
+  ReturnType<typeof findOwnedActiveSession>["status"],
+  "ok"
+>;
+
+class OwnedSessionChanged extends Error {
+  constructor(readonly status: OwnedSessionFailure) {
+    super(`owned session changed: ${status}`);
+  }
+}
+
+function respondOwnedSessionFailure(res: Response, status: OwnedSessionFailure): Response {
+  if (status === "not-found") return res.status(404).json({ error: "session not found" });
+  if (status === "forbidden") {
+    return res.status(403).json({ error: "session does not belong to device" });
+  }
+  return res.status(409).json({ error: "session is not active" });
 }

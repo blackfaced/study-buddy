@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "test": "vitest run && node --test ../web/games/candy-math-island/pick-gen.test.js && node --test ../web/write/*.test.js",
+    "test": "vitest run && node --test ../web/shared/*.test.js && node --test ../web/games/candy-math-island/pick-gen.test.js && node --test ../web/write/*.test.js",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit"

@@ -6,9 +6,9 @@
   <meta name="theme-color" content="#ffb84d">
   <title>写字练字 · v0.7</title>
   <link rel="stylesheet" href="/shared/theme.css">
-  <!-- Hanzi Writer: open-source JS lib for stroke order animations + SVG
-       glyphs. Loaded from CDN to keep our bundle small. -->
-  <script src="https://cdn.jsdelivr.net/npm/hanzi-writer@3.5/dist/hanzi-writer.min.js"></script>
+  <!-- Hanzi Writer 3.5.0 is vendored locally so origin-wide device
+       credentials are never exposed to remotely served JavaScript. -->
+  <script src="/vendor/hanzi-writer-3.5.0.min.js"></script>
   <script src="/shared/app.js"></script>
   <style>
     /* ===== Write app — iPad-first (横屏 friendly) ===== */

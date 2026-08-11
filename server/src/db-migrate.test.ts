@@ -40,6 +40,8 @@ describe("migrateSchema", () => {
     expect(names).toContain("source_installation");
     expect(names).toContain("source_subjects");
     expect(names).toContain("source_events");
+    expect(names).toContain("paired_devices");
+    expect(names).toContain("pairing_codes");
     db.close();
   });
 
@@ -72,6 +74,57 @@ describe("migrateSchema", () => {
     const cols = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
     const colNames = cols.map((c) => c.name);
     expect(colNames).toContain("writing_turns");
+    db.close();
+  });
+
+  it("adds device ownership to sessions for paired clients", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const columns = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain("device_id");
+    const pairedDeviceColumns = db.prepare("PRAGMA table_info(paired_devices)").all() as Array<{ name: string }>;
+    expect(pairedDeviceColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "device_id", "child_id", "credential_hash", "revoked_at", "last_seen_at",
+    ]));
+    db.close();
+  });
+
+  it("enforces device ownership references when upgrading a legacy sessions table", () => {
+    const db = freshDb();
+    db.exec(`
+      CREATE TABLE children (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+      INSERT INTO children (id, name) VALUES ('default', '小宝');
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        child_id TEXT NOT NULL,
+        started_at INTEGER NOT NULL DEFAULT 0,
+        ended_at INTEGER,
+        subject TEXT,
+        total_minutes INTEGER DEFAULT 0,
+        avg_focus_score REAL DEFAULT 0,
+        posture_warning_count INTEGER DEFAULT 0,
+        offtopic_count INTEGER DEFAULT 0,
+        offtopic_recovered INTEGER DEFAULT 0
+      );
+      INSERT INTO sessions (id, child_id) VALUES ('legacy', 'default');
+    `);
+    (globalThis as any).__migrateSchema(db);
+
+    expect(() => db.prepare(
+      "UPDATE sessions SET device_id = 'missing-device' WHERE id = 'legacy'",
+    ).run()).toThrow();
+    db.prepare(
+      `INSERT INTO paired_devices
+         (device_id, child_id, credential_hash, device_name, created_at, last_seen_at)
+       VALUES ('device-1', 'default', 'digest', 'iPad', 1, 1)`,
+    ).run();
+    db.prepare("UPDATE sessions SET device_id = 'device-1' WHERE id = 'legacy'").run();
+    expect(() => db.prepare(
+      "UPDATE paired_devices SET device_id = 'renamed' WHERE device_id = 'device-1'",
+    ).run()).toThrow();
+    expect(() => db.prepare(
+      "UPDATE paired_devices SET device_id = NULL WHERE device_id = 'device-1'",
+    ).run()).toThrow();
     db.close();
   });
 

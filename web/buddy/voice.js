@@ -56,6 +56,7 @@
         const blob = new Blob(S.audioChunks, { type: 'audio/webm' });
         const form = new FormData();
         form.append('audio', blob, 'voice.webm');
+        if (S.sessionId) form.append('sessionId', S.sessionId);
         try {
           // v0.7 (issue #21): use shared fetch (FormData preserved).
           const data = await window.StudyBuddy.fetch('/api/voice', { method: 'POST', body: form });
@@ -112,11 +113,14 @@
     // 仍然起 session
     try {
       // v0.7 (issue #21): use shared fetch.
-      const data = await window.StudyBuddy.fetch('/api/session/start', {
-        method: 'POST',
-        body: { childId: 'default', subject: '作业' }
-      });
-      S.sessionId = data.sessionId;
+      if (!S.sessionId) {
+        const data = await window.StudyBuddy.fetch('/api/session/start', {
+          method: 'POST',
+          body: { childId: 'default', subject: '作业' }
+        });
+        S.sessionId = data.sessionId;
+      }
+      S.state = window.Buddy.state.nextState(S.state, 'start');
       window.Buddy.chat.addMsg('agent', '你好呀！我是小书童，文字模式陪你写作业~');
     } catch (e) {
       if (window.Buddy.debugMode) window.Buddy.chat.addSystem('文字模式启动失败: ' + e.message);
@@ -150,6 +154,7 @@
       );
       const fd = new FormData();
       fd.append('photo', blob, 'mistake.jpg');
+      fd.append('sessionId', S.sessionId);
       try {
         // v0.7 (issue #21): use shared fetch. FormData is left alone
         // so the browser sets the multipart boundary. Non-2xx throws.

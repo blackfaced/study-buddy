@@ -114,6 +114,7 @@ window.Buddy.camera = {
         frameCount++;
         const form = new FormData();
         form.append('frame', blob);
+        form.append('sessionId', S.sessionId || '');
         try {
           // v0.7 (issue #21): use shared fetch. FormData is left alone
           // (no Content-Type header so the browser sets the boundary).
@@ -142,14 +143,14 @@ window.Buddy.camera = {
       const cam = document.getElementById('cam-preview');
       if (cam) cam.style.display = 'none';
       // 通知 server 不再记 warning
-      try { await window.StudyBuddy.fetch('/api/video-mode', { method: 'POST', body: { enabled: false } }); } catch {}
+      try { await window.StudyBuddy.fetch('/api/video-mode', { method: 'POST', body: { sessionId: S.sessionId, enabled: false } }); } catch {}
     } else {
       S.videoMode = 'on';
       btn.textContent = '📷 开';
       btn.title = '开关视频模式';
       const cam = document.getElementById('cam-preview');
       if (cam) cam.style.display = '';
-      try { await window.StudyBuddy.fetch('/api/video-mode', { method: 'POST', body: { enabled: true } }); } catch {}
+      try { await window.StudyBuddy.fetch('/api/video-mode', { method: 'POST', body: { sessionId: S.sessionId, enabled: true } }); } catch {}
     }
   },
 

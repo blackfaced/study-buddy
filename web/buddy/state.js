@@ -77,3 +77,12 @@ window.Buddy.state.nextState = function (current, event) {
   }
   return current;
 };
+
+/** Restore the UI mode from the server-owned session kind. */
+window.Buddy.state.restoredState = function (subject) {
+  return subject === '聊天' ? 'done' : 'writing';
+};
+
+window.Buddy.state.shouldShowCamera = function (state) {
+  return state !== 'done';
+};

@@ -18,6 +18,7 @@ import request from "supertest";
 import Database from "better-sqlite3";
 import { migrateSchema } from "../db-migrate.js";
 import { registerWhoamiRoutes } from "./whoami.js";
+import { seedTestDevice, testDeviceAuthenticator } from "../test-device.js";
 
 let db: Database.Database;
 let app: ReturnType<typeof express>;
@@ -34,8 +35,9 @@ beforeEach(() => {
   db.exec("DELETE FROM posture_events");
   db.exec("DELETE FROM mistakes");
   db.exec("DELETE FROM sessions");
+  seedTestDevice(db);
   app = express();
-  registerWhoamiRoutes(app, { db, version: "0.1.0-test" });
+  registerWhoamiRoutes(app, { db, version: "0.1.0-test", auth: testDeviceAuthenticator });
 });
 
 // --- GET /api/whoami ------------------------------------------------
@@ -63,8 +65,8 @@ describe("GET /api/whoami", () => {
   it("returns the active session when one is in flight", async () => {
     // Start a session, then ask.
     db.prepare(
-      "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)"
-    ).run("s_test_1", "default", "math");
+      "INSERT INTO sessions (id, child_id, device_id, subject) VALUES (?, ?, ?, ?)"
+    ).run("s_test_1", "default", "test-device", "math");
     const res = await request(app).get("/api/whoami");
     expect(res.body.session).toMatchObject({
       id: "s_test_1",
@@ -82,11 +84,11 @@ describe("GET /api/whoami", () => {
 
   it("returns the most recent active session (ended ones are skipped)", async () => {
     // Ended session
-    db.prepare("INSERT INTO sessions (id, child_id, started_at, ended_at) VALUES (?, ?, ?, ?)")
-      .run("s_ended", "default", Date.now() - 60_000, Date.now() - 30_000);
+    db.prepare("INSERT INTO sessions (id, child_id, device_id, started_at, ended_at) VALUES (?, ?, ?, ?, ?)")
+      .run("s_ended", "default", "test-device", Date.now() - 60_000, Date.now() - 30_000);
     // Active session
-    db.prepare("INSERT INTO sessions (id, child_id, started_at) VALUES (?, ?, ?)")
-      .run("s_active", "default", Date.now());
+    db.prepare("INSERT INTO sessions (id, child_id, device_id, started_at) VALUES (?, ?, ?, ?)")
+      .run("s_active", "default", "test-device", Date.now());
     const res = await request(app).get("/api/whoami");
     expect(res.body.session.id).toBe("s_active");
   });

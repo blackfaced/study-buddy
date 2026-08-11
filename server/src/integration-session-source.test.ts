@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
 import { createLogger } from "./logger.js";
+import { seedTestDevice, testDeviceAuthenticator } from "./test-device.js";
 
 const TOKEN = "session-source-test-token";
 
@@ -19,12 +20,14 @@ describe("learning Session revisions and withdrawals (#106)", () => {
     dir = mkdtempSync(join(tmpdir(), "study-buddy-session-source-"));
     db = new Database(join(dir, "study.db"));
     migrateSchema(db);
+    seedTestDevice(db);
     app = createApp({
       db,
       integrationToken: TOKEN,
       integrationLoopbackCheck: () => true,
       logger: createLogger({ level: "error", sinks: [] }),
       callMinimax: async () => "stub",
+      deviceAuthenticator: testDeviceAuthenticator,
     });
   });
 
@@ -79,6 +82,78 @@ describe("learning Session revisions and withdrawals (#106)", () => {
     expect((await feed()).body.events).toHaveLength(1);
   });
 
+  it("adopts and completes a pre-pairing active Session before opening a device-owned one", async () => {
+    const legacySessionId = "legacy-active-session";
+    db.prepare(
+      `INSERT INTO sessions (id, child_id, started_at)
+       VALUES (?, 'default', ?)`,
+    ).run(legacySessionId, Date.now() - 60_000);
+
+    const started = await request(app)
+      .post("/api/session/start")
+      .send({ childId: "default", subject: "math" });
+    expect(started.status).toBe(200);
+
+    const adopted = db.prepare(
+      `SELECT device_id AS deviceId, ended_at AS endedAt,
+              source_revision AS sourceRevision
+         FROM sessions WHERE id = ?`,
+    ).get(legacySessionId) as {
+      deviceId: string | null;
+      endedAt: number | null;
+      sourceRevision: number;
+    };
+    expect(adopted.deviceId).not.toBeNull();
+    expect(adopted.endedAt).not.toBeNull();
+    expect(adopted.sourceRevision).toBe(1);
+
+    const corrected = await request(app)
+      .patch(`/api/session/${legacySessionId}`)
+      .send({ subject: "corrected legacy" });
+    expect(corrected.status).toBe(200);
+    expect(corrected.body.revision).toBe(2);
+
+    const events = (await feed()).body.events;
+    expect(events.map((event: any) => event.sourceIdentity.recordId))
+      .toEqual([`session:${legacySessionId}`, `session:${legacySessionId}`]);
+    expect(events.map((event: any) => event.sourceIdentity.revision)).toEqual([1, 2]);
+    expect(
+      db.prepare(
+        `SELECT COUNT(*) AS count FROM sessions
+          WHERE child_id = 'default' AND device_id IS NULL AND ended_at IS NULL`,
+      ).get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("does not adopt a game-only mistake session as a study Session", async () => {
+    const mistake = await request(app).post("/api/game/mistake").send({
+      childId: "default",
+      problem: "7+8",
+      userAnswer: "14",
+      correctAnswer: "15",
+      source: "game",
+    });
+    expect(mistake.status).toBe(201);
+    const gameSession = db.prepare(
+      `SELECT s.id, s.subject
+         FROM sessions s JOIN mistakes m ON m.session_id = s.id
+        WHERE m.id = ?`,
+    ).get(mistake.body.id) as { id: string; subject: string };
+    expect(gameSession.subject).toBe("__game__:math");
+
+    const started = await request(app).post("/api/session/start").send({ subject: "作业" });
+    expect(started.status).toBe(200);
+    expect(db.prepare(
+      `SELECT ended_at AS endedAt, device_id AS deviceId,
+              source_revision AS sourceRevision
+         FROM sessions WHERE id = ?`,
+    ).get(gameSession.id)).toEqual({ endedAt: null, deviceId: null, sourceRevision: 0 });
+
+    const events = (await feed()).body.events;
+    expect(events).toHaveLength(1);
+    expect(events[0].sourceIdentity.recordType).toBe("learning_attempt");
+  });
+
   it("rolls back Session completion when the source event cannot be inserted", async () => {
     const started = await request(app).post("/api/session/start").send({});
     db.exec(`
@@ -123,6 +198,20 @@ describe("learning Session revisions and withdrawals (#106)", () => {
       eventType: "source_record_corrected",
       payload: { subject: "arithmetic", durationMinutes: 12 },
     });
+  });
+
+  it("atomically claims a published legacy Session on its first correction", async () => {
+    const { sessionId } = await completedSession();
+    db.prepare("UPDATE sessions SET device_id = NULL WHERE id = ?").run(sessionId);
+
+    const corrected = await request(app)
+      .patch(`/api/session/${sessionId}`)
+      .send({ totalMinutes: 3 });
+    expect(corrected.status).toBe(200);
+    expect(corrected.body.revision).toBe(2);
+    expect(db.prepare(
+      "SELECT device_id AS deviceId FROM sessions WHERE id = ?",
+    ).get(sessionId)).toEqual({ deviceId: "test-device" });
   });
 
   it("withdraws with an empty payload and does not duplicate withdrawal retries", async () => {

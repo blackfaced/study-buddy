@@ -32,6 +32,8 @@ import { registerWhoamiRoutes } from "./routes/whoami.js";
 import { registerMistakeRoutes } from "./routes/mistake-api.js";
 import { registerQuizContextRoutes } from "./routes/quiz-context.js";
 import { registerIntegrationRoutes } from "./routes/integration.js";
+import { DeviceAuth, type DeviceRequestAuthenticator } from "./device-auth.js";
+import { registerPairingRoutes } from "./routes/pairing.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -56,6 +58,14 @@ export interface AppOptions {
   integrationToken?: string | null;
   /** Test seam for the socket-level loopback policy. */
   integrationLoopbackCheck?: (req: Request) => boolean;
+  /** Test seam for local-only pairing-code issuance. */
+  pairingLoopbackCheck?: (req: Request) => boolean;
+  /** Test seam for pairing expiry and credential timestamps. */
+  deviceAuthNow?: () => number;
+  /** Test seam for the HTTPS-or-loopback device credential policy. */
+  deviceSecureTransportCheck?: (req: Request) => boolean;
+  /** Injected request authenticator for route-isolated tests. */
+  deviceAuthenticator?: DeviceRequestAuthenticator;
   /** Test seam for chat completion; production defaults to MiniMax. */
   callMinimax?: CallMinimax;
   /** Throw-only test seam; the real immutable writer always runs afterward. */
@@ -95,6 +105,12 @@ export function createApp(opts: AppOptions): express.Express {
     logger.warn("BUDDY_PIN not set, /buddy/ chat is unlocked (development mode)");
   }
   const buddyLock = new BuddyLock({ pin: effectivePin });
+  const deviceAuth = new DeviceAuth({
+    db,
+    now: opts.deviceAuthNow,
+    isSecureRequest: opts.deviceSecureTransportCheck,
+  });
+  const deviceAuthenticator = opts.deviceAuthenticator ?? deviceAuth;
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
@@ -112,8 +128,14 @@ export function createApp(opts: AppOptions): express.Express {
   // game / write / extract logic.
   registerPortalRoutes(app, WEB_DIR);
   registerSystemRoutes(app, db);
+  registerPairingRoutes(app, {
+    auth: deviceAuth,
+    isLoopback: opts.pairingLoopbackCheck,
+    now: opts.deviceAuthNow,
+    isSecureRequest: opts.deviceSecureTransportCheck,
+  });
   registerBuddyRoutes(app, { db, httpsPort, lock: buddyLock, logger });
-  registerSessionRoutes(app, { db, logger });
+  registerSessionRoutes(app, { db, logger, auth: deviceAuthenticator });
   registerChatRoutes(app, {
     db,
     logger,
@@ -121,6 +143,7 @@ export function createApp(opts: AppOptions): express.Express {
     mistakesDir,
     upload,
     callMinimax: opts.callMinimax ?? defaultCallMinimax,
+    auth: deviceAuthenticator,
   });
 
   // Game + write + extract routes
@@ -132,7 +155,7 @@ export function createApp(opts: AppOptions): express.Express {
     mistakesDir,
     visionClient: opts.visionClient === undefined ? null : opts.visionClient,
   });
-  registerWhoamiRoutes(app, { db, version: "0.1.0" });
+  registerWhoamiRoutes(app, { db, version: "0.1.0", auth: deviceAuthenticator });
   registerMistakeRoutes(app, {
     db,
     beforeSourceEventAppend: opts.beforeSourceEventAppend,

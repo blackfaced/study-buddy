@@ -86,6 +86,7 @@ function runMigrations(inst: Database.Database) {
     "ALTER TABLE sessions ADD COLUMN writing_turns INTEGER DEFAULT 0",
     "ALTER TABLE sessions ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE sessions ADD COLUMN source_withdrawn_at INTEGER",
+    "ALTER TABLE sessions ADD COLUMN device_id TEXT",
     "ALTER TABLE game_sessions ADD COLUMN source_record_id TEXT",
     // v0.5: vision-mistake columns
     "ALTER TABLE mistakes ADD COLUMN image_path TEXT",
@@ -124,6 +125,27 @@ function runMigrations(inst: Database.Database) {
       created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
     );
 
+    CREATE TABLE IF NOT EXISTS paired_devices (
+      device_id TEXT PRIMARY KEY,
+      child_id TEXT NOT NULL,
+      credential_hash TEXT NOT NULL UNIQUE,
+      device_name TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      revoked_at INTEGER,
+      FOREIGN KEY (child_id) REFERENCES children(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS pairing_codes (
+      id TEXT PRIMARY KEY,
+      code_hash TEXT NOT NULL UNIQUE,
+      child_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      used_at INTEGER,
+      FOREIGN KEY (child_id) REFERENCES children(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       child_id TEXT NOT NULL,
@@ -138,6 +160,8 @@ function runMigrations(inst: Database.Database) {
       writing_turns INTEGER DEFAULT 0,
       source_revision INTEGER NOT NULL DEFAULT 0,
       source_withdrawn_at INTEGER,
+      device_id TEXT,
+      FOREIGN KEY (device_id) REFERENCES paired_devices(device_id),
       FOREIGN KEY (child_id) REFERENCES children(id)
     );
 
@@ -276,6 +300,27 @@ function runMigrations(inst: Database.Database) {
     CREATE TRIGGER IF NOT EXISTS source_events_immutable_delete
       BEFORE DELETE ON source_events
       BEGIN SELECT RAISE(ABORT, 'source events are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS sessions_device_reference_insert
+      BEFORE INSERT ON sessions
+      WHEN NEW.device_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM paired_devices WHERE device_id = NEW.device_id
+      )
+      BEGIN SELECT RAISE(ABORT, 'sessions.device_id references a missing device'); END;
+    CREATE TRIGGER IF NOT EXISTS sessions_device_reference_update
+      BEFORE UPDATE OF device_id ON sessions
+      WHEN NEW.device_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM paired_devices WHERE device_id = NEW.device_id
+      )
+      BEGIN SELECT RAISE(ABORT, 'sessions.device_id references a missing device'); END;
+    CREATE TRIGGER IF NOT EXISTS paired_devices_session_reference_delete
+      BEFORE DELETE ON paired_devices
+      WHEN EXISTS (SELECT 1 FROM sessions WHERE device_id = OLD.device_id)
+      BEGIN SELECT RAISE(ABORT, 'paired device is referenced by sessions'); END;
+    CREATE TRIGGER IF NOT EXISTS paired_devices_session_reference_update
+      BEFORE UPDATE OF device_id ON paired_devices
+      WHEN NEW.device_id IS NOT OLD.device_id
+        AND EXISTS (SELECT 1 FROM sessions WHERE device_id = OLD.device_id)
+      BEGIN SELECT RAISE(ABORT, 'paired device is referenced by sessions'); END;
   `);
   inst.prepare(
     "INSERT OR IGNORE INTO source_installation (singleton_id, installation_id) VALUES (1, ?)",

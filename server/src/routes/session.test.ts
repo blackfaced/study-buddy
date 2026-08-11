@@ -4,18 +4,16 @@
 // the refactor series). The module owns:
 //   - POST /api/session/start
 //   - POST /api/session/end
-//   - getActiveSession(db)         shared helper used by chat/frame
-//   - getOrCreateActiveSession(db) shared helper used by chat/frame/mistake
+//   - GET /api/session/active
 //
-// Tested in isolation with a fresh mini express app + in-memory
-// SQLite. The shared helpers are also exported so future route
-// modules (chat, frame, mistake) can reuse them.
+// Tested in isolation with a fresh mini express app + in-memory SQLite.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import express from "express";
 import request from "supertest";
 import Database from "better-sqlite3";
 import { migrateSchema } from "../db-migrate.js";
-import { registerSessionRoutes, getActiveSession, getOrCreateActiveSession } from "./session.js";
+import { registerSessionRoutes } from "./session.js";
+import { seedTestDevice, testDeviceAuthenticator } from "../test-device.js";
 
 let db: Database.Database;
 let app: ReturnType<typeof express>;
@@ -34,59 +32,20 @@ beforeEach(() => {
   db.exec("DELETE FROM chat_turns");
   db.exec("DELETE FROM posture_events");
   db.exec("DELETE FROM sessions");
+  seedTestDevice(db);
 
   app = express();
   app.use(express.json());
-  registerSessionRoutes(app, { db, logger: silentLogger() });
+  registerSessionRoutes(app, {
+    db,
+    logger: silentLogger(),
+    auth: testDeviceAuthenticator,
+  });
 });
 
 function silentLogger() {
   return { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
 }
-
-// --- Shared helpers --------------------------------------------------
-
-describe("getActiveSession", () => {
-  it("returns undefined when no session is active", () => {
-    expect(getActiveSession(db)).toBeUndefined();
-  });
-
-  it("returns the most recent active session (ended_at IS NULL)", () => {
-    db.prepare("INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)").run("s1", "default", "math");
-    const s = getActiveSession(db);
-    expect(s?.id).toBe("s1");
-    expect(s?.child_id).toBe("default");
-  });
-
-  it("ignores ended sessions (ended_at IS NOT NULL)", () => {
-    db.prepare("INSERT INTO sessions (id, child_id, ended_at) VALUES (?, ?, ?)").run("s1", "default", Date.now());
-    expect(getActiveSession(db)).toBeUndefined();
-  });
-});
-
-describe("getOrCreateActiveSession", () => {
-  it("returns the existing active session if one exists", () => {
-    db.prepare("INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)").run("existing", "default", null);
-    const s = getOrCreateActiveSession(db);
-    expect(s.id).toBe("existing");
-  });
-
-  it("creates a new session for the default child if none active", () => {
-    const s = getOrCreateActiveSession(db);
-    expect(s.id).toBeTruthy();
-    expect(s.child_id).toBe("default");
-
-    // It should be persisted.
-    const row = db.prepare("SELECT * FROM sessions WHERE id = ?").get(s.id);
-    expect(row).toBeDefined();
-  });
-
-  it("does not create a duplicate when called twice in a row", () => {
-    const a = getOrCreateActiveSession(db);
-    const b = getOrCreateActiveSession(db);
-    expect(a.id).toBe(b.id);
-  });
-});
 
 // --- POST /api/session/start -----------------------------------------
 
@@ -97,6 +56,12 @@ describe("POST /api/session/start", () => {
     expect(res.body.sessionId).toBeTruthy();
     expect(res.body.childId).toBe("default");
     expect(res.body.startedAt).toBeGreaterThan(0);
+  });
+
+  it("accepts an empty request body when starting a new epoch", async () => {
+    const res = await request(app).post("/api/session/start");
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBeTruthy();
   });
 
   it("closes any currently-active session before starting a new one", async () => {
@@ -132,7 +97,7 @@ describe("POST /api/session/end", () => {
   it("returns 400 when no active session exists", async () => {
     const res = await request(app).post("/api/session/end").send({});
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/no active session/);
+    expect(res.body.error).toMatch(/sessionId is required/);
   });
 
   it("ends the active session and returns aggregate stats", async () => {
@@ -150,7 +115,7 @@ describe("POST /api/session/end", () => {
        VALUES (?, 'child', 'offtopic', 1, ?)`
     ).run(sessionId, Date.now());
 
-    const res = await request(app).post("/api/session/end").send({});
+    const res = await request(app).post("/api/session/end").send({ sessionId });
     expect(res.status).toBe(200);
     expect(res.body.sessionId).toBe(sessionId);
     expect(res.body.postureWarningCount).toBe(0);
@@ -161,14 +126,15 @@ describe("POST /api/session/end", () => {
   it("computes durationMin as max 1 minute (rounded)", async () => {
     const start = await request(app).post("/api/session/start").send({});
     // Session is 0ms old; duration should be clamped to 1.
-    const res = await request(app).post("/api/session/end").send({});
+    const res = await request(app).post("/api/session/end").send({ sessionId: start.body.sessionId });
     expect(res.body.durationMin).toBe(1);
   });
 
   it("after ending, the session is no longer active", async () => {
-    await request(app).post("/api/session/start").send({});
-    await request(app).post("/api/session/end").send({});
-    const res = await request(app).post("/api/session/end").send({});
-    expect(res.status).toBe(400);
+    const started = await request(app).post("/api/session/start").send({});
+    await request(app).post("/api/session/end").send({ sessionId: started.body.sessionId });
+    const res = await request(app).get("/api/session/active");
+    expect(res.status).toBe(200);
+    expect(res.body.session).toBeNull();
   });
 });

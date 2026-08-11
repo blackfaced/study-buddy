@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import Database from "better-sqlite3";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
 import type { VisionClient } from "./vision.js";
+import { seedTestDevice, testDeviceAuthenticator } from "./test-device.js";
 
 let db: Database.Database;
 let app: ReturnType<typeof createApp>;
@@ -24,8 +25,9 @@ beforeAll(() => {
   db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   migrateSchema(db);
+  seedTestDevice(db);
   mistakesDir = mkdtempSync(join(tmpdir(), "study-buddy-mistakes-"));
-  app = createApp({ db, httpsPort: 3000, visionClient: fakeVisionClient(), mistakesDir });
+  app = createApp({ db, httpsPort: 3000, visionClient: fakeVisionClient(), mistakesDir, deviceAuthenticator: testDeviceAuthenticator });
 });
 
 afterAll(() => {
@@ -49,35 +51,36 @@ async function startSession() {
 
 describe("POST /api/mistake-photo (v0.5)", () => {
   it("returns 503 when no vision client is configured", async () => {
-    const noVisionApp = createApp({ db, httpsPort: 3000, visionClient: null, mistakesDir });
+    const sessionId = await startSession();
+    const noVisionApp = createApp({ db, httpsPort: 3000, visionClient: null, mistakesDir, deviceAuthenticator: testDeviceAuthenticator });
     const res = await request(noVisionApp)
       .post("/api/mistake-photo")
+      .field("sessionId", sessionId)
       .attach("photo", Buffer.from("fake-jpeg-bytes"), "test.jpg");
     expect(res.status).toBe(503);
     expect(res.body.error).toMatch(/vision not configured/);
   });
 
   it("returns 400 when no photo is attached", async () => {
-    await startSession();
-    const res = await request(app).post("/api/mistake-photo");
+    const sessionId = await startSession();
+    const res = await request(app).post("/api/mistake-photo").field("sessionId", sessionId);
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("no photo");
   });
 
-  it("auto-creates a session when none is active (v0.6.1, like /api/chat)", async () => {
-    // v0.6.1: the camera might fire after "写完啦" ended the previous
-    // session, so we auto-start one instead of 400-ing.
+  it("rejects a photo without an explicit session", async () => {
     const res = await request(app)
       .post("/api/mistake-photo")
       .attach("photo", Buffer.from("FAKE-JPEG-CONTENT"), "math.jpg");
-    expect(res.status).toBe(200);
-    expect(res.body.mistakeId).toBeDefined();
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/sessionId/);
   });
 
   it("on success: writes the photo to mistakesDir, persists a mistakes row, and returns parsed vision", async () => {
-    await startSession();
+    const sessionId = await startSession();
     const res = await request(app)
       .post("/api/mistake-photo")
+      .field("sessionId", sessionId)
       .attach("photo", Buffer.from("FAKE-JPEG-CONTENT"), "math.jpg");
 
     expect(res.status).toBe(200);
@@ -108,15 +111,17 @@ describe("POST /api/mistake-photo (v0.5)", () => {
   });
 
   it("persists '无法识别' as the problem text when vision gives up", async () => {
-    await startSession();
+    const sessionId = await startSession();
     const noReadApp = createApp({
       db,
       httpsPort: 3000,
       visionClient: fakeVisionClient("无法识别"),
       mistakesDir,
+      deviceAuthenticator: testDeviceAuthenticator,
     });
     const res = await request(noReadApp)
       .post("/api/mistake-photo")
+      .field("sessionId", sessionId)
       .attach("photo", Buffer.from("BLUR"), "blur.jpg");
 
     expect(res.status).toBe(200);
@@ -132,7 +137,8 @@ describe("POST /api/mistake-photo (v0.5)", () => {
   });
 
   it("returns 502 when the vision client throws", async () => {
-    await startSession();
+    const sessionId = await startSession();
+    const filesBefore = readdirSync(mistakesDir).length;
     const failingApp = createApp({
       db,
       httpsPort: 3000,
@@ -142,11 +148,15 @@ describe("POST /api/mistake-photo (v0.5)", () => {
         },
       },
       mistakesDir,
+      deviceAuthenticator: testDeviceAuthenticator,
     });
     const res = await request(failingApp)
       .post("/api/mistake-photo")
+      .field("sessionId", sessionId)
       .attach("photo", Buffer.from("X"), "x.jpg");
     expect(res.status).toBe(502);
-    expect(res.body.error).toMatch(/vision failed/);
+    expect(res.body.error).toBe("vision failed");
+    expect(JSON.stringify(res.body)).not.toContain("upstream timeout");
+    expect(readdirSync(mistakesDir)).toHaveLength(filesBefore);
   });
 });

@@ -70,6 +70,24 @@ describe("buddy state machine (nextState)", () => {
   });
 });
 
+describe("buddy session refresh state", () => {
+  const restoredState = () => (globalThis as any).Buddy.state.restoredState;
+  const shouldShowCamera = () => (globalThis as any).Buddy.state.shouldShowCamera;
+
+  it("restores a homework session as writing", () => {
+    expect(restoredState()("作业")).toBe("writing");
+  });
+
+  it("restores a conversation session as done/free-chat", () => {
+    expect(restoredState()("聊天")).toBe("done");
+  });
+
+  it("keeps the camera hidden for a restored conversation", () => {
+    expect(shouldShowCamera()("done")).toBe(false);
+    expect(shouldShowCamera()("writing")).toBe(true);
+  });
+});
+
 describe("buddy state object initial values", () => {
   const S = () => (globalThis as any).Buddy.state;
 

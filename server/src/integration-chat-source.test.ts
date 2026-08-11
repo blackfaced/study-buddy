@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
 import { createLogger } from "./logger.js";
+import { seedTestDevice, testDeviceAuthenticator } from "./test-device.js";
 
 const TOKEN = "chat-source-test-token";
 
@@ -14,12 +15,19 @@ describe("bounded chat references and retrieval (#107)", () => {
   let db: Database.Database;
   let dir: string;
   let app: ReturnType<typeof createApp>;
+  let sessionId: string;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "study-buddy-chat-source-"));
     db = new Database(join(dir, "study.db"));
     migrateSchema(db);
+    seedTestDevice(db);
     app = buildApp(true);
+    sessionId = (db.prepare(
+      `INSERT INTO sessions (id, child_id, device_id, started_at, subject)
+       VALUES ('chat-source-session', 'default', 'test-device', ?, 'chat')
+       RETURNING id`,
+    ).get(Date.now()) as { id: string }).id;
   });
 
   afterEach(() => {
@@ -34,6 +42,7 @@ describe("bounded chat references and retrieval (#107)", () => {
       integrationLoopbackCheck: () => loopback,
       logger: createLogger({ level: "error", sinks: [] }),
       callMinimax: async (messages) => `coach:${messages.at(-1)?.content ?? ""}`,
+      deviceAuthenticator: testDeviceAuthenticator,
     });
   }
 
@@ -51,7 +60,7 @@ describe("bounded chat references and retrieval (#107)", () => {
   }
 
   async function seedChat(text = "私密的孩子原话") {
-    const response = await request(app).post("/api/chat").send({ text });
+    const response = await request(app).post("/api/chat").send({ sessionId, text });
     expect(response.status).toBe(200);
     const events = (await feed()).body.events.filter(
       (event: any) => event.sourceIdentity.recordType === "chat_turn",
@@ -194,7 +203,7 @@ describe("bounded chat references and retrieval (#107)", () => {
       WHEN NEW.record_type = 'chat_turn'
       BEGIN SELECT RAISE(ABORT, 'forced failure'); END;
     `);
-    const response = await request(app).post("/api/chat").send({ text: "rollback" });
+    const response = await request(app).post("/api/chat").send({ sessionId, text: "rollback" });
     expect(response.status).toBe(500);
     expect(db.prepare("SELECT COUNT(*) AS count FROM chat_turns").get())
       .toEqual({ count: 0 });
@@ -207,7 +216,7 @@ describe("bounded chat references and retrieval (#107)", () => {
     const body = retrievalBody(events, [events[0]]);
     const [read, write] = await Promise.all([
       retrieve(body),
-      request(app).post("/api/chat").send({ text: "second" }),
+      request(app).post("/api/chat").send({ sessionId, text: "second" }),
     ]);
     expect(read.status).toBe(200);
     expect(read.body.turns.map((turn: any) => turn.content)).toEqual(["first"]);

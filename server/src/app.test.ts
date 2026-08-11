@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
+import { seedTestDevice, testDeviceAuthenticator } from "./test-device.js";
 
 let db: Database.Database;
 let app: ReturnType<typeof createApp>;
@@ -16,10 +17,26 @@ beforeAll(() => {
   db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   migrateSchema(db);
+  seedTestDevice(db);
   tmpDir = mkdtempSync(join(tmpdir(), "study-buddy-test-"));
   outboxPath = join(tmpDir, "outbox.jsonl");
-  app = createApp({ db, httpsPort: 3000, outboxPath });
+  app = createApp({ db, httpsPort: 3000, outboxPath, deviceAuthenticator: testDeviceAuthenticator });
 });
+
+async function startOwnedSession(subject?: string) {
+  const response = await request(app)
+    .post("/api/session/start")
+    .send(subject ? { subject } : {});
+  expect(response.status).toBe(200);
+  return response.body.sessionId as string;
+}
+
+async function postChat(text: string, state = "writing", sessionId?: string) {
+  const ownedSessionId = sessionId ?? await startOwnedSession();
+  return request(app)
+    .post("/api/chat")
+    .send({ sessionId: ownedSessionId, text, state });
+}
 
 afterAll(() => {
   db.close();
@@ -67,31 +84,23 @@ describe("GET /api/pair (Bug 1: serverUrl must not be :undefined)", () => {
   });
 });
 
-// Bug fix (v0.6.1): after /api/session/end, /api/chat used to return
-// 400 "no active session". Now it auto-creates a new session for the
-// default child so the kid can keep chatting right after "写完啦".
-describe("POST /api/chat (v0.6.1: auto-start session when none active)", () => {
-  it("returns 200 (not 400) when no session is active", async () => {
-    // No /api/session/start was called. Should still work.
+describe("POST /api/chat (explicit paired session)", () => {
+  it("rejects chat without an explicit session", async () => {
     const res = await request(app)
       .post("/api/chat")
       .send({ text: "你好", state: "writing" });
-    expect(res.status).toBe(200);
-    expect(typeof res.body.reply).toBe("string");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/sessionId/);
   });
 
-  it("auto-creates a session and writes chat_turns to it", async () => {
-    // Clean up any sessions from previous tests
-    db.exec("UPDATE sessions SET ended_at = strftime('%s','now')*1000 WHERE ended_at IS NULL");
-
+  it("writes chat turns only to the requested owned session", async () => {
+    const sessionId = await startOwnedSession();
     const before = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as any).c;
-    const res = await request(app)
-      .post("/api/chat")
-      .send({ text: "测试", state: "writing" });
+    const res = await postChat("测试", "writing", sessionId);
     expect(res.status).toBe(200);
 
     const after = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as any).c;
-    expect(after).toBe(before + 1);
+    expect(after).toBe(before);
 
     // chat_turns should reference the new session
     const turns = db.prepare(
@@ -101,37 +110,15 @@ describe("POST /api/chat (v0.6.1: auto-start session when none active)", () => {
     expect(turns[0].state).toBe("writing");
     expect(turns[1].role).toBe("child");
     expect(turns[1].content).toBe("测试");
+    expect((db.prepare("SELECT session_id FROM chat_turns ORDER BY id DESC LIMIT 1").get() as any).session_id)
+      .toBe(sessionId);
   });
 
-  it("reuses an existing active session (does not create a duplicate)", async () => {
-    db.exec("UPDATE sessions SET ended_at = strftime('%s','now')*1000 WHERE ended_at IS NULL");
-    // Start one session explicitly
-    const start = await request(app).post("/api/session/start").send({});
-    const sessionId = start.body.sessionId;
-
-    const before = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as any).c;
-    const res = await request(app)
-      .post("/api/chat")
-      .send({ text: "继续", state: "writing" });
-    expect(res.status).toBe(200);
-
-    const after = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as any).c;
-    expect(after).toBe(before);  // no new session
-    // chat_turns linked to the existing session
-    const turn = db.prepare(
-      "SELECT session_id FROM chat_turns ORDER BY id DESC LIMIT 1"
-    ).get() as { session_id: string };
-    expect(turn.session_id).toBe(sessionId);
-  });
-
-  it("after /api/session/end, the next chat auto-creates a new session", async () => {
-    // End the current session
-    await request(app).post("/api/session/end").send({});
-    // Next chat should succeed (not 400)
-    const res = await request(app)
-      .post("/api/chat")
-      .send({ text: "又来了", state: "writing" });
-    expect(res.status).toBe(200);
+  it("does not revive a completed session implicitly", async () => {
+    const sessionId = await startOwnedSession();
+    expect((await request(app).post("/api/session/end").send({ sessionId })).status).toBe(200);
+    const res = await postChat("又来了", "writing", sessionId);
+    expect(res.status).toBe(409);
   });
 });
 
@@ -176,9 +163,7 @@ describe("POST /api/chat auto-detects name change (W1 hotfix #2)", () => {
   });
 
   it("'我的小名叫糖糖' → 自动改 children.name 为 '糖糖'", async () => {
-    const res = await request(app)
-      .post("/api/chat")
-      .send({ text: "我的小名叫糖糖", state: "writing" });
+    const res = await postChat("我的小名叫糖糖");
     expect(res.status).toBe(200);
 
     const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
@@ -186,9 +171,7 @@ describe("POST /api/chat auto-detects name change (W1 hotfix #2)", () => {
   });
 
   it("'我叫糖糖' → 改名为 '糖糖'", async () => {
-    const res = await request(app)
-      .post("/api/chat")
-      .send({ text: "我叫糖糖", state: "writing" });
+    const res = await postChat("我叫糖糖");
     expect(res.status).toBe(200);
 
     const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
@@ -196,9 +179,7 @@ describe("POST /api/chat auto-detects name change (W1 hotfix #2)", () => {
   });
 
   it("'今天吃了糖糖' → 不改名字（不是名字变更意图）", async () => {
-    const res = await request(app)
-      .post("/api/chat")
-      .send({ text: "今天吃了糖糖", state: "writing" });
+    const res = await postChat("今天吃了糖糖");
     expect(res.status).toBe(200);
 
     const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
@@ -206,9 +187,7 @@ describe("POST /api/chat auto-detects name change (W1 hotfix #2)", () => {
   });
 
   it("'写作业' → 不改名字", async () => {
-    const res = await request(app)
-      .post("/api/chat")
-      .send({ text: "写作业", state: "writing" });
+    const res = await postChat("写作业");
     expect(res.status).toBe(200);
 
     const child = db.prepare("SELECT name FROM children WHERE id = 'default'").get() as any;
@@ -245,7 +224,7 @@ describe("POST /api/chat (loop detection + transactional source references)", ()
     ).get() as { count: number };
     const res = await request(app)
       .post("/api/chat")
-      .send({ text: "什么啊", state: "writing" });
+      .send({ sessionId, text: "什么啊", state: "writing" });
     expect(res.status).toBe(200);
     expect(res.body.isLoop).toBe(true);
 
@@ -274,7 +253,7 @@ describe("POST /api/chat (loop detection + transactional source references)", ()
 
     const res = await request(app)
       .post("/api/chat")
-      .send({ text: "我休息一下", state: "writing" });
+      .send({ sessionId, text: "我休息一下", state: "writing" });
     expect(res.status).toBe(200);
     expect(res.body.isLoop).toBe(false);
 
@@ -291,18 +270,14 @@ describe("POST /api/chat (loop detection + transactional source references)", ()
 
   it("LLM 回复末尾的情绪标签被剥离（reply 不含 ::emotion::）", async () => {
     // 没有 API key 时走 fallback（不含 emotion 标签）— emotion 应是 neutral
-    const res = await request(app)
-      .post("/api/chat")
-      .send({ text: "我今天不太开心", state: "writing" });
+    const res = await postChat("我今天不太开心");
     expect(res.status).toBe(200);
     expect(res.body.emotion).toBe("neutral");  // fallback 没标签
     expect(res.body.reply).not.toContain("::emotion::");
   });
 
   it("response.json 包含 emotion 字段（默认 neutral）", async () => {
-    const res = await request(app)
-      .post("/api/chat")
-      .send({ text: "你好", state: "writing" });
+    const res = await postChat("你好");
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty("emotion");
     expect(res.body).toHaveProperty("isLoop");

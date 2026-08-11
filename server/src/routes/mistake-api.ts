@@ -26,9 +26,10 @@
 // Note on session_id: the existing `mistakes.session_id` column is
 // NOT NULL because the schema was designed for study-buddy chat
 // mistakes (where every mistake belongs to a chat session). Auto-
-// recorded game mistakes are not associated with any chat session,
-// so we synthesize a placeholder ("_auto_mistake_<childId>") that
-// is recognizable in queries and satisfies the NOT NULL constraint.
+// recorded game mistakes are not associated with a paired study session,
+// so we create/reuse an unpaired session carrying a private game-only
+// subject marker. This keeps the NOT NULL relationship intact without
+// attaching game evidence to a child's active homework session.
 // A future schema migration could split mistakes into chat / game
 // streams, but that's out of scope for T1.
 // =====================================================================
@@ -36,6 +37,7 @@
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import { GAME_ONLY_SESSION_SUBJECT } from "../session-kind.js";
 import { appendLearningAttemptSourceEvent } from "../source-events.js";
 
 export interface MistakeRouteDeps {
@@ -290,23 +292,38 @@ function ensureChildRow(db: Database.Database, childId: string): void {
 }
 
 /**
- * Find-or-create an active (un-ended) session for the child. Mirrors
- * the same-named helper in game-sync.ts; duplicated here so the mistake
- * module doesn't depend on the larger game-sync surface (which pulls in
- * outbox + Nexus concerns that T1 doesn't need). If we ever want one
- * source of truth, lift this to a shared sessions.ts module.
+ * Find-or-create a legacy game-only session for the child. Device-owned
+ * learning sessions are excluded so an unpaired game request can never
+ * attach a mistake to a paired browser's active session. New rows use an
+ * explicit private subject marker; the longer fallback predicate recognizes
+ * old game-only rows without misclassifying a legacy study session that also
+ * happened to receive one game mistake.
  */
 function ensureActiveSession(db: Database.Database, childId: string): string {
   const existing = db
     .prepare(
-      "SELECT id FROM sessions WHERE child_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+      `SELECT s.id FROM sessions s
+        WHERE s.child_id = ? AND s.device_id IS NULL AND s.ended_at IS NULL
+          AND (
+            s.subject = ?
+            OR (
+              s.subject = 'math'
+              AND EXISTS (
+                SELECT 1 FROM mistakes m
+                 WHERE m.session_id = s.id AND m.source = 'game'
+              )
+              AND NOT EXISTS (SELECT 1 FROM chat_turns c WHERE c.session_id = s.id)
+              AND NOT EXISTS (SELECT 1 FROM posture_events p WHERE p.session_id = s.id)
+            )
+          )
+        ORDER BY s.started_at DESC LIMIT 1`,
     )
-    .get(childId) as { id: string } | undefined;
+    .get(childId, GAME_ONLY_SESSION_SUBJECT) as { id: string } | undefined;
   if (existing) return existing.id;
   const id = randomUUID();
   db.prepare(
     "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)",
-  ).run(id, childId, "math");
+  ).run(id, childId, GAME_ONLY_SESSION_SUBJECT);
   return id;
 }
 

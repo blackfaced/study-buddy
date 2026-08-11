@@ -1,12 +1,11 @@
 // server/src/routes/whoami.ts
 // =====================================================================
-// /api/whoami — read-only child + session context for agent introspection.
+// /api/whoami — read-only context for the authenticated child device.
 // =====================================================================
 //
-// Aggregates state from the children + sessions tables so an agent
-// (Mavis, MCP, anything else) can ask "who is the kid using the
-// app right now, and which session are they in?" without hitting
-// multiple endpoints.
+// Aggregates the paired child's profile and this device's active session.
+// It must never expose the globally latest session because multiple child
+// devices may be active independently.
 //
 // Why a separate module:
 //   - /api/pair is about first-run pairing (a specific client
@@ -16,7 +15,7 @@
 //     "settings" field later) without growing the buddy module.
 //
 // Public API:
-//   registerWhoamiRoutes(app, { db, version })
+//   registerWhoamiRoutes(app, { db, version, auth })
 //
 // Response shape:
 //   {
@@ -28,30 +27,32 @@
 // =====================================================================
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
+import { devicePrincipal, type DeviceRequestAuthenticator } from "../device-auth.js";
 
 export interface WhoamiRouteDeps {
   db: Database.Database;
   /** Service version string surfaced in the response. */
   version: string;
+  auth: DeviceRequestAuthenticator;
 }
 
 export function registerWhoamiRoutes(app: Express, deps: WhoamiRouteDeps): void {
-  const { db, version } = deps;
+  const { db, version, auth } = deps;
 
-  app.get("/api/whoami", (_req: Request, res: Response) => {
+  app.get("/api/whoami", auth.requireDevice, (_req: Request, res: Response) => {
+    const device = devicePrincipal(res);
     const child = db
-      .prepare("SELECT id, name, grade FROM children WHERE id = 'default'")
-      .get() as { id: string; name: string; grade: string } | undefined;
+      .prepare("SELECT id, name, grade FROM children WHERE id = ?")
+      .get(device.childId) as { id: string; name: string; grade: string } | undefined;
 
-    // Most recent active session. Mirrors getActiveSession() in
-    // routes/session.ts — we don't import it to keep the modules
-    // independent (whoami is read-only and doesn't need the
-    // session lifecycle helpers).
+    // A paired browser may inspect only its own active session.
     const session = db
       .prepare(
-        "SELECT id, child_id, subject, started_at FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+        `SELECT id, child_id, subject, started_at FROM sessions
+          WHERE device_id = ? AND child_id = ? AND ended_at IS NULL
+          ORDER BY started_at DESC LIMIT 1`,
       )
-      .get() as
+      .get(device.deviceId, device.childId) as
       | { id: string; child_id: string; subject: string | null; started_at: number }
       | undefined;
 
@@ -59,7 +60,7 @@ export function registerWhoamiRoutes(app: Express, deps: WhoamiRouteDeps): void 
       service: "study-buddy",
       version,
       child: {
-        childId: child?.id ?? "default",
+        childId: child?.id ?? device.childId,
         name: child?.name ?? "小宝",
         grade: child?.grade ?? "二年级",
       },

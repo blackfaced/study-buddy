@@ -48,6 +48,12 @@ describe("platform entry routes", () => {
   it("serves the write app at /write/", async () => {
     const res = await request(app).get("/write/");
     expect(res.status).toBe(200);
+    expect(res.text).toContain('/vendor/hanzi-writer-3.5.0.min.js');
+    expect(res.text).not.toContain("cdn.jsdelivr.net");
+
+    const vendor = await request(app).get("/vendor/hanzi-writer-3.5.0.min.js");
+    expect(vendor.status).toBe(200);
+    expect(vendor.text.length).toBeGreaterThan(30_000);
   });
 
   it("write app appears in /api/apps registry (issue #57)", async () => {

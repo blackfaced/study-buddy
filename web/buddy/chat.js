@@ -120,11 +120,21 @@
     }
 
     try {
+      // Chat after a completed study session gets its own explicit
+      // active conversation session. The server never guesses a
+      // session from global state.
+      if (!S.sessionId) {
+        const started = await window.StudyBuddy.fetch('/api/session/start', {
+          method: 'POST',
+          body: { childId: 'default', subject: S.state === 'done' ? '聊天' : '作业' },
+        });
+        S.sessionId = started.sessionId;
+      }
       // v0.7 (issue #21): use shared fetch (sets Content-Type + parses JSON,
       // throws on non-2xx so we can rely on `e.status`).
       const { reply } = await window.StudyBuddy.fetch('/api/chat', {
         method: 'POST',
-        body: { text, state: S.state }
+        body: { sessionId: S.sessionId, text, state: S.state }
       });
       this.addMsg('agent', reply);
       this.speak(reply);
@@ -244,11 +254,13 @@
     // 开 session
     try {
       // v0.7 (issue #21): use shared fetch.
-      const data = await window.StudyBuddy.fetch('/api/session/start', {
-        method: 'POST',
-        body: { childId: 'default', subject: '作业' }
-      });
-      S.sessionId = data.sessionId;
+      if (!S.sessionId) {
+        const data = await window.StudyBuddy.fetch('/api/session/start', {
+          method: 'POST',
+          body: { childId: 'default', subject: '作业' }
+        });
+        S.sessionId = data.sessionId;
+      }
       S.state = window.Buddy.state.nextState(S.state, 'start');
       if (_statusEl) _statusEl.textContent = '写作业中...';
       this.addMsg('agent', '你好呀！我是小书童，我们开始写作业吧~');
@@ -266,7 +278,10 @@
     if (S.state === 'writing') return;
     try {
       // v0.7 (issue #21): use shared fetch.
-      const data = await window.StudyBuddy.fetch('/api/session/start', { method: 'POST' });
+      const data = await window.StudyBuddy.fetch('/api/session/start', {
+        method: 'POST',
+        body: { childId: 'default', subject: '作业' },
+      });
       S.sessionId = data.sessionId;
       S.state = window.Buddy.state.nextState(S.state, 'start');
       if (!S.frameLoop && S.videoStream) {
@@ -299,7 +314,10 @@
     }
     try {
       // v0.7 (issue #21): use shared fetch.
-      const data = await window.StudyBuddy.fetch('/api/session/end', { method: 'POST' });
+      const data = await window.StudyBuddy.fetch('/api/session/end', {
+        method: 'POST',
+        body: { sessionId: S.sessionId },
+      });
       this.addMsg('agent', '写完啦！');
       this.speak('写完啦');
       // 克制的小结：时长 + 专注分 + 警告次数（不评价好坏）
@@ -315,6 +333,7 @@
         S.videoStream = null;
       }
       S.state = window.Buddy.state.nextState(S.state, 'end');
+      S.sessionId = null;
       if (_statusEl) _statusEl.textContent = '写完啦，可以跟小书童聊会儿~';
     } catch (e) {
       if (window.Buddy.debugMode) this.addSystem('结束失败: ' + e.message);

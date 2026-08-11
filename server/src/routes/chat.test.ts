@@ -24,6 +24,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import multer from "multer";
 import { registerChatRoutes, classifyTopic, type ChatRouteDeps } from "./chat.js";
+import { seedTestDevice, testDeviceAuthenticator } from "../test-device.js";
+
+const TEST_SESSION_ID = "test-session";
 
 let db: Database.Database;
 let app: ReturnType<typeof express>;
@@ -44,6 +47,11 @@ beforeEach(() => {
   db.exec("DELETE FROM posture_events");
   db.exec("DELETE FROM mistakes");
   db.exec("DELETE FROM sessions");
+  seedTestDevice(db);
+  db.prepare(
+    `INSERT INTO sessions (id, child_id, device_id, subject)
+     VALUES (?, 'default', 'test-device', 'test')`,
+  ).run(TEST_SESSION_ID);
 
   app = express();
   app.use(express.json({ limit: "1mb" }));
@@ -64,6 +72,7 @@ beforeEach(() => {
       const last = messages[messages.length - 1];
       return `echo: ${last?.content || ""}`;
     },
+    auth: testDeviceAuthenticator,
   };
 
   registerChatRoutes(app, deps);
@@ -100,12 +109,18 @@ describe("classifyTopic", () => {
 
 describe("POST /api/video-mode", () => {
   it("returns the new state", async () => {
-    const r1 = await request(app).post("/api/video-mode").send({ enabled: false });
+    const r1 = await request(app).post("/api/video-mode").send({ sessionId: TEST_SESSION_ID, enabled: false });
     expect(r1.status).toBe(200);
     expect(r1.body.videoEnabled).toBe(false);
 
-    const r2 = await request(app).post("/api/video-mode").send({ enabled: true });
+    const r2 = await request(app).post("/api/video-mode").send({ sessionId: TEST_SESSION_ID, enabled: true });
     expect(r2.body.videoEnabled).toBe(true);
+  });
+
+  it("requires an explicit owned session", async () => {
+    const response = await request(app).post("/api/video-mode").send({ enabled: false });
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatch(/sessionId/);
   });
 });
 
@@ -132,35 +147,62 @@ describe("POST /api/voice", () => {
 
 describe("POST /api/chat", () => {
   it("returns 400 when text is missing", async () => {
-    const res = await request(app).post("/api/chat").send({});
+    const res = await request(app).post("/api/chat").send({ sessionId: TEST_SESSION_ID });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/no text/);
   });
 
   it("echoes back via the injected callMinimax (round-trip)", async () => {
-    const res = await request(app).post("/api/chat").send({ text: "你好" });
+    const res = await request(app).post("/api/chat").send({ sessionId: TEST_SESSION_ID, text: "你好" });
     expect(res.status).toBe(200);
     expect(res.body.reply).toBe("echo: 你好");
     expect(res.body.topic).toBe("learning");
     expect(res.body.redirected).toBe(false);
   });
 
-  it("auto-creates a session if none is active (issue #28 + #46)", async () => {
+  it("rejects a request that omits its explicit session", async () => {
     const res = await request(app).post("/api/chat").send({ text: "hi" });
-    expect(res.status).toBe(200);
-    // A new session was created.
-    const row = db.prepare("SELECT id FROM sessions WHERE ended_at IS NULL").get() as { id: string };
-    expect(row).toBeDefined();
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/sessionId is required/);
   });
 
   it("logs both child and agent turns in chat_turns", async () => {
-    await request(app).post("/api/chat").send({ text: "做题" });
+    await request(app).post("/api/chat").send({ sessionId: TEST_SESSION_ID, text: "做题" });
     const rows = db.prepare("SELECT role, content FROM chat_turns ORDER BY id").all() as Array<{ role: string; content: string }>;
     expect(rows.length).toBe(2);
     expect(rows[0].role).toBe("child");
     expect(rows[0].content).toBe("做题");
     expect(rows[1].role).toBe("agent");
     expect(rows[1].content).toMatch(/^echo:/);
+  });
+
+  it("does not write turns if the session ends while the LLM is pending", async () => {
+    let markEntered!: () => void;
+    let releaseReply!: (reply: string) => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const reply = new Promise<string>((resolve) => { releaseReply = resolve; });
+    const a = express();
+    a.use(express.json({ limit: "1mb" }));
+    registerChatRoutes(a, {
+      ...deps,
+      callMinimax: async () => {
+        markEntered();
+        return reply;
+      },
+    });
+
+    const pending = request(a)
+      .post("/api/chat")
+      .send({ sessionId: TEST_SESSION_ID, text: "还在算" })
+      .then((response) => response);
+    await entered;
+    db.prepare("UPDATE sessions SET ended_at = ? WHERE id = ?")
+      .run(Date.now(), TEST_SESSION_ID);
+    releaseReply("晚到的回复");
+
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM chat_turns").get()).toEqual({ count: 0 });
   });
 
   it("records redirected=1 when child is offtopic and agent isn't", async () => {
@@ -172,7 +214,10 @@ describe("POST /api/chat", () => {
       ...deps,
       callMinimax: async () => "echo: 写作业吧",
     });
-    const res = await request(a).post("/api/chat").send({ text: "我们玩王者荣耀" });
+    const res = await request(a).post("/api/chat").send({
+      sessionId: TEST_SESSION_ID,
+      text: "我们玩王者荣耀",
+    });
     expect(res.body.topic).toBe("offtopic");
     expect(res.body.redirected).toBe(true);
   });
@@ -184,6 +229,7 @@ describe("POST /api/mistake-photo", () => {
   it("returns 503 when no vision client is configured", async () => {
     const res = await request(app)
       .post("/api/mistake-photo")
+      .field("sessionId", TEST_SESSION_ID)
       .attach("photo", Buffer.from("fake-jpg"), "homework.jpg");
     expect(res.status).toBe(503);
     expect(res.body.error).toMatch(/vision not configured/);
@@ -195,7 +241,7 @@ describe("POST /api/mistake-photo", () => {
     const a = express();
     a.use(express.json({ limit: "1mb" }));
     registerChatRoutes(a, { ...deps, visionClient: makeStubVision() });
-    const res = await request(a).post("/api/mistake-photo").send({});
+    const res = await request(a).post("/api/mistake-photo").send({ sessionId: TEST_SESSION_ID });
     expect(res.status).toBe(400);
   });
 
@@ -213,6 +259,7 @@ describe("POST /api/mistake-photo", () => {
 
     const res = await request(a)
       .post("/api/mistake-photo")
+      .field("sessionId", TEST_SESSION_ID)
       .attach("photo", Buffer.from("fake-jpg"), "homework.jpg");
     expect(res.status).toBe(200);
     expect(res.body.problemText).toBe("2 + 2 = ?");
@@ -224,6 +271,38 @@ describe("POST /api/mistake-photo", () => {
       | { subject: string; problem: string };
     expect(row).toBeDefined();
     expect(row.problem).toBe("2 + 2 = ?");
+  });
+
+  it("does not record a photo result if the session ends during vision analysis", async () => {
+    let markEntered!: () => void;
+    let releaseVision!: (value: any) => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const visionResult = new Promise<any>((resolve) => { releaseVision = resolve; });
+    const a = express();
+    a.use(express.json({ limit: "1mb" }));
+    registerChatRoutes(a, {
+      ...deps,
+      visionClient: {
+        async chat() {
+          markEntered();
+          return visionResult;
+        },
+      },
+    });
+
+    const pending = request(a)
+      .post("/api/mistake-photo")
+      .field("sessionId", TEST_SESSION_ID)
+      .attach("photo", Buffer.from("fake-jpg"), "homework.jpg")
+      .then((response) => response);
+    await entered;
+    db.prepare("UPDATE sessions SET ended_at = ? WHERE id = ?")
+      .run(Date.now(), TEST_SESSION_ID);
+    releaseVision({ content: "题目: 2+2\n思路: 算一算", raw: {} });
+
+    const response = await pending;
+    expect(response.status).toBe(409);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM mistakes").get()).toEqual({ count: 0 });
   });
 });
 

@@ -22,6 +22,7 @@ npm install --prefix server
 bin/study-buddy-server.sh start
 bin/study-buddy-server.sh status
 bin/study-buddy-server.sh logs
+bin/study-buddy-pair.sh          # issue a 6-digit code for one browser
 ```
 
 ## Commands
@@ -35,6 +36,34 @@ bin/study-buddy-server.sh logs
 | `logs [-n N]` | `tail -f` the log file. `logs --error` / `--warn` / `--info` / `--debug` filter by level. |
 | `rotate` | reports the rotation threshold and current files (rotation is automatic). |
 | `env` | prints the resolved paths + .env with secrets masked. |
+
+## Pairing a child browser
+
+The child browser must be paired before it can start, resume, write to, or end
+a learning session. Generate a one-time code on the Mac mini, then enter it in
+the `/buddy/` pairing screen:
+
+```bash
+bin/study-buddy-pair.sh
+```
+
+The code expires after about five minutes and can be redeemed once. The browser
+stores one opaque device credential in local storage; the server stores only
+its SHA-256 digest. Ten failed guesses from one client trigger a five-minute
+lockout. Pairing redemption and authenticated device requests require HTTPS on
+the LAN; plaintext HTTP is accepted only from loopback for local development.
+The browser also refuses to attach its credential to an insecure or cross-origin
+request, and the write app vendors Hanzi Writer locally so remotely served code
+cannot read the origin-wide credential. To revoke every browser for the default
+child and generate a replacement code:
+
+```bash
+bin/study-buddy-pair.sh --reset
+```
+
+Starting a new session supersedes only the same device's active session for the
+same child. Refreshing `/buddy/` resumes that device's active session; it never
+attaches to another device's session.
 
 ## Log format
 
