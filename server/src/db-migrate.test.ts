@@ -264,4 +264,61 @@ describe("migrateSchema", () => {
     expect(count).toBe(0);
     db.close();
   });
+
+  it("widens the #104 learning-attempt-only Source Event table without losing sequence", () => {
+    const db = freshDb();
+    db.exec(`
+      CREATE TABLE source_installation (
+        singleton_id INTEGER PRIMARY KEY,
+        installation_id TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE source_subjects (
+        child_id TEXT PRIMARY KEY,
+        subject_ref TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE source_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        source_product TEXT NOT NULL CHECK (source_product = 'study_buddy'),
+        source_installation_id TEXT NOT NULL,
+        subject_ref TEXT NOT NULL,
+        record_type TEXT NOT NULL CHECK (record_type = 'learning_attempt'),
+        record_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        occurred_at INTEGER NOT NULL,
+        event_type TEXT NOT NULL CHECK (event_type = 'learning_attempt_recorded'),
+        event_schema_version INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO source_installation VALUES (1, 'installation-1', 1);
+      INSERT INTO source_subjects VALUES ('default', 'subject-1', 1);
+      INSERT INTO source_events VALUES (
+        7, 'event-7', 'study_buddy', 'installation-1', 'subject-1',
+        'learning_attempt', 'mistake:7', 1, 7,
+        'learning_attempt_recorded', 1,
+        '{"kind":"learning_attempt"}', 7
+      );
+    `);
+
+    expect(() => (globalThis as any).__migrateSchema(db)).not.toThrow();
+    expect(
+      db.prepare("SELECT seq, record_id FROM source_events").get(),
+    ).toEqual({ seq: 7, record_id: "mistake:7" });
+    expect(() => db.prepare(
+      `INSERT INTO source_events (
+         event_id, source_product, source_installation_id, subject_ref,
+         record_type, record_id, revision, occurred_at, event_type,
+         event_schema_version, payload_json
+       ) VALUES ('event-8', 'study_buddy', 'installation-1', 'subject-1',
+         'learning_session', 'session:8', 1, 8,
+         'source_record_withdrawn', 1, NULL)`,
+    ).run()).not.toThrow();
+    expect(
+      db.prepare("SELECT seq FROM source_events WHERE event_id = 'event-8'").get(),
+    ).toEqual({ seq: 8 });
+    db.close();
+  });
 });

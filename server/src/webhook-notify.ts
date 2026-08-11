@@ -23,6 +23,7 @@
 import { readFile, writeFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { readPendingOutbox, markOutboxProcessed, type OutboxEntry } from "./outbox.js";
+import { assertLegacyWorkerCanRun } from "./legacy-cutover.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -357,6 +358,8 @@ async function writeState(path: string, state: WebhookState): Promise<void> {
  *  --state, --url, --poll-ms from argv. */
 export async function runFromCli(argv: string[]): Promise<number> {
   const args = parseArgs(argv);
+  const cutoverMarker = args["cutover-marker"] ?? "./data/source-feed-cutover.json";
+  await assertLegacyWorkerCanRun(cutoverMarker);
   const outbox = args.outbox ?? "./data/nexus-outbox.jsonl";
   const processed = args.processed ?? outbox + ".processed.jsonl";
   const state = args.state ?? outbox + ".webhook-state.json";
@@ -385,6 +388,7 @@ export async function runFromCli(argv: string[]): Promise<number> {
   // Polling loop
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    await assertLegacyWorkerCanRun(cutoverMarker);
     try {
       const r = await drainOutboxToWebhook({
         outboxPath: outbox,

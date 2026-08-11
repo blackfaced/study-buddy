@@ -22,7 +22,6 @@
 //   - classifyTopic(text)             re-exported (used to live in app.ts)
 //   - registerChatRoutes(app, deps)
 // =====================================================================
-import crypto from "node:crypto";
 import sharp from "sharp";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -33,9 +32,9 @@ import type { Logger } from "../logger.js";
 import type { VisionClient } from "../vision.js";
 import { buildSystemPrompt, buildChatPrompt } from "../llm-prompt.js";
 import { detectNameChange } from "../child-name.js";
-import { parseEmotionTag, detectLoopFromTexts, NOTIFIABLE_EMOTIONS } from "../chat-signal.js";
+import { parseEmotionTag, detectLoopFromTexts } from "../chat-signal.js";
 import { analyzeMistakeImage } from "../vision.js";
-import { appendOutbox } from "../outbox.js";
+import { appendChatTurnSourceEvent } from "../source-events.js";
 import { getOrCreateActiveSession } from "./session.js";
 
 const OFFTOPIC_KEYWORDS = [
@@ -64,7 +63,6 @@ export type CallMinimax = (messages: any[]) => Promise<string>;
 export interface ChatRouteDeps {
   db: Database.Database;
   logger: Logger;
-  outboxPath: string;
   visionClient: VisionClient | null;
   mistakesDir: string;
   /** Multer instance. Same one shared with chat/voice/frame. */
@@ -114,7 +112,7 @@ export async function defaultCallMinimax(messages: any[]): Promise<string> {
 }
 
 export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
-  const { db, logger, outboxPath, visionClient, mistakesDir, upload, callMinimax } = deps;
+  const { db, logger, visionClient, mistakesDir, upload, callMinimax } = deps;
 
   // ============== 摄像头帧 ==============
   app.post("/api/video-mode", (req: Request, res: Response) => {
@@ -202,7 +200,7 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
   // ============== 对话 ==============
   app.post("/api/chat", async (req: Request, res: Response) => {
     const { text, state } = req.body;
-    if (!text || typeof text !== "string") {
+    if (!text || typeof text !== "string" || text.length > 4000) {
       return res.status(400).json({ error: "no text" });
     }
 
@@ -253,51 +251,37 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
     const redirected = topic === "offtopic" && replyTopic !== "offtopic" ? 1 : 0;
     const chatState = state === "done" ? "freechat" : "writing";
 
-    db.prepare(
-      "INSERT INTO chat_turns (session_id, role, content, topic, redirected, state) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(session.id, "child", text, topic, redirected, chatState);
+    try {
+      db.transaction(() => {
+        const occurredAt = Date.now();
+        const childTurn = db.prepare(
+          `INSERT INTO chat_turns
+             (session_id, ts, role, content, topic, redirected, state)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(session.id, occurredAt, "child", text, topic, redirected, chatState);
+        appendChatTurnSourceEvent(db, {
+          turnId: Number(childTurn.lastInsertRowid),
+          sessionId: session.id,
+          childId: session.child_id,
+          occurredAt,
+          role: "child",
+        });
 
-    db.prepare(
-      "INSERT INTO chat_turns (session_id, role, content, topic, redirected, state) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(session.id, "agent", displayReply, replyTopic, 0, chatState);
-
-    const notifyReasons: Array<{ reason: string; summary: string }> = [];
-    if (NOTIFIABLE_EMOTIONS.has(emotion)) {
-      notifyReasons.push({
-        reason: "emotion",
-        summary: `${childName} 情绪是"${emotion}"，刚说："${text.slice(0, 80)}"，小书童回复："${displayReply.slice(0, 80)}"`,
-      });
-    }
-    if (isLoop) {
-      notifyReasons.push({
-        reason: "loop",
-        summary: `${childName} 在同一话题僵持了 ${recentChildTexts.length} 轮，建议家长介入`,
-      });
-    }
-    if (notifyReasons.length > 0) {
-      try {
-        const ts = Date.now();
-        const id = `e_${crypto.randomUUID()}`;
-        await appendOutbox(outboxPath, [{
-          id,
-          ts,
-          kind: "parent_notify",
-          entityId: `child:${session.child_id}`,
-          content: notifyReasons.map((r) => `[${r.reason}] ${r.summary}`).join("\n"),
-          payload: {
-            sessionId: session.id,
-            childId: session.child_id,
-            childName,
-            reasons: notifyReasons,
-            lastChildText: text,
-            lastAgentText: displayReply,
-            ts,
-          },
-        }]);
-        logger.info("parent notify queued", { id, childId: session.child_id, reasons: notifyReasons.map((r) => r.reason) });
-      } catch (e: any) {
-        logger.error("failed to queue parent notify", { error: e?.message });
-      }
+        const agentTurn = db.prepare(
+          `INSERT INTO chat_turns
+             (session_id, ts, role, content, topic, redirected, state)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(session.id, occurredAt, "agent", displayReply, replyTopic, 0, chatState);
+        appendChatTurnSourceEvent(db, {
+          turnId: Number(agentTurn.lastInsertRowid),
+          sessionId: session.id,
+          childId: session.child_id,
+          occurredAt,
+          role: "agent",
+        });
+      })();
+    } catch {
+      return res.status(500).json({ error: "chat turns could not be recorded" });
     }
 
     res.json({

@@ -37,7 +37,7 @@ beforeEach(() => {
 
   app = express();
   app.use(express.json());
-  registerGameRoutes(app, { db, logger: silentLogger(), outboxPath: "/tmp/test-outbox.jsonl" });
+  registerGameRoutes(app, { db, logger: silentLogger() });
 });
 
 function silentLogger() {

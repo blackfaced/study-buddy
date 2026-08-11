@@ -64,11 +64,27 @@ Event logs are domain-specific (`session started`, `frame sharp error`, etc.) an
 | `STUDY_DB` | `data/study.db` | absolute path preferred. |
 | `SSL_KEY` / `SSL_CERT` | `server.key` / `server.cert` (project root) | self-signed. If either is missing, the server falls back to plain HTTP. |
 | `MINIMAX_API_KEY` | — | required for `/api/mistake-photo`. Without it, the endpoint returns 503. |
-| `INTEGRATION_API_TOKEN` | — | independent high-entropy Bearer token for the loopback-only `GET /api/integration/source-events` provider feed. Do not reuse `BUDDY_PIN`; when unset, the feed stays unauthorized. |
+| `INTEGRATION_API_TOKEN` | — | independent high-entropy Bearer token for the loopback-only Source Event feed and bounded chat-turn retrieval API. Do not reuse `BUDDY_PIN`; when unset, both stay unauthorized. |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_DIR` | `data/logs` | |
 | `LOG_FILE` | `$LOG_DIR/study-buddy-server.log` | |
 | `LOG_MAX_BYTES` | `5242880` (5MB) | rotation threshold |
+
+## Provider integration cutover
+
+The active integration boundary is the SQLite-backed provider feed:
+
+- `GET /api/integration/source-events?after=0&limit=50&schemaVersion=1`
+- `POST /api/integration/chat-turns` with explicit `sessionRef`, `turnRefs`, and a window no wider than 14 days
+
+Both endpoints require `Authorization: Bearer $INTEGRATION_API_TOKEN` and reject non-loopback callers. Before enabling the cutover, inventory legacy JSONL without mutating or uploading it:
+
+```bash
+bin/source-feed-cutover.sh inventory
+bin/source-feed-cutover.sh enable
+```
+
+`enable` is a coordinated release gate: it refuses while the legacy worker is running. Once enabled, `bin/nexus-worker.sh start` and `once` refuse to deliver; legacy JSONL remains untouched for the paired Adapter migration.
 
 ## Upgrading to a system service (when you need it)
 

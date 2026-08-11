@@ -22,6 +22,7 @@ import { createHmac } from "node:crypto";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { readPendingOutbox, markOutboxProcessed, type OutboxEntry } from "./outbox.js";
+import { assertLegacyWorkerCanRun } from "./legacy-cutover.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -350,6 +351,8 @@ async function writeState(path: string, state: WebhookState): Promise<void> {
 
 export async function runFromCli(argv: string[]): Promise<number> {
   const args = parseArgs(argv);
+  const cutoverMarker = args["cutover-marker"] ?? "./data/source-feed-cutover.json";
+  await assertLegacyWorkerCanRun(cutoverMarker);
   const outbox = args.outbox ?? "./data/nexus-outbox.jsonl";
   const processed = args.processed ?? outbox + ".feishu-processed.jsonl";
   const state = args.state ?? outbox + ".feishu-state.json";
@@ -379,6 +382,7 @@ export async function runFromCli(argv: string[]): Promise<number> {
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    await assertLegacyWorkerCanRun(cutoverMarker);
     try {
       const r = await drainOutboxToFeishu({
         outboxPath: outbox,

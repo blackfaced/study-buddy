@@ -11,7 +11,11 @@ const markerPath = process.env.SOURCE_FEED_CUTOVER_MARKER ??
   join(root, "data/source-feed-cutover.json");
 const workerPidPaths = [
   process.env.NEXUS_PIDFILE ?? join(root, "server/data/nexus-worker.pid"),
+  process.env.FEISHU_PIDFILE ?? join(root, "server/data/feishu-notify.pid"),
+  process.env.WEBHOOK_PIDFILE ?? join(root, "server/data/webhook-notify.pid"),
   join(root, "data/nexus-worker.pid"),
+  join(root, "data/feishu-notify.pid"),
+  join(root, "data/webhook-notify.pid"),
 ];
 const defaultLegacyFiles = [
   join(root, "server/data/nexus-outbox.jsonl"),

@@ -2,9 +2,8 @@
 //
 // Game-side mistake ingestion + aggregation for the study-buddy platform.
 // Each app (currently: candy-math-island) POSTs a mistake here; we persist
-// it into the shared mistakes table (with source='game') and append the
-// same payload to the outbox so the loose-coupled Nexus worker can
-// index it asynchronously.
+// it into the shared mistakes table (with source='game') and commit a
+// provider-owned Source Event in the same SQLite transaction.
 //
 // Also exposes getGameWeakTopics, which the agent and the apps use to
 // look at the child's recent weak areas in the game-specific stream
@@ -12,7 +11,10 @@
 // language error_type bucket).
 
 import { randomUUID } from "node:crypto";
-import { appendOutbox, type OutboxEntry } from "./outbox.js";
+import {
+  appendLearningAttemptSourceEvent,
+  appendLearningSessionSourceEvent,
+} from "./source-events.js";
 
 export interface GameMistakeInput {
   childId: string;
@@ -51,58 +53,44 @@ export interface GameDailyStat {
 /**
  * Record a mistake from a game. Persists it as a mistakes row with
  * source='game' and an active session (auto-created if none exists).
- * Also appends a math_mistake entry to the outbox for the Nexus worker.
+ * Also commits a learning-attempt Source Event atomically.
  * Returns the inserted mistake id.
  */
 export async function recordGameMistake(
   db: import("better-sqlite3").Database,
-  outboxPath: string,
   input: GameMistakeInput,
 ): Promise<number> {
-  const sessionId = ensureActiveSession(db, input.childId);
-  const result = db
-    .prepare(
+  return db.transaction(() => {
+    const sessionId = ensureActiveSession(db, input.childId);
+    const occurredAt = Date.now();
+    const result = db.prepare(
       `INSERT INTO mistakes
-         (session_id, subject, problem, error_type, user_answer, correct_answer, source)
-       VALUES (?, ?, ?, ?, ?, ?, 'game')`
-    )
-    .run(
+         (session_id, child_id, ts, subject, problem, error_type,
+          user_answer, correct_answer, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'game')`,
+    ).run(
       sessionId,
+      input.childId,
+      occurredAt,
       input.subject,
       input.problem,
       input.errorType,
       String(input.userAnswer),
       String(input.correctAnswer),
     );
-  const id = Number(result.lastInsertRowid);
-
-  // Append to the outbox so the Nexus worker can index it without
-  // blocking this request. Failure to write the outbox is best-effort
-  // — we don't want a stuck disk to fail a mistake save.
-  try {
-    const entry: OutboxEntry = {
-      id: "e_" + randomUUID(),
-      ts: Date.now(),
-      kind: "math_mistake",
-      entityId: childEntityId(input.childId),
-      payload: {
-        subject: input.subject,
-        problem: input.problem,
-        errorType: input.errorType,
-        userAnswer: input.userAnswer,
-        correctAnswer: input.correctAnswer,
-        level: input.level,
-        source: "game",
-        mistakeId: id,
-      },
-    };
-    await appendOutbox(outboxPath, [entry]);
-  } catch {
-    /* outbox write failure is non-fatal — the SQLite row is the
-     * source of truth; the worker can be backfilled later. */
-  }
-
-  return id;
+    const id = Number(result.lastInsertRowid);
+    appendLearningAttemptSourceEvent(db, {
+      mistakeId: id,
+      childId: input.childId,
+      occurredAt,
+      problem: input.problem,
+      submittedAnswer: String(input.userAnswer),
+      expectedAnswer: String(input.correctAnswer),
+      mistakeType: input.errorType,
+      source: "game",
+    });
+    return id;
+  })();
 }
 
 /**
@@ -144,14 +132,13 @@ function ensureActiveSession(db: import("better-sqlite3").Database, childId: str
 /**
  * Record a finished game session (v0.6 time-mode). Persists the summary
  * (totalQuestions, correctCount, duration) to `game_sessions` and
- * appends a `game-session` entry to the outbox for Nexus indexing.
+ * commits a learning-session Source Event atomically.
  *
  * Throws on totalQuestions <= 0 (a session with no questions is almost
  * always a client bug or a child who closed the tab immediately).
  */
 export async function recordGameSession(
   db: import("better-sqlite3").Database,
-  outboxPath: string,
   input: GameSessionInput,
 ): Promise<number> {
   if (input.totalQuestions <= 0) {
@@ -170,13 +157,12 @@ export async function recordGameSession(
     throw new Error(`recordGameSession: child '${input.childId}' not found`);
   }
 
-  const result = db
-    .prepare(
+  return db.transaction(() => {
+    const result = db.prepare(
       `INSERT INTO game_sessions
          (child_id, app_id, duration_sec, total_questions, correct_count, started_at, ended_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
       input.childId,
       input.appId,
       input.durationSec,
@@ -185,32 +171,26 @@ export async function recordGameSession(
       input.startedAt,
       input.endedAt,
     );
-  const id = Number(result.lastInsertRowid);
-
-  // Best-effort outbox append; the SQLite row is the source of truth.
-  try {
-    const entry: OutboxEntry = {
-      id: "e_" + randomUUID(),
-      ts: Date.now(),
-      kind: "game-session",
-      entityId: childEntityId(input.childId),
+    const id = Number(result.lastInsertRowid);
+    appendLearningSessionSourceEvent(db, {
+      recordId: `game_session:${id}`,
+      childId: input.childId,
+      occurredAt: input.endedAt,
+      revision: 1,
+      eventType: "learning_session_completed",
       payload: {
+        kind: "learning_session",
+        sessionKind: "game",
         appId: input.appId,
-        durationSec: input.durationSec,
-        totalQuestions: input.totalQuestions,
-        correctCount: input.correctCount,
-        correctRate: Math.round((input.correctCount / input.totalQuestions) * 100),
         startedAt: input.startedAt,
         endedAt: input.endedAt,
-        sessionId: id,
+        durationMinutes: Math.max(1, Math.round(input.durationSec / 60)),
+        totalQuestions: input.totalQuestions,
+        correctCount: input.correctCount,
       },
-    };
-    await appendOutbox(outboxPath, [entry]);
-  } catch {
-    /* non-fatal */
-  }
-
-  return id;
+    });
+    return id;
+  })();
 }
 
 /**
@@ -275,8 +255,4 @@ export async function getGameDailyStats(
         ? Math.round((r.correctCount / r.totalQuestions) * 100)
         : 0,
   }));
-}
-
-function childEntityId(childId: string): string {
-  return `child:${childId}`;
 }

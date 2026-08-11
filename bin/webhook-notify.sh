@@ -35,6 +35,7 @@ POLL_MS="${WEBHOOK_POLL_MS:-30000}"
 STATE="${WEBHOOK_STATE:-$ROOT/server/data/nexus-outbox.webhook-state.json}"
 PROCESSED="${WEBHOOK_PROCESSED:-$ROOT/server/data/nexus-outbox.webhook-processed.jsonl}"
 URL="${DINGTALK_WEBHOOK_URL:-}"
+CUTOVER_MARKER="${SOURCE_FEED_CUTOVER_MARKER:-$ROOT/data/source-feed-cutover.json}"
 
 # The actual worker is a small tsx script. We keep the script tiny so
 # it can be re-run / hot-swapped without restarting the daemon.
@@ -75,6 +76,7 @@ cmd_start() {
     --processed "$PROCESSED" \
     --state "$STATE" \
     --url "$URL" \
+    --cutover-marker "$CUTOVER_MARKER" \
     --poll-ms "$POLL_MS" \
     > "$LOGFILE" 2>&1 &
   local pid=$!
@@ -140,7 +142,8 @@ cmd_once() {
     --outbox "$OUTBOX" \
     --processed "$PROCESSED" \
     --state "$STATE" \
-    --url "$URL"
+    --url "$URL" \
+    --cutover-marker "$CUTOVER_MARKER"
 }
 
 cmd_env() {
@@ -152,6 +155,7 @@ cmd_env() {
   printf "  PIDFILE=%s\n" "$PIDFILE"
   printf "  LOGFILE=%s\n" "$LOGFILE"
   printf "  POLL_MS=%s\n" "$POLL_MS"
+  printf "  CUTOVER_MARKER=%s\n" "$CUTOVER_MARKER"
   printf "  WORKER=%s\n" "$WORKER"
   if [[ -n "$URL" ]]; then
     printf "  URL=%s...\n" "${URL:0:50}"

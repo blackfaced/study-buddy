@@ -13,8 +13,8 @@ study-buddy/
 ├── server/          # Node.js + TypeScript HTTP server (iPad/safari client)
 ├── web/             # static HTML (portal + chat + camera UI, served by server/)
 │   └── games/       # hung apps (v0.5b+); first: candy-math-island/
-├── data/            # SQLite (study.db) + logs/ + nexus-outbox.jsonl
-├── bin/             # process control scripts (study-buddy-server.sh, nexus-worker.sh)
+├── data/            # SQLite (study.db) + logs/ + preserved legacy JSONL
+├── bin/             # server control + guarded source-feed cutover scripts
 └── docs/            # engineering skill docs + apps.md (platform architecture)
 ```
 
@@ -29,16 +29,14 @@ bin/study-buddy-server.sh logs    # tail -f data/logs/study-buddy-server.log
 bin/study-buddy-server.sh stop    # SIGTERM → 5s → SIGKILL
 ```
 
-The Memory Nexus outbox worker is managed by `bin/nexus-worker.sh` (same shape):
+Legacy JSONL is migration input only. Inventory it before a coordinated source-feed cutover:
 
 ```bash
-bin/nexus-worker.sh start   # background drain loop (default 30s poll)
-bin/nexus-worker.sh once    # single drain pass (suitable for mavis cron)
-bin/nexus-worker.sh logs    # tail -f data/logs/nexus-worker.log
-bin/nexus-worker.sh stop    # SIGTERM → 5s → SIGKILL
+bin/source-feed-cutover.sh inventory
+bin/source-feed-cutover.sh enable
 ```
 
-Logs go to `data/logs/study-buddy-server.log` and `data/logs/nexus-worker.log` (5MB rotation, 3 generations kept). One JSON-meta line per request: `INFO request {"method":"GET","path":"/api/pair","status":200,"durationMs":0.4,...}`. Status → level mapping: 2xx/3xx → info, 4xx → warn, 5xx → error.
+Server logs go to `data/logs/study-buddy-server.log` (5MB rotation, 3 generations kept). One JSON-meta line per request: `INFO request {"method":"GET","path":"/api/pair","status":200,"durationMs":0.4,...}`. Status → level mapping: 2xx/3xx → info, 4xx → warn, 5xx → error.
 
 The mcp-server is a child of the mavis daemon (`mavis mcp add`); don't manage it from the script. See `docs/deploy.md` for the full reference, env vars, and a launchd plist for boot-time start.
 
@@ -49,7 +47,7 @@ study-buddy is a **hub**: one shared backend (HTTP server + mcp-server + SQLite)
 - **Apps registry** (`server/src/app.ts → APPS` const) is the single source of truth. `GET /api/apps` returns it; the mcp-server tool `get_apps` fetches it via HTTP (with a static fallback when the HTTP server is down).
 - **Shared mistake ledger**: the `mistakes` table has a `source` column (`study-buddy` / `vision` / `game`) so all apps contribute to the same wrong-answer pool that `get_weak_topics` queries.
 - **Two-way game sync** (game ↔ server) is in `server/src/game-sync.ts` + `web/games/<app>/...`. Auto-creates a session if none is active; syncs on `onload` / `pagehide` / `visibilitychange`.
-- **Memory Nexus integration is loose-coupled**: study-buddy appends to `data/nexus-outbox.jsonl`, a separate `nexus-worker` process drains it. study-buddy never blocks on Nexus.
+- **External integration is provider-owned and loose-coupled**: eligible domain rows and immutable `source_events` commit in one SQLite transaction. Authenticated loopback APIs expose monotonic pages and bounded chat turns; consumers own cursors and delivery.
 - **mcp-server db refactor** (`mcp-server/src/db.ts`): `initDb(path)` + `getDb()` + `db` Proxy so tests can use `:memory:` without touching the real file. `handleTool` is in `tools.ts` so tests don't trigger the stdio transport.
 
 For the full platform design (data flow, code layout, "how to add a new app"), see **`docs/apps.md`**.
@@ -58,7 +56,7 @@ For the full platform design (data flow, code layout, "how to add a new app"), s
 
 - **No gamification in v0.1.** No stars, badges, encouragement animations, progress bars, or focus timers visible to the kid. The HTTP server is allowed to log/compute scores, but nothing kid-facing should display them.
 - **Apps are HTML under `web/<app-dir>/`.** No new monorepo workspace, no separate npm packages. Share backend code via HTTP endpoints, not via a shared `src/` TypeScript package (YAGNI).
-- **Loose coupling for external services.** study-buddy writes to an outbox file; a separate worker drains it. The main path never blocks on Memory Nexus (or any future external service).
+- **Loose coupling for external services.** Write Study Buddy concepts to the transactional Source feed. Keep consumer credentials, acknowledgements, retries, and MemoryNexus concepts outside this repository's domain path.
 - **Prefer integration with Mavis over standalone UIs.** Schedule reports via mavis cron; build interactive surfaces as Mavis skills / MCP tools; use the existing Mavis IM channel for parent notifications. Don't add a separate parent dashboard, email digest, or PWA shell unless the user asks.
 - **Run minimal, iterate from real use.** Don't pre-build v0.5 (VLM photo help, etc.) until the user signals the v0.1 has settled. Same for v0.6+ — wait for v0.5b to be actually used.
 - **Multi-process SQLite = WAL.** mcp-server (stdio) and server (HTTP) both read/write `data/study.db`; both open it with `journal_mode = WAL`. Schema changes must be applied to every process at startup (idempotent `ALTER ... ADD COLUMN` with try/catch).

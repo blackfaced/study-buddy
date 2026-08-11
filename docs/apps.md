@@ -66,42 +66,31 @@ app.get("/api/apps", (req, res) => res.json({ apps: APPS }));
 1. 糖果口算岛打错题 → push 到 `wrongList`，每条标 `syncedToServer: false`
 2. `syncToStudyBuddy()` 遍历未同步的，POST 到 `/api/game/mistake`
 3. 触发时机：`onload` + `pagehide` + `visibilitychange === 'hidden'`
-4. 服务端 `recordGameMistake()` 自动找/建 session，插 mistakes(source='game')，并把错题摘要 append 到 outbox
+4. 服务端插入 `mistakes(source='game')`，并在同一 SQLite 事务里追加不可变 Source Event
 5. 4xx/5xx 也标 `syncedToServer: true`（避免无限重试），仅网络错误才重试
 
 **study-buddy → game**：
 - `GET /api/game/weak-topics?days=7` 按 (subject, errorType) 聚合，game 端可以据此调整下一关难度
 - 当前糖果口算岛还是固定难度，预留接口
 
-### 4. Memory Nexus 接入：本地 outbox 文件
+### 4. 外部适配器接入：事务型 Source Event feed
 
-study-buddy 跟 Memory Nexus 是**松耦合**：
+study-buddy 跟 MemoryNexus 等外部消费者保持**产品边界上的松耦合**：
 
-- study-buddy 只 append 到 `data/nexus-outbox.jsonl` (JSONL，每行一个 OutboxEntry)
-- 独立的 `nexus-worker` 进程（或未来 mavis cron）从 outbox 读条目，调 Nexus API
-- study-buddy 永远不阻塞在 Nexus 上 — Nexus 挂掉不影响主流程
-- worker 处理完的条目 atomic rename 到 `data/nexus-outbox.processed.jsonl`（tmp + rename 模式，进程崩了也不丢）
+- eligible domain row 和 `source_events` 在同一 SQLite 事务提交；消费者停机不影响孩子继续使用
+- `GET /api/integration/source-events` 是带独立 Bearer token、仅 loopback 可访问的单调游标 feed
+- Learning Attempt、Learning Session 和 Chat Turn 使用 Study Buddy 自己的稳定身份、revision 和 withdrawal 语义
+- Chat Source Event 只带 `sessionRef` / `turnRef`；正文只能通过 `POST /api/integration/chat-turns` 在 14 天以内、最多 50 个明确引用的窗口中读取
+- feed 不保存消费者 cursor/ack，也不包含 MemoryNexus Space、Namespace、token 或标准化结果字段
 
-**Outbox 格式**（`server/src/outbox.ts`）：
-```ts
-interface OutboxEntry {
-  id: string;         // uuid
-  ts: number;         // unix ms
-  kind: string;       // e.g. "game-mistake"
-  entityId: string;   // e.g. "default"
-  content?: string;   // 预渲染的文本（可选）
-  payload: Record<string, unknown>;
-}
-```
+旧 `nexus-outbox*.jsonl` 仅作为迁移输入保留，应用不再向其写入。先做只读盘点，再与外部 Adapter 协调切换：
 
-**Worker 启动**：
 ```bash
-bin/nexus-worker.sh start   # 后台循环（默认 30s 轮询）
-bin/nexus-worker.sh once    # 单次 drain（适合 mavis cron）
-bin/nexus-worker.sh logs    # tail -f data/logs/nexus-worker.log
+bin/source-feed-cutover.sh inventory
+bin/source-feed-cutover.sh enable
 ```
 
-**Worker tag**：用 `kind:entityId` 拼成 tag 字符串，Nexus `failOn` 可以用同样的 pattern 跳过重复。
+`enable` 会在旧 worker 仍存活或旧 producer 仍启用时拒绝执行；成功后旧 `nexus-worker` 的 daemon/one-shot 路径都会硬失败。JSONL 文件不会自动上传、改写或删除。
 
 ### 5. mcp-server db.ts 现在支持测试 initDb
 
@@ -142,12 +131,13 @@ beforeAll(() => {
 
 - ❌ 不在 `web/apps/` 单独放一个空目录占位（app 跟 server 一起演进）
 - ❌ 不把每个 app 拆成独立 npm package / monorepo workspace（YAGNI）
-- ❌ 不搞复杂的 app 间消息总线（HTTP 端点 + outbox 文件就够）
+- ❌ 不搞复杂的 app 间消息总线（HTTP + SQLite Source Event feed 足够）
 - ❌ 不在 kid 端加任何"app 切换器"的视觉装饰（保持 v0.1 极简）
 
 ## 演进路径
 
-- **v0.5b (现在)**：apps registry + 1 个游戏 + Nexus outbox 雏形
+- **v0.5b**：apps registry + 1 个游戏 + legacy Nexus outbox
+- **v0.10 (现在)**：事务型 provider Source Event feed + 有界 chat retrieval
 - **v0.6**：游戏进度持久化（关卡/分数/成就）+ 错题回看 UI + agent 主动"拍给我看"
 - **v0.7+**：第二个 app（生字卡 / 单词卡），验证架构可扩展
 - **v1.0**：Mavis cloud 接管部分功能（家长端 dashboard 走 mavis IM，agent 推理走云端 LLM）

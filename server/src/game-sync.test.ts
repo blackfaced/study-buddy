@@ -1,21 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import Database from "better-sqlite3";
 import { migrateSchema } from "./db-migrate.js";
-import { appendOutbox, readPendingOutbox } from "./outbox.js";
 import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
 
 let db: Database.Database;
-let outboxPath: string;
 
 beforeEach(() => {
   db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   migrateSchema(db);
-  // default child is created by migrateSchema
-  outboxPath = join(mkdtempSync(join(tmpdir(), "gamesync-")), "outbox.jsonl");
 });
 
 afterEach(() => {
@@ -24,7 +17,7 @@ afterEach(() => {
 
 describe("recordGameMistake", () => {
   it("inserts a row into mistakes with source='game' and the user/correct answers", async () => {
-    const id = await recordGameMistake(db, outboxPath, {
+    const id = await recordGameMistake(db, {
       childId: "default",
       subject: "math",
       problem: "5 + 7 = ?",
@@ -52,7 +45,7 @@ describe("recordGameMistake", () => {
 
   it("auto-creates a session when none is active", async () => {
     // No start_session call; recordGameMistake should create one transparently.
-    const id = await recordGameMistake(db, outboxPath, {
+    const id = await recordGameMistake(db, {
       childId: "default",
       subject: "math",
       problem: "5 + 7 = ?",
@@ -72,8 +65,8 @@ describe("recordGameMistake", () => {
     expect(sess.ended_at).toBeNull();
   });
 
-  it("appends an outbox entry tagged kind='math_mistake' with the same payload", async () => {
-    await recordGameMistake(db, outboxPath, {
+  it("commits a learning-attempt Source Event with the domain row", async () => {
+    const id = await recordGameMistake(db, {
       childId: "default",
       subject: "math",
       problem: "5 + 7 = ?",
@@ -82,34 +75,32 @@ describe("recordGameMistake", () => {
       correctAnswer: 12,
       level: 1,
     });
-    const entries = await readPendingOutbox(outboxPath);
-    expect(entries).toHaveLength(1);
-    const e = entries[0];
-    expect(e.kind).toBe("math_mistake");
-    expect(e.entityId).toBe("child:default");
-    expect(e.payload).toMatchObject({
-      subject: "math",
+    const event = db.prepare(
+      "SELECT record_type, record_id, revision, payload_json FROM source_events",
+    ).get() as any;
+    expect(event.record_type).toBe("learning_attempt");
+    expect(event.record_id).toBe(`mistake:${id}`);
+    expect(event.revision).toBe(1);
+    expect(JSON.parse(event.payload_json)).toMatchObject({
+      kind: "learning_attempt",
       problem: "5 + 7 = ?",
-      errorType: "carry",
-      userAnswer: 11,
-      correctAnswer: 12,
-      level: 1,
+      mistakeType: "carry",
+      submittedAnswer: "11",
+      expectedAnswer: "12",
       source: "game",
     });
-    expect(typeof e.ts).toBe("number");
-    expect(e.id).toMatch(/^e_/);
   });
 });
 
 describe("getGameWeakTopics", () => {
   async function seedMistakes() {
     // 3 carry, 1 borrow, 2 compute
-    await recordGameMistake(db, outboxPath, mk("5+7", "carry", 1));
-    await recordGameMistake(db, outboxPath, mk("8+6", "carry", 1));
-    await recordGameMistake(db, outboxPath, mk("9+4", "carry", 1));
-    await recordGameMistake(db, outboxPath, mk("15-8", "borrow", 1));
-    await recordGameMistake(db, outboxPath, mk("11-3", "compute", 1));
-    await recordGameMistake(db, outboxPath, mk("12-5", "compute", 1));
+    await recordGameMistake(db, mk("5+7", "carry", 1));
+    await recordGameMistake(db, mk("8+6", "carry", 1));
+    await recordGameMistake(db, mk("9+4", "carry", 1));
+    await recordGameMistake(db, mk("15-8", "borrow", 1));
+    await recordGameMistake(db, mk("11-3", "compute", 1));
+    await recordGameMistake(db, mk("12-5", "compute", 1));
     function mk(problem: string, errorType: string, level: number) {
       return {
         childId: "default",
@@ -125,7 +116,7 @@ describe("getGameWeakTopics", () => {
 
   it("only counts mistakes with source='game' (not vision or study-buddy)", async () => {
     // 1 game mistake
-    await recordGameMistake(db, outboxPath, {
+    await recordGameMistake(db, {
       childId: "default",
       subject: "math",
       problem: "5+7",
@@ -180,7 +171,7 @@ describe("recordGameSession", () => {
   it("inserts a row into game_sessions with the summary stats", async () => {
     const startedAt = Date.now() - 60_000;
     const endedAt = Date.now();
-    const id = await recordGameSession(db, outboxPath, {
+    const id = await recordGameSession(db, {
       childId: "default",
       appId: "candy-math-island",
       durationSec: 60,
@@ -204,8 +195,8 @@ describe("recordGameSession", () => {
     expect(row.ended_at).toBe(endedAt);
   });
 
-  it("appends a game-session entry to the outbox for the Nexus worker", async () => {
-    await recordGameSession(db, outboxPath, {
+  it("commits a game learning-session Source Event", async () => {
+    const id = await recordGameSession(db, {
       childId: "default",
       appId: "candy-math-island",
       durationSec: 60,
@@ -214,18 +205,24 @@ describe("recordGameSession", () => {
       startedAt: Date.now() - 60_000,
       endedAt: Date.now(),
     });
-    const pending = await readPendingOutbox(outboxPath);
-    expect(pending).toHaveLength(1);
-    expect(pending[0].kind).toBe("game-session");
-    expect(pending[0].entityId).toBe("child:default");
-    expect((pending[0].payload as any).appId).toBe("candy-math-island");
-    expect((pending[0].payload as any).totalQuestions).toBe(5);
-    expect((pending[0].payload as any).correctCount).toBe(4);
+    const event = db.prepare(
+      "SELECT record_type, record_id, event_type, payload_json FROM source_events",
+    ).get() as any;
+    expect(event.record_type).toBe("learning_session");
+    expect(event.record_id).toBe(`game_session:${id}`);
+    expect(event.event_type).toBe("learning_session_completed");
+    expect(JSON.parse(event.payload_json)).toMatchObject({
+      kind: "learning_session",
+      sessionKind: "game",
+      appId: "candy-math-island",
+      totalQuestions: 5,
+      correctCount: 4,
+    });
   });
 
   it("rejects a session with totalQuestions=0 (nothing to record)", async () => {
     await expect(
-      recordGameSession(db, outboxPath, {
+      recordGameSession(db, {
         childId: "default",
         appId: "candy-math-island",
         durationSec: 60,
@@ -306,4 +303,3 @@ describe("getGameDailyStats", () => {
 
 // Reference the import so it isn't tree-shaken; the outbox module is used
 // by the worker, but having the import visible here documents the dependency.
-void appendOutbox;

@@ -317,4 +317,32 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
     expect(sequences).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
     expect(new Set(sequences).size).toBe(20);
   });
+
+  it("fails explicitly when a stored record violates the supported contract", async () => {
+    await recordAttempt("valid-before-malformed");
+    db.pragma("ignore_check_constraints = ON");
+    const source = db.prepare(
+      `SELECT source_installation_id, subject_ref FROM source_events LIMIT 1`,
+    ).get() as { source_installation_id: string; subject_ref: string };
+    db.prepare(
+      `INSERT INTO source_events (
+         event_id, source_product, source_installation_id, subject_ref,
+         record_type, record_id, revision, occurred_at, event_type,
+         event_schema_version, payload_json
+       ) VALUES (?, 'study_buddy', ?, ?, 'learning_session', ?, 1, ?,
+         'learning_session_completed', 2, ?)`,
+    ).run(
+      "malformed-event",
+      source.source_installation_id,
+      source.subject_ref,
+      "session:malformed",
+      Date.now(),
+      JSON.stringify({ kind: "learning_session" }),
+    );
+    db.pragma("ignore_check_constraints = OFF");
+
+    const response = await feed();
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: "source event contract violation" });
+  });
 });

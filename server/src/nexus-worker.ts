@@ -108,6 +108,7 @@ export async function runFromCli(argv: string[]): Promise<number> {
   // eslint-disable-next-line no-console
   console.log(`[nexus-worker] polling ${args.outbox} every ${args.pollMs}ms`);
   for (;;) {
+    await assertLegacyWorkerCanRun(args.cutoverMarker);
     try {
       const r = await drainOutbox({
         nexus,

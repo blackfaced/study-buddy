@@ -20,7 +20,12 @@ import { registerPortalRoutes } from "./routes/portal.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerBuddyRoutes } from "./routes/buddy.js";
 import { registerSessionRoutes } from "./routes/session.js";
-import { registerChatRoutes, defaultCallMinimax, classifyTopic } from "./routes/chat.js";
+import {
+  registerChatRoutes,
+  defaultCallMinimax,
+  classifyTopic,
+  type CallMinimax,
+} from "./routes/chat.js";
 import { registerGameRoutes } from "./routes/game.js";
 import { registerWriteRoutes } from "./routes/write.js";
 import { registerWhoamiRoutes } from "./routes/whoami.js";
@@ -41,7 +46,7 @@ export interface AppOptions {
   visionClient?: VisionClient | null;
   /** Directory where mistake photos are written. */
   mistakesDir?: string;
-  /** Path to the Memory Nexus outbox JSONL. */
+  /** @deprecated Compatibility-only; active request paths no longer write JSONL. */
   outboxPath?: string;
   /** Logger used for request access logs and event logs. Defaults to a stdout logger. */
   logger?: Logger;
@@ -51,6 +56,8 @@ export interface AppOptions {
   integrationToken?: string | null;
   /** Test seam for the socket-level loopback policy. */
   integrationLoopbackCheck?: (req: Request) => boolean;
+  /** Test seam for chat completion; production defaults to MiniMax. */
+  callMinimax?: CallMinimax;
 }
 
 const OFFTOPIC_KEYWORDS = [
@@ -75,9 +82,6 @@ export function createApp(opts: AppOptions): express.Express {
     /* read-only fs in tests; we'll let writes fail loudly there */
   }
   const logger: Logger = opts.logger ?? createLogger({ level: "info", sinks: [stdoutSink] });
-  const outboxPath =
-    opts.outboxPath ?? resolve(process.cwd(), "data/nexus-outbox.jsonl");
-
   // 4-digit PIN gate for /buddy/ chat (issue #55). When BUDDY_PIN is
   // unset, the lock is open (dev mode); log a single warning so the
   // deploy is loud, not silent.
@@ -111,16 +115,15 @@ export function createApp(opts: AppOptions): express.Express {
   registerChatRoutes(app, {
     db,
     logger,
-    outboxPath,
     visionClient: opts.visionClient === undefined ? null : opts.visionClient,
     mistakesDir,
     upload,
-    callMinimax: defaultCallMinimax,
+    callMinimax: opts.callMinimax ?? defaultCallMinimax,
   });
 
   // Game + write + extract routes
   // (refactor PR 5). The rest of app.ts is glue + re-exports.
-  registerGameRoutes(app, { db, logger, outboxPath });
+  registerGameRoutes(app, { db, logger });
   registerWriteRoutes(app, {
     db,
     logger,

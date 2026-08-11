@@ -56,7 +56,6 @@ beforeEach(() => {
   deps = {
     db,
     logger: silentLogger(),
-    outboxPath: join(mistakesDir, "outbox.jsonl"),
     visionClient: null,  // by default; tests opt in
     mistakesDir,
     upload,

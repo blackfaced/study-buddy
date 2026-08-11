@@ -22,7 +22,7 @@
 // own tests (game-sync.test.ts).
 //
 // Public API:
-//   - registerGameRoutes(app, { db, logger, outboxPath })
+//   - registerGameRoutes(app, { db, logger })
 // =====================================================================
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
@@ -32,11 +32,10 @@ import { getGameWeakTopics, recordGameSession, getGameDailyStats } from "../game
 export interface GameRouteDeps {
   db: Database.Database;
   logger: Logger;
-  outboxPath: string;
 }
 
 export function registerGameRoutes(app: Express, deps: GameRouteDeps): void {
-  const { db, logger, outboxPath } = deps;
+  const { db, logger } = deps;
 
   // NOTE: POST /api/game/mistake moved to ./mistake-api.ts (T1 of #34).
 
@@ -69,7 +68,7 @@ export function registerGameRoutes(app: Express, deps: GameRouteDeps): void {
       return res.status(400).json({ error: "missing or invalid fields" });
     }
     try {
-      const id = await recordGameSession(db, outboxPath, {
+      const id = await recordGameSession(db, {
         childId, appId, durationSec,
         totalQuestions, correctCount,
         startedAt, endedAt,

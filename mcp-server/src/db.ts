@@ -11,6 +11,26 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
+const SOURCE_EVENTS_TABLE_SQL = `
+  CREATE TABLE source_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    source_product TEXT NOT NULL CHECK (source_product = 'study_buddy'),
+    source_installation_id TEXT NOT NULL,
+    subject_ref TEXT NOT NULL,
+    record_type TEXT NOT NULL CHECK (record_type IN ('learning_attempt', 'learning_session', 'chat_turn')),
+    record_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    occurred_at INTEGER NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('learning_attempt_recorded', 'learning_session_completed', 'source_record_corrected', 'source_record_withdrawn', 'chat_turn_recorded')),
+    event_schema_version INTEGER NOT NULL CHECK (event_schema_version = 1),
+    payload_json TEXT CHECK (payload_json IS NULL OR (json_valid(payload_json) AND length(payload_json) <= 4096)),
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    UNIQUE (record_type, record_id, revision),
+    FOREIGN KEY (source_installation_id) REFERENCES source_installation(installation_id) ON DELETE RESTRICT,
+    FOREIGN KEY (subject_ref) REFERENCES source_subjects(subject_ref) ON DELETE RESTRICT
+  )`;
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // 解析 <repo>/data/study.db，与部署路径无关（之前硬编码 /Users/mac/study-buddy/...）
 const DEFAULT_DB_PATH = process.env.STUDY_DB || resolve(__dirname, "..", "..", "data", "study.db");
@@ -64,6 +84,8 @@ function runMigrations(inst: Database.Database) {
     "ALTER TABLE chat_turns ADD COLUMN state TEXT DEFAULT 'writing'",
     "ALTER TABLE mistakes ADD COLUMN hint TEXT",
     "ALTER TABLE sessions ADD COLUMN writing_turns INTEGER DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN source_withdrawn_at INTEGER",
     // v0.5: vision-mistake columns
     "ALTER TABLE mistakes ADD COLUMN image_path TEXT",
     "ALTER TABLE mistakes ADD COLUMN vision_input TEXT",
@@ -88,6 +110,8 @@ function runMigrations(inst: Database.Database) {
     try { inst.exec(sql); } catch { /* column already exists */ }
   }
 
+  widenSourceEventVocabulary(inst);
+
   // 初始化 schema
   inst.exec(`
     CREATE TABLE IF NOT EXISTS children (
@@ -110,6 +134,8 @@ function runMigrations(inst: Database.Database) {
       offtopic_count INTEGER DEFAULT 0,
       offtopic_recovered INTEGER DEFAULT 0,
       writing_turns INTEGER DEFAULT 0,
+      source_revision INTEGER NOT NULL DEFAULT 0,
+      source_withdrawn_at INTEGER,
       FOREIGN KEY (child_id) REFERENCES children(id)
     );
 
@@ -223,24 +249,7 @@ function runMigrations(inst: Database.Database) {
       FOREIGN KEY (child_id) REFERENCES children(id) ON DELETE RESTRICT
     );
 
-    CREATE TABLE IF NOT EXISTS source_events (
-      seq INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_id TEXT NOT NULL UNIQUE,
-      source_product TEXT NOT NULL CHECK (source_product = 'study_buddy'),
-      source_installation_id TEXT NOT NULL,
-      subject_ref TEXT NOT NULL,
-      record_type TEXT NOT NULL CHECK (record_type = 'learning_attempt'),
-      record_id TEXT NOT NULL,
-      revision INTEGER NOT NULL CHECK (revision > 0),
-      occurred_at INTEGER NOT NULL,
-      event_type TEXT NOT NULL CHECK (event_type = 'learning_attempt_recorded'),
-      event_schema_version INTEGER NOT NULL CHECK (event_schema_version = 1),
-      payload_json TEXT NOT NULL CHECK (json_valid(payload_json) AND length(payload_json) <= 4096),
-      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
-      UNIQUE (record_type, record_id, revision),
-      FOREIGN KEY (source_installation_id) REFERENCES source_installation(installation_id) ON DELETE RESTRICT,
-      FOREIGN KEY (subject_ref) REFERENCES source_subjects(subject_ref) ON DELETE RESTRICT
-    );
+    ${SOURCE_EVENTS_TABLE_SQL.replace("CREATE TABLE source_events", "CREATE TABLE IF NOT EXISTS source_events")};
 
     CREATE INDEX IF NOT EXISTS idx_sessions_child ON sessions(child_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posture_session ON posture_events(session_id, ts);
@@ -265,6 +274,32 @@ function runMigrations(inst: Database.Database) {
   inst.prepare(
     "INSERT OR IGNORE INTO source_installation (singleton_id, installation_id) VALUES (1, ?)",
   ).run(randomUUID());
+}
+
+function widenSourceEventVocabulary(inst: Database.Database): void {
+  const row = inst.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'source_events'",
+  ).get() as { sql: string } | undefined;
+  if (!row?.sql.includes("record_type = 'learning_attempt'")) return;
+
+  inst.transaction(() => {
+    inst.exec(`
+      DROP TRIGGER IF EXISTS source_events_immutable_update;
+      DROP TRIGGER IF EXISTS source_events_immutable_delete;
+      ALTER TABLE source_events RENAME TO source_events_learning_attempt_only;
+      ${SOURCE_EVENTS_TABLE_SQL};
+      INSERT INTO source_events (
+        seq, event_id, source_product, source_installation_id, subject_ref,
+        record_type, record_id, revision, occurred_at, event_type,
+        event_schema_version, payload_json, created_at
+      )
+      SELECT seq, event_id, source_product, source_installation_id, subject_ref,
+        record_type, record_id, revision, occurred_at, event_type,
+        event_schema_version, payload_json, created_at
+      FROM source_events_learning_attempt_only;
+      DROP TABLE source_events_learning_attempt_only;
+    `);
+  })();
 }
 
 function ensureDefaultChild(inst: Database.Database) {

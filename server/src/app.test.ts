@@ -216,11 +216,9 @@ describe("POST /api/chat auto-detects name change (W1 hotfix #2)", () => {
   });
 });
 
-// W1 hotfix（issue #28 + #46 #4 + #46 #5）：
-// - emotion 标签从 LLM 回复解析，命中重要情绪时写 outbox
-// - loop 检测：最近 5 轮 child 短回复 / 对不循环 → 引导家长介入
-// - 重要事件写 outbox（kind: 'parent_notify'）
-describe("POST /api/chat (W1 hotfix: loop detection + parent notify outbox)", () => {
+// Loop detection remains child-facing, while the retired JSONL producer is
+// replaced by transactional chat-turn Source Events (#105/#107).
+describe("POST /api/chat (loop detection + transactional source references)", () => {
   beforeEach(() => {
     // 清 outbox + child 名字
     if (outboxPath) {
@@ -230,7 +228,7 @@ describe("POST /api/chat (W1 hotfix: loop detection + parent notify outbox)", ()
     db.prepare("UPDATE children SET name = ? WHERE id = 'default'").run("小宝");
   });
 
-  it("5 个短 yes/no child 消息 → 第 6 轮 isLoop = true + 写 outbox", async () => {
+  it("5 个短 yes/no child 消息 → 第 6 轮 isLoop = true + 写 Source Events", async () => {
     // 预填 5 轮短 yes/no（不调 LLM，直接写 DB）
     const session = await request(app).post("/api/session/start").send({});
     const sessionId = session.body.sessionId;
@@ -242,26 +240,23 @@ describe("POST /api/chat (W1 hotfix: loop detection + parent notify outbox)", ()
     }
 
     // 第 6 轮发新消息 — 应该触发 loop detection
+    const before = db.prepare(
+      "SELECT COUNT(*) AS count FROM source_events WHERE record_type = 'chat_turn'",
+    ).get() as { count: number };
     const res = await request(app)
       .post("/api/chat")
       .send({ text: "什么啊", state: "writing" });
     expect(res.status).toBe(200);
     expect(res.body.isLoop).toBe(true);
 
-    // outbox 应该有 parent_notify 记录
-    const outboxContent = readFileSync(outboxPath, "utf8");
-    const lines = outboxContent.trim().split("\n").filter(Boolean);
-    expect(lines.length).toBeGreaterThanOrEqual(1);
-    const entry = JSON.parse(lines[lines.length - 1]);
-    expect(entry.kind).toBe("parent_notify");
-    expect(entry.entityId).toBe("child:default");
-    expect(entry.content).toContain("loop");
-    expect(entry.payload.reasons).toBeDefined();
-    expect(entry.payload.reasons.length).toBeGreaterThan(0);
-    expect(entry.payload.reasons[0].reason).toBe("loop");
+    const after = db.prepare(
+      "SELECT COUNT(*) AS count FROM source_events WHERE record_type = 'chat_turn'",
+    ).get() as { count: number };
+    expect(after.count - before.count).toBe(2);
+    expect(() => readFileSync(outboxPath, "utf8")).toThrow();
   });
 
-  it("5 个正常长消息 → 第 6 轮 isLoop = false + 不写 outbox", async () => {
+  it("5 个正常长消息 → 第 6 轮 isLoop = false + 不写 legacy JSONL", async () => {
     const session = await request(app).post("/api/session/start").send({});
     const sessionId = session.body.sessionId;
     const insertTurn = db.prepare(
@@ -541,4 +536,3 @@ describe("GET /api/write/words/:char/attempts", () => {
     expect(oldIdx).toBeGreaterThan(newIdx);  // new comes before old
   });
 });
-
