@@ -1,10 +1,9 @@
 // src/outbox.ts
 //
-// Append-only event outbox for the loose-coupling handoff between
-// study-buddy and the Memory Nexus consumer (separate process, separate
-// schedule). Producers call appendOutbox from request handlers; the
-// worker (bin/nexus-worker.sh) tails readPendingOutbox and calls
-// markOutboxProcessed on success.
+// Legacy append-only Memory Nexus outbox retained for read-only migration and
+// draining entries created before transactional cutover. Active request paths
+// no longer produce JSONL; the retired worker can only drain existing entries
+// before the cutover marker permanently disables it.
 //
 // Format: newline-delimited JSON, one entry per line.
 //   {"id":"e_xxx","ts":1700000000000,"kind":"math_mistake",

@@ -1,30 +1,16 @@
 // src/game-sync.ts
 //
 // Game-side mistake ingestion + aggregation for the study-buddy platform.
-// Each app (currently: candy-math-island) POSTs a mistake here; we persist
-// it into the shared mistakes table (with source='game') and commit a
-// provider-owned Source Event in the same SQLite transaction.
+// Each app (currently: candy-math-island) uses the canonical mistake HTTP
+// route; this module owns session persistence and read-side aggregation.
 //
 // Also exposes getGameWeakTopics, which the agent and the apps use to
 // look at the child's recent weak areas in the game-specific stream
 // (errorType = carry/borrow/sign/compute, not the study-buddy natural-
 // language error_type bucket).
 
-import { createHash, randomUUID } from "node:crypto";
-import {
-  appendLearningAttemptSourceEvent,
-  appendLearningSessionSourceEvent,
-} from "./source-events.js";
-
-export interface GameMistakeInput {
-  childId: string;
-  subject: string;
-  problem: string;
-  errorType: string;
-  userAnswer: number;
-  correctAnswer: number;
-  level: number;
-}
+import { createHash } from "node:crypto";
+import { appendLearningSessionSourceEvent } from "./source-events.js";
 
 export interface GameWeakTopic {
   subject: string;
@@ -51,49 +37,6 @@ export interface GameDailyStat {
 }
 
 /**
- * Record a mistake from a game. Persists it as a mistakes row with
- * source='game' and an active session (auto-created if none exists).
- * Also commits a learning-attempt Source Event atomically.
- * Returns the inserted mistake id.
- */
-export async function recordGameMistake(
-  db: import("better-sqlite3").Database,
-  input: GameMistakeInput,
-): Promise<number> {
-  return db.transaction(() => {
-    const sessionId = ensureActiveSession(db, input.childId);
-    const occurredAt = Date.now();
-    const result = db.prepare(
-      `INSERT INTO mistakes
-         (session_id, child_id, ts, subject, problem, error_type,
-          user_answer, correct_answer, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'game')`,
-    ).run(
-      sessionId,
-      input.childId,
-      occurredAt,
-      input.subject,
-      input.problem,
-      input.errorType,
-      String(input.userAnswer),
-      String(input.correctAnswer),
-    );
-    const id = Number(result.lastInsertRowid);
-    appendLearningAttemptSourceEvent(db, {
-      mistakeId: id,
-      childId: input.childId,
-      occurredAt,
-      problem: input.problem,
-      submittedAnswer: String(input.userAnswer),
-      expectedAnswer: String(input.correctAnswer),
-      mistakeType: input.errorType,
-      source: "game",
-    });
-    return id;
-  })();
-}
-
-/**
  * Aggregate recent game mistakes (default 7 days) by (subject, errorType).
  * Returned in count-desc order. Only counts source='game' rows.
  */
@@ -112,21 +55,6 @@ export async function getGameWeakTopics(
          LIMIT 20`,
     )
     .all(since) as GameWeakTopic[];
-}
-
-/** Get-or-create the active session for this child. Auto-starts on demand. */
-function ensureActiveSession(db: import("better-sqlite3").Database, childId: string): string {
-  const existing = db
-    .prepare(
-      "SELECT id FROM sessions WHERE child_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-    )
-    .get(childId) as { id: string } | undefined;
-  if (existing) return existing.id;
-  const id = randomUUID();
-  db.prepare(
-    "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)",
-  ).run(id, childId, "math");
-  return id;
 }
 
 /**

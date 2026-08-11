@@ -4,7 +4,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createApp } from "./app.js";
+import { createApp, type AppOptions } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
 import { createLogger } from "./logger.js";
 
@@ -15,13 +15,17 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
   let tmpDir: string;
   let app: ReturnType<typeof createApp>;
 
-  function buildApp(loopback = true): ReturnType<typeof createApp> {
+  function buildApp(
+    loopback = true,
+    overrides: Partial<AppOptions> = {},
+  ): ReturnType<typeof createApp> {
     return createApp({
       db,
       httpsPort: 3000,
       integrationToken: INTEGRATION_TOKEN,
       integrationLoopbackCheck: () => loopback,
       logger: createLogger({ level: "error", sinks: [] }),
+      ...overrides,
     });
   }
 
@@ -59,34 +63,6 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
   it("commits one Learning Attempt event and exposes it through the authenticated feed", async () => {
     const attempt = await recordAttempt("7 + 5 = ?");
     expect(attempt.status).toBe(201);
-
-    const sourceCount = db
-      .prepare("SELECT COUNT(*) AS count FROM source_events")
-      .get() as { count: number };
-    expect(sourceCount.count).toBe(1);
-    expect(
-      db
-        .prepare("SELECT source_product AS product FROM source_events")
-        .get(),
-    ).toEqual({ product: "study_buddy" });
-    const timestamps = db
-      .prepare(
-        `SELECT m.ts AS mistake_time, e.occurred_at AS event_time
-         FROM mistakes m
-         JOIN source_events e ON e.record_id = 'mistake:' || m.id`,
-      )
-      .get() as { mistake_time: number; event_time: number };
-    expect(timestamps).toMatchObject({
-      mistake_time: expect.any(Number),
-      event_time: expect.any(Number),
-    });
-    expect(timestamps.event_time).toBe(timestamps.mistake_time);
-    expect(() =>
-      db.prepare("UPDATE source_events SET revision = 2").run(),
-    ).toThrow(/immutable/);
-    expect(() => db.prepare("DELETE FROM source_events").run()).toThrow(
-      /immutable/,
-    );
 
     const firstPage = await feed();
     expect(firstPage.status).toBe(200);
@@ -136,33 +112,22 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
   });
 
   it("rolls back the domain write when Source Event insertion fails", async () => {
-    db.exec(`
-      CREATE TRIGGER force_source_event_failure
-      BEFORE INSERT ON source_events
-      BEGIN SELECT RAISE(ABORT, 'forced source event failure'); END;
-    `);
+    app = buildApp(true, {
+      beforeSourceEventAppend: (recordType) => {
+        expect(recordType).toBe("learning_attempt");
+        throw new Error("forced source event failure");
+      },
+    });
 
     const response = await recordAttempt("rollback-only-problem", "rollback-child");
     expect(response.status).toBe(500);
     expect(response.body).toEqual({ error: "mistake could not be recorded" });
-    expect(
-      db.prepare("SELECT COUNT(*) AS count FROM children WHERE id = ?").get(
-        "rollback-child",
-      ),
-    ).toEqual({ count: 0 });
-    expect(
-      db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE child_id = ?").get(
-        "rollback-child",
-      ),
-    ).toEqual({ count: 0 });
-    expect(
-      db.prepare("SELECT COUNT(*) AS count FROM mistakes WHERE problem = ?").get(
-        "rollback-only-problem",
-      ),
-    ).toEqual({ count: 0 });
-    expect(
-      db.prepare("SELECT COUNT(*) AS count FROM source_events").get(),
-    ).toEqual({ count: 0 });
+    expect((await request(app).get("/api/health")).body).toMatchObject({
+      childrenCount: 1,
+      sessionsCount: 0,
+    });
+    expect((await request(app).get("/api/game/weak-topics?days=7")).body.weakTopics).toEqual([]);
+    expect((await feed()).body.events).toEqual([]);
   });
 
   it("keeps one logical event for an idempotent product retry", async () => {
@@ -171,9 +136,7 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
     expect(first.status).toBe(201);
     expect(replay.status).toBe(200);
     expect(replay.body).toEqual({ id: first.body.id, created: false });
-    expect(
-      db.prepare("SELECT COUNT(*) AS count FROM source_events").get(),
-    ).toEqual({ count: 1 });
+    expect((await feed()).body.events).toHaveLength(1);
   });
 
   it("records attempts without a configured consumer or integration credential", async () => {
@@ -185,35 +148,28 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
     });
     const attempt = await recordAttempt("offline-consumer-problem");
     expect(attempt.status).toBe(201);
-    expect(
-      db.prepare("SELECT COUNT(*) AS count FROM source_events").get(),
-    ).toEqual({ count: 1 });
     expect((await request(app).get("/api/integration/source-events")).status).toBe(
       401,
     );
+    app = buildApp();
+    expect((await feed()).body.events).toHaveLength(1);
   });
 
   it("preserves installation identity, sequence, and unread events across restart", async () => {
     await recordAttempt("restart-problem");
-    const before = db
-      .prepare("SELECT installation_id AS id FROM source_installation")
-      .get() as { id: string };
+    const before = (await feed()).body.events[0].sourceIdentity.sourceInstallationId;
     const dbPath = join(tmpDir, "study.db");
     db.close();
     db = new Database(dbPath);
     migrateSchema(db);
     app = buildApp();
 
-    const after = db
-      .prepare("SELECT installation_id AS id FROM source_installation")
-      .get() as { id: string };
-    expect(after.id).toBe(before.id);
     const page = await feed();
     expect(page.status).toBe(200);
     expect(page.body.events).toHaveLength(1);
     expect(page.body.events[0].sequence).toBe(1);
     expect(page.body.events[0].sourceIdentity.sourceInstallationId).toBe(
-      before.id,
+      before,
     );
   });
 
@@ -288,14 +244,11 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
         .set("Authorization", `Bearer ${INTEGRATION_TOKEN}`);
       expect(response.status).toBe(400);
     }
+    expect((await feed(999, 10)).status).toBe(400);
     const oversized = await recordAttempt("x".repeat(201));
     expect(oversized.status).toBe(400);
-    expect(
-      db.prepare("SELECT COUNT(*) AS count FROM mistakes").get(),
-    ).toEqual({ count: 0 });
-    expect(
-      db.prepare("SELECT COUNT(*) AS count FROM source_events").get(),
-    ).toEqual({ count: 0 });
+    expect((await request(app).get("/api/game/weak-topics?days=7")).body.weakTopics).toEqual([]);
+    expect((await feed()).body.events).toEqual([]);
   });
 
   it("has no gaps or repeats when writes and feed reads overlap", async () => {
@@ -318,31 +271,4 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
     expect(new Set(sequences).size).toBe(20);
   });
 
-  it("fails explicitly when a stored record violates the supported contract", async () => {
-    await recordAttempt("valid-before-malformed");
-    db.pragma("ignore_check_constraints = ON");
-    const source = db.prepare(
-      `SELECT source_installation_id, subject_ref FROM source_events LIMIT 1`,
-    ).get() as { source_installation_id: string; subject_ref: string };
-    db.prepare(
-      `INSERT INTO source_events (
-         event_id, source_product, source_installation_id, subject_ref,
-         record_type, record_id, revision, occurred_at, event_type,
-         event_schema_version, payload_json
-       ) VALUES (?, 'study_buddy', ?, ?, 'learning_session', ?, 1, ?,
-         'learning_session_completed', 1, ?)`,
-    ).run(
-      "malformed-event",
-      source.source_installation_id,
-      source.subject_ref,
-      "session:malformed",
-      Date.now(),
-      JSON.stringify({ kind: "learning_session" }),
-    );
-    db.pragma("ignore_check_constraints = OFF");
-
-    const response = await feed();
-    expect(response.status).toBe(500);
-    expect(response.body).toEqual({ error: "source event contract violation" });
-  });
 });

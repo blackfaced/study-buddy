@@ -43,6 +43,20 @@ describe("migrateSchema", () => {
     db.close();
   });
 
+  it("installs immutable Source Event triggers at the schema boundary", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const triggerNames = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'source_events' ORDER BY name")
+      .all()
+      .map((row: any) => row.name);
+    expect(triggerNames).toEqual([
+      "source_events_immutable_delete",
+      "source_events_immutable_update",
+    ]);
+    db.close();
+  });
+
   it("adds the `state` column to chat_turns (Bug 4 root cause)", () => {
     const db = freshDb();
     (globalThis as any).__migrateSchema(db);

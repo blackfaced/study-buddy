@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { migrateSchema } from "./db-migrate.js";
-import { recordGameMistake, getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
+import { getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
+import { insertMistake } from "./routes/mistake-api.js";
 
 let db: Database.Database;
 
@@ -15,116 +16,32 @@ afterEach(() => {
   db.close();
 });
 
-describe("recordGameMistake", () => {
-  it("inserts a row into mistakes with source='game' and the user/correct answers", async () => {
-    const id = await recordGameMistake(db, {
+describe("getGameWeakTopics", () => {
+  function seedGameMistake(problem: string, errorType: string) {
+    const result = insertMistake(db, {
       childId: "default",
-      subject: "math",
-      problem: "5 + 7 = ?",
-      errorType: "carry",
-      userAnswer: 11,
-      correctAnswer: 12,
-      level: 1,
-    });
-    expect(id).toBeGreaterThan(0);
-    const row = db
-      .prepare(
-        "SELECT subject, problem, error_type, user_answer, correct_answer, source FROM mistakes WHERE id = ?"
-      )
-      .get(id) as any;
-    expect(row.subject).toBe("math");
-    expect(row.problem).toBe("5 + 7 = ?");
-    expect(row.error_type).toBe("carry");
-    // user_answer and correct_answer are stored as TEXT so they round-trip
-    // through the SQL driver as strings; we still treat them numerically in
-    // the API. Verify both as numbers (parseInt handles the round-trip).
-    expect(parseInt(row.user_answer, 10)).toBe(11);
-    expect(parseInt(row.correct_answer, 10)).toBe(12);
-    expect(row.source).toBe("game");
-  });
-
-  it("auto-creates a session when none is active", async () => {
-    // No start_session call; recordGameMistake should create one transparently.
-    const id = await recordGameMistake(db, {
-      childId: "default",
-      subject: "math",
-      problem: "5 + 7 = ?",
-      errorType: "carry",
-      userAnswer: 11,
-      correctAnswer: 12,
-      level: 1,
-    });
-    const row = db.prepare("SELECT session_id FROM mistakes WHERE id = ?").get(id) as any;
-    expect(row.session_id).toBeTruthy();
-    const sess = db
-      .prepare("SELECT id, child_id, ended_at FROM sessions WHERE id = ?")
-      .get(row.session_id) as any;
-    expect(sess.child_id).toBe("default");
-    // Auto-created sessions are still open (no ended_at) so the next mistake
-    // can ride the same one.
-    expect(sess.ended_at).toBeNull();
-  });
-
-  it("commits a learning-attempt Source Event with the domain row", async () => {
-    const id = await recordGameMistake(db, {
-      childId: "default",
-      subject: "math",
-      problem: "5 + 7 = ?",
-      errorType: "carry",
-      userAnswer: 11,
-      correctAnswer: 12,
-      level: 1,
-    });
-    const event = db.prepare(
-      "SELECT record_type, record_id, revision, payload_json FROM source_events",
-    ).get() as any;
-    expect(event.record_type).toBe("learning_attempt");
-    expect(event.record_id).toBe(`mistake:${id}`);
-    expect(event.revision).toBe(1);
-    expect(JSON.parse(event.payload_json)).toMatchObject({
-      kind: "learning_attempt",
-      problem: "5 + 7 = ?",
-      mistakeType: "carry",
-      submittedAnswer: "11",
-      expectedAnswer: "12",
+      problem,
+      userAnswer: "0",
+      correctAnswer: "1",
+      errorType,
       source: "game",
     });
-  });
-});
+    db.prepare("UPDATE mistakes SET subject = 'math' WHERE id = ?").run(result.id);
+  }
 
-describe("getGameWeakTopics", () => {
   async function seedMistakes() {
     // 3 carry, 1 borrow, 2 compute
-    await recordGameMistake(db, mk("5+7", "carry", 1));
-    await recordGameMistake(db, mk("8+6", "carry", 1));
-    await recordGameMistake(db, mk("9+4", "carry", 1));
-    await recordGameMistake(db, mk("15-8", "borrow", 1));
-    await recordGameMistake(db, mk("11-3", "compute", 1));
-    await recordGameMistake(db, mk("12-5", "compute", 1));
-    function mk(problem: string, errorType: string, level: number) {
-      return {
-        childId: "default",
-        subject: "math",
-        problem,
-        errorType,
-        userAnswer: 0,
-        correctAnswer: 1,
-        level,
-      };
-    }
+    seedGameMistake("5+7", "carry");
+    seedGameMistake("8+6", "carry");
+    seedGameMistake("9+4", "carry");
+    seedGameMistake("15-8", "borrow");
+    seedGameMistake("11-3", "compute");
+    seedGameMistake("12-5", "compute");
   }
 
   it("only counts mistakes with source='game' (not vision or study-buddy)", async () => {
     // 1 game mistake
-    await recordGameMistake(db, {
-      childId: "default",
-      subject: "math",
-      problem: "5+7",
-      errorType: "carry",
-      userAnswer: 11,
-      correctAnswer: 12,
-      level: 1,
-    });
+    seedGameMistake("5+7", "carry");
     // 1 vision mistake (inserted directly to bypass the game path)
     db.prepare(
       "INSERT INTO sessions (id, child_id) VALUES (?, ?)"

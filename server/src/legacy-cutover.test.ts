@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -108,6 +115,21 @@ describe("source-feed cutover gate (#105)", () => {
         isProcessRunning: (pid) => pid === 4242,
       }),
     ).rejects.toThrow("legacy JSONL worker is still running");
+    expect(existsSync(`${pidPath}.lock`)).toBe(false);
+  });
+
+  it("refuses cutover while a worker is inside the atomic lease window", async () => {
+    const dir = tempDir();
+    const pidPath = join(dir, "nexus-worker.pid");
+    mkdirSync(`${pidPath}.lock`);
+
+    await expect(
+      enableSourceFeedCutover({
+        markerPath: join(dir, "cutover.json"),
+        workerPidPaths: [pidPath],
+        legacyFiles: [],
+      }),
+    ).rejects.toThrow("legacy JSONL worker lease is already held");
   });
 
   it("refuses cutover while a legacy producer is enabled", async () => {
@@ -141,6 +163,7 @@ describe("source-feed cutover gate (#105)", () => {
     const dir = tempDir();
     const legacyPath = join(dir, "nexus-outbox.jsonl");
     const markerPath = join(dir, "source-feed-cutover.json");
+    const pidPath = join(dir, "nexus-worker.pid");
     writeFileSync(
       legacyPath,
       `${JSON.stringify({
@@ -154,7 +177,7 @@ describe("source-feed cutover gate (#105)", () => {
 
     const result = await enableSourceFeedCutover({
       markerPath,
-      workerPidPaths: [],
+      workerPidPaths: [pidPath, pidPath],
       legacyFiles: [legacyPath],
       enabledAt: Date.UTC(2026, 7, 10),
     });
@@ -168,6 +191,7 @@ describe("source-feed cutover gate (#105)", () => {
     });
     expect(readFileSync(legacyPath, "utf8")).toContain("must-not-appear");
     expect(readFileSync(markerPath, "utf8")).not.toContain("must-not-appear");
+    expect(existsSync(`${pidPath}.lock`)).toBe(false);
     await expect(assertLegacyWorkerCanRun(markerPath)).rejects.toThrow(
       "legacy JSONL delivery is retired",
     );

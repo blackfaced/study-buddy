@@ -58,9 +58,7 @@ export function getActiveSession(db: Database.Database):
  * previous session was ended (e.g. after "写完啦"), instead of getting
  * 400 "no active session".
  *
- * Mirrors the `ensureActiveSession` pattern used by recordGameMistake
- * in game-sync.ts. Session stays open until a real /api/session/end
- * call.
+ * Session stays open until a real /api/session/end call.
  */
 export function getOrCreateActiveSession(db: Database.Database): { id: string; child_id: string } {
   const existing = getActiveSession(db);

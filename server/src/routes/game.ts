@@ -11,10 +11,8 @@
 // NOTE: POST /api/game/mistake was removed in #98 (T1 of #34 split).
 // The endpoint now lives in ./mistake-api.ts with a deduped contract
 // (UNIQUE on child_id+problem, returns {id, created} not {mistakeId}).
-// The data-layer recordGameMistake helper is still in game-sync.ts for
-// any non-HTTP caller (and game-sync.test.ts), but is no longer wired
-// to an HTTP route — clients should migrate to /api/game/mistake's new
-// shape (T2 = #99, candy-math-island client picker rewrite).
+// All callers use that public route so domain and Source Event writes cannot
+// diverge through a second data-layer entrypoint.
 //
 // All heavy lifting is in ./game-sync.ts (getGameWeakTopics,
 // recordGameSession, getGameDailyStats). This module is the HTTP shell:
