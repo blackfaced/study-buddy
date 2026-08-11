@@ -134,6 +134,30 @@ describe("POST /api/game/session", () => {
     const res = await request(app).post("/api/game/session").send({});
     expect(res.status).toBe(400);
   });
+
+  it("rejects malformed game summaries before they can poison the Source feed", async () => {
+    const now = Date.now();
+    const base = {
+      childId: "default",
+      appId: "candy-math-island",
+      durationSec: 60,
+      totalQuestions: 10,
+      correctCount: 8,
+      startedAt: now - 60_000,
+      endedAt: now,
+    };
+    expect((await request(app).post("/api/game/session").send({
+      ...base,
+      appId: "",
+    })).status).toBe(400);
+    expect((await request(app).post("/api/game/session").send({
+      ...base,
+      totalQuestions: 1.5,
+      correctCount: 1,
+    })).status).toBe(400);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM game_sessions").get())
+      .toEqual({ count: 0 });
+  });
 });
 
 // --- GET /api/game/daily --------------------------------------------

@@ -150,6 +150,32 @@ describe("bounded chat references and retrieval (#107)", () => {
     expect((await retrieve(body)).status).toBe(404);
   });
 
+  it("fails explicitly when a stored chat event advertises a different turn reference", async () => {
+    const { events } = await seedChat("consistent reference");
+    const source = db.prepare(
+      `SELECT source_installation_id, subject_ref FROM source_events LIMIT 1`,
+    ).get() as { source_installation_id: string; subject_ref: string };
+    const occurredAt = Date.parse(events[0].occurredAt);
+    db.prepare(
+      `INSERT INTO source_events (
+         event_id, source_product, source_installation_id, subject_ref,
+         record_type, record_id, revision, occurred_at, event_type,
+         event_schema_version, payload_json
+       ) VALUES (?, 'study_buddy', ?, ?, 'chat_turn', 'chat_turn:999999', 1, ?,
+         'chat_turn_recorded', 1, ?)`,
+    ).run(
+      "mismatched-chat-reference",
+      source.source_installation_id,
+      source.subject_ref,
+      occurredAt,
+      JSON.stringify({
+        ...events[0].payload,
+        turnRef: events[0].payload.turnRef,
+      }),
+    );
+    expect((await feed()).status).toBe(500);
+  });
+
   it("requires the independent credential and loopback origin", async () => {
     const { events } = await seedChat();
     const body = retrievalBody(events);

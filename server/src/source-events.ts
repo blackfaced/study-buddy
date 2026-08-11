@@ -357,6 +357,8 @@ function sourceEventFromRow(row: SourceEventRow): SourceEvent {
     row.event_type,
     payload,
     row.subject_ref,
+    row.record_id,
+    row.occurred_at,
   )) {
     throw new SourceEventContractError("source event payload contract violated");
   }
@@ -417,6 +419,8 @@ function isCompatiblePayload(
   eventType: SourceEventType,
   payload: SourceEventPayload,
   subjectRef: string,
+  recordId: string,
+  occurredAt: number,
 ): boolean {
   if (eventType === "source_record_withdrawn") {
     return payload === null && recordType !== "learning_attempt";
@@ -462,9 +466,11 @@ function isCompatiblePayload(
     payload.kind === "chat_turn_reference" &&
     payload.subjectRef === subjectRef &&
     parseChatSessionRef(payload.sessionRef) !== null &&
+    payload.turnRef === recordId &&
     parseChatTurnRecordId(payload.turnRef) !== null &&
     ["child", "agent"].includes(payload.role) &&
-    isIsoTimestamp(payload.occurredAt);
+    isIsoTimestamp(payload.occurredAt) &&
+    Date.parse(payload.occurredAt) === occurredAt;
 }
 
 function isStringOrNull(value: unknown): value is string | null {

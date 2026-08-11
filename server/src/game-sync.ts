@@ -141,12 +141,16 @@ export async function recordGameSession(
   db: import("better-sqlite3").Database,
   input: GameSessionInput,
 ): Promise<number> {
-  if (input.totalQuestions <= 0) {
+  if (input.appId.length === 0 || input.appId.length > 128) {
+    throw new Error("recordGameSession: appId must be between 1 and 128 characters");
+  }
+  if (!Number.isInteger(input.totalQuestions) || input.totalQuestions <= 0) {
     throw new Error(
       `recordGameSession: totalQuestions must be > 0 (got ${input.totalQuestions})`
     );
   }
-  if (input.correctCount < 0 || input.correctCount > input.totalQuestions) {
+  if (!Number.isInteger(input.correctCount) ||
+    input.correctCount < 0 || input.correctCount > input.totalQuestions) {
     throw new Error(
       `recordGameSession: correctCount (${input.correctCount}) must be in [0, totalQuestions] (${input.totalQuestions})`
     );
