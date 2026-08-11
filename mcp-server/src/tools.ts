@@ -443,7 +443,11 @@ export async function handleTool(name: string, args: any) {
 
       return {
         childId,
-        date: dayStart.toISOString().slice(0, 10),
+        date: [
+          dayStart.getFullYear(),
+          String(dayStart.getMonth() + 1).padStart(2, "0"),
+          String(dayStart.getDate()).padStart(2, "0"),
+        ].join("-"),
         sessionCount: sessions.length,
         totalMinutes: totals.totalMinutes,
         avgFocusScore: focusScore,
