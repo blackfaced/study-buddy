@@ -94,7 +94,7 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
         submittedAnswer: "11",
         expectedAnswer: "12",
         mistakeType: "carry",
-        source: "candy-math-island",
+        source: "game",
       },
     });
     expect(firstPage.body.events[0].sourceIdentity.sourceInstallationId).toMatch(

@@ -89,6 +89,7 @@ describe("POST /api/game/mistake (issue #98: auto-record, dedupe by child_id+pro
     expect(row.error_type).toBe("carry");
     expect(row.user_answer).toBe("11");
     expect(row.correct_answer).toBe("12");
+    expect(row.source).toBe("game");
   });
 
   it("returns 200 and {id, created:false} on a second identical call (idempotent)", async () => {

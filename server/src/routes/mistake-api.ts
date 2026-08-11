@@ -51,7 +51,6 @@ interface MistakeRequestBody {
   userAnswer?: unknown;
   correctAnswer?: unknown;
   errorType?: unknown;
-  source?: unknown;
 }
 
 interface MistakeReviewRequestBody {
@@ -73,7 +72,8 @@ export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): voi
         ? body.childId
         : "default";
 
-    // problem is the dedupe key (paired with childId by the UNIQUE index).
+    // problem is the dedupe key (paired with childId and the canonical
+    // route-owned source category by the UNIQUE index).
     // Reject missing/non-string early so we never INSERT a NULL problem.
     if (!isBoundedText(body.problem, 200)) {
       res.status(400).json({ error: "problem is required" });
@@ -89,11 +89,13 @@ export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): voi
     const correctAnswer =
       typeof body.correctAnswer === "string" ? body.correctAnswer : null;
     const errorType = typeof body.errorType === "string" ? body.errorType : null;
-    const source = typeof body.source === "string" ? body.source : "game";
+    // App identity is not a learning-evidence category. This route owns the
+    // canonical `game` source so client labels cannot partition deduplication
+    // or disappear from game-only weak-topic aggregation.
+    const source = "game";
     if (
       (correctAnswer !== null && !isBoundedText(correctAnswer, 100, true)) ||
-      (errorType !== null && !isBoundedText(errorType, 64, true)) ||
-      !isBoundedText(source, 64)
+      (errorType !== null && !isBoundedText(errorType, 64, true))
     ) {
       res.status(400).json({ error: "attempt fields exceed the source contract" });
       return;

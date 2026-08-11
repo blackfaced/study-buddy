@@ -168,4 +168,30 @@ describe("POST /api/game/mistake (issue #98: auto-record wrong answers)", () => 
     expect(res2.body.created).toBe(false);
     expect(res2.body.id).toBe(res1.body.id);
   });
+
+  it("canonicalizes client app labels to the game source category before dedupe", async () => {
+    const payload = {
+      childId: "default",
+      problem: "6+8",
+      correctAnswer: "14",
+      userAnswer: "13",
+      errorType: "compute",
+    };
+
+    const first = await request(app)
+      .post("/api/game/mistake")
+      .send({ ...payload, source: "game" });
+    const retryFromNamedApp = await request(app)
+      .post("/api/game/mistake")
+      .send({ ...payload, source: "candy-math-island" });
+
+    expect(first.status).toBe(201);
+    expect(retryFromNamedApp.status).toBe(200);
+    expect(retryFromNamedApp.body).toEqual({ id: first.body.id, created: false });
+
+    const rows = db
+      .prepare("SELECT id, source FROM mistakes WHERE child_id = ? AND problem = ?")
+      .all("default", payload.problem) as Array<{ id: number; source: string }>;
+    expect(rows).toEqual([{ id: first.body.id, source: "game" }]);
+  });
 });
