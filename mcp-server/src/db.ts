@@ -204,6 +204,20 @@ function runMigrations(inst: Database.Database) {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS safety_incidents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      ts INTEGER NOT NULL,
+      category TEXT NOT NULL CHECK (category IN ('bullying', 'abuse', 'self_harm', 'sexual', 'severe_symptom', 'personal_info')),
+      urgency TEXT NOT NULL CHECK (urgency IN ('attention', 'imminent')),
+      status TEXT NOT NULL DEFAULT 'needs_attention' CHECK (status IN ('needs_attention', 'resolved')),
+      resolution TEXT CHECK (resolution IS NULL OR resolution IN ('acknowledged', 'false_positive')),
+      resolved_at INTEGER,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_id) REFERENCES children(id)
+    );
+
     CREATE TABLE IF NOT EXISTS mistakes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
@@ -365,6 +379,9 @@ function runMigrations(inst: Database.Database) {
         AND EXISTS (SELECT 1 FROM sessions WHERE device_id = OLD.device_id)
       BEGIN SELECT RAISE(ABORT, 'paired device is referenced by sessions'); END;
   `);
+  inst.prepare(
+    "DELETE FROM safety_incidents WHERE status = 'resolved' AND resolved_at < ?",
+  ).run(Date.now() - 30 * 24 * 60 * 60 * 1000);
   inst.prepare(
     "INSERT OR IGNORE INTO source_installation (singleton_id, installation_id) VALUES (1, ?)",
   ).run(randomUUID());

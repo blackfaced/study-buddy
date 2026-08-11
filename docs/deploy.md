@@ -2,6 +2,8 @@
 
 A small, opinionated guide to running the study-buddy HTTP server on the Mac mini in a way that survives reboots, restarts on crash, and doesn't drown you in log files.
 
+Child-chat safety behavior and minimized retention are documented in [child-safety.md](child-safety.md).
+
 ## Components
 
 | Process | What it does | How it's managed |

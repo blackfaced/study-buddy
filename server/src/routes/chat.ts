@@ -27,6 +27,7 @@ import { writeFileSync } from "node:fs";
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import type { Logger } from "../logger.js";
+import { classifyChildSafety } from "../child-safety.js";
 import type { VisionClient } from "../vision.js";
 import { buildSystemPrompt, buildChatPrompt } from "../llm-prompt.js";
 import { detectNameChange } from "../child-name.js";
@@ -228,6 +229,45 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
       | { name: string }
       | undefined;
     let childName = child?.name || "小宝";
+
+    const safety = classifyChildSafety(text);
+    if (safety) {
+      let incidentId: number | null = null;
+      try {
+        incidentId = db.transaction(() => {
+          const current = findOwnedActiveSession(db, session.id, devicePrincipal(res));
+          if (current.status !== "ok") throw new OwnedSessionChanged(current.status);
+          return Number(db.prepare(
+            `INSERT INTO safety_incidents
+               (session_id, child_id, ts, category, urgency, status)
+             VALUES (?, ?, ?, ?, ?, 'needs_attention')`,
+          ).run(session.id, session.child_id, Date.now(), safety.category, safety.urgency).lastInsertRowid);
+        })();
+      } catch (error) {
+        if (error instanceof OwnedSessionChanged) return respondOwnedSessionFailure(res, error.status);
+        logger.error("child safety event persistence failed", {
+          childId: session.child_id,
+          sessionId: session.id,
+          category: safety.category,
+          urgency: safety.urgency,
+        });
+      }
+      if (incidentId !== null) {
+        logger.warn("child safety event requires attention", {
+          incidentId,
+          childId: session.child_id,
+          sessionId: session.id,
+          category: safety.category,
+          urgency: safety.urgency,
+        });
+      }
+      return res.json({
+        reply: safety.reply,
+        safetyHandled: true,
+        safetyCategory: safety.category,
+        safetyUrgency: safety.urgency,
+      });
+    }
 
     const nameChange = detectNameChange(text);
     if (nameChange && nameChange !== childName) {

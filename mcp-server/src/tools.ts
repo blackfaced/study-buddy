@@ -150,6 +150,18 @@ export const TOOLS = [
     },
   },
   {
+    name: "resolve_safety_event",
+    description: "家长显式处理一个最小化安全信号。只能标记已知悉或误报，不会改变安全识别规则。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        incidentId: { type: "number" },
+        resolution: { type: "string", enum: ["acknowledged", "false_positive"] },
+      },
+      required: ["incidentId", "resolution"],
+    },
+  },
+  {
     name: "limit_use",
     description:
       "家长决策：限制使用方式。continue=继续，limit_1h=限制每次 1 小时，pause_3d=暂停 3 天。",
@@ -371,6 +383,9 @@ export async function handleTool(name: string, args: any) {
       const dayStart = new Date();
       dayStart.setHours(0, 0, 0, 0);
       const dayStartTs = dayStart.getTime();
+      db.prepare(
+        "DELETE FROM safety_incidents WHERE status = 'resolved' AND resolved_at < ?",
+      ).run(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
       const sessions = db
         .prepare(
@@ -421,6 +436,20 @@ export async function handleTool(name: string, args: any) {
         )
         .all(childId, dayStartTs) as any[];
 
+      const pendingSafetyEvents = db.prepare(
+        `SELECT id, ts, category, urgency, status
+         FROM safety_incidents
+         WHERE child_id = ? AND status = 'needs_attention'
+         ORDER BY ts DESC, id DESC`,
+      ).all(childId) as any[];
+      const resolvedSafetyEvents = db.prepare(
+        `SELECT id, ts, category, urgency, status
+         FROM safety_incidents
+         WHERE child_id = ? AND status = 'resolved' AND ts >= ?
+         ORDER BY ts DESC, id DESC LIMIT 10`,
+      ).all(childId, dayStartTs) as any[];
+      const safetyEvents = [...pendingSafetyEvents, ...resolvedSafetyEvents];
+
       // 推荐决策
       let recommendation: "continue" | "limit_1h" | "pause_3d" = "continue";
       let recommendationReason = "一切正常，继续使用";
@@ -459,12 +488,40 @@ export async function handleTool(name: string, args: any) {
           problem: m.problem,
           errorType: m.error_type,
         })),
+        safety: {
+          needsAttention: pendingSafetyEvents.length,
+          events: safetyEvents.map((event) => ({
+            id: event.id,
+            occurredAt: event.ts,
+            category: event.category,
+            urgency: event.urgency,
+            status: event.status,
+          })),
+        },
         recommendation,
         recommendationReason,
         currentLimit: lastDecision
           ? { mode: lastDecision.mode, until: lastDecision.until_ts }
           : null,
       };
+    }
+
+    case "resolve_safety_event": {
+      const incidentId = args.incidentId;
+      const resolution = args.resolution;
+      if (!Number.isInteger(incidentId) || incidentId <= 0) {
+        throw new Error("incidentId must be a positive integer");
+      }
+      if (resolution !== "acknowledged" && resolution !== "false_positive") {
+        throw new Error("resolution must be acknowledged or false_positive");
+      }
+      const result = db.prepare(
+        `UPDATE safety_incidents
+         SET status = 'resolved', resolution = ?, resolved_at = ?
+         WHERE id = ?`,
+      ).run(resolution, Date.now(), incidentId);
+      if (result.changes !== 1) throw new Error("safety event not found");
+      return { id: incidentId, status: "resolved", resolution };
     }
 
     case "get_weak_topics": {
