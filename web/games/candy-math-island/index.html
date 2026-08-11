@@ -110,6 +110,47 @@
   .answer-input:focus { border-color: var(--accent); }
   .answer-input.correct { border-color: #4ECB71; background: #F0FFF4; animation: shake-good 0.3s; }
   .answer-input.wrong { border-color: #FF4757; background: #FFF0F0; animation: shake-bad 0.3s; }
+  /* v0.8 (#116): inline wrong-answer explanation card. Hidden by default;
+     shown when the kid answers wrong, hidden when they tap "下一题". */
+  .explanation-card {
+    display: none;
+    background: #FFFBEA;
+    border: 2px solid #FFD580;
+    border-radius: var(--radius-input);
+    padding: var(--space-3);
+    margin-bottom: var(--space-3);
+    text-align: left;
+    animation: explanation-fade 0.25s ease-out;
+  }
+  .explanation-card.visible { display: block; }
+  .explanation-card .explanation-title {
+    font-size: var(--text-body);
+    font-weight: 700;
+    color: #C77B00;
+    margin-bottom: 6px;
+  }
+  .explanation-card .explanation-body {
+    font-size: 16px;
+    line-height: 1.5;
+    color: #5A4500;
+    white-space: pre-wrap;
+  }
+  .explanation-card .explanation-next {
+    display: inline-block;
+    margin-top: var(--space-3);
+    padding: 8px 18px;
+    font-size: 18px;
+    font-weight: 700;
+    color: white;
+    background: #C77B00;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+  }
+  @keyframes explanation-fade {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
   @keyframes shake-good { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
   @keyframes shake-bad { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
 
@@ -199,6 +240,13 @@
       <div class="q-text" id="q-text">1 + 1 = ?</div>
     </div>
     <input class="answer-input" id="answer-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="?" />
+    <!-- v0.8 (#116, T4 = #34b): inline wrong-answer card. Shown on wrong
+         answers, hidden on correct / next question / session end. -->
+    <div class="explanation-card" id="explanation-card">
+      <div class="explanation-title" id="explanation-title"></div>
+      <div class="explanation-body" id="explanation-body"></div>
+      <button class="explanation-next" id="explanation-next" type="button">下一题 →</button>
+    </div>
     <div class="keypad" id="keypad">
       <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
       <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
@@ -361,6 +409,15 @@ async function loadSyncMistakeReviews() {
   if (_syncMistakeReviews) return;
   const mod = await import("./sync-mistake-reviews.js");
   _syncMistakeReviews = mod.syncMistakeReviews;
+}
+
+// v0.8 (#116, T4 = #34b): inline wrong-answer explanation card.
+// Lazy-loaded on first wrong answer to keep the page-load path lean.
+let _getExplanation;
+async function loadExplanations() {
+  if (_getExplanation) return;
+  const mod = await import("./explanations.js");
+  _getExplanation = mod.getExplanation;
 }
 
 const QUIZ_ITEMS = [
@@ -610,6 +667,11 @@ function nextQuestion() {
   state.currentQuestion = pickGen();
   state.currentAnswer = "";
   state.questionStartedAt = Date.now();
+  // v0.8 (#116, T4 = #34b): hide the explanation card for the new
+  // question. The card was either dismissed by the "下一题" button
+  // (already hidden) or still visible from a previous wrong answer
+  // (we hide it here so the new question renders clean).
+  hideExplanationCard();
   const el = document.getElementById("q-text");
   el.textContent = state.currentQuestion.display;
   const scenEl = document.getElementById("q-scenario");
@@ -652,6 +714,11 @@ function submitAnswer() {
   if (isCorrect) {
     state.correctCount++;
     inputEl.classList.add("correct");
+    // v0.8 (#116, T4 = #34b): correct answer → no explanation card.
+    // The card is hidden in nextQuestion() too, but hiding here covers
+    // the rare case where the kid types the right answer after a wrong
+    // one (we don't want the previous card to linger if they hit ⌫).
+    hideExplanationCard();
     // v0.8 (#99, T3 prep): if this correct answer was a review of a
     // picked mistake, queue the cascade increment. The actual
     // /api/game/mistake-review endpoint is T3 (#100, not yet
@@ -689,6 +756,19 @@ function submitAnswer() {
         correct: false,
       });
     }
+    // v0.8 (#116, T4 = #34b): wrong answer → show inline explanation
+    // card with the question's errorType. The card is dismissed by
+    // the "下一题" button (advances to next question) or by the next
+    // question's render (whichever happens first). Lazy-load the
+    // explanations module on first use; on the very first wrong
+    // answer in a session this adds < 1ms (file is small and cached
+    // by the browser after the first import).
+    await loadExplanations();
+    showExplanationCard(_getExplanation(state.currentQuestion.errorType));
+    // No automatic setTimeout — the kid reads the card, then taps
+    // "下一题". (Previously wrong-answer flow auto-advanced after
+    // 280ms; the card is the new "next" affordance.)
+    return;
   }
   // v0.6.1: 自适应阶梯 — 根据对错更新 level
   const next = updateAdaptiveLevel(state.level, state.streak, state.wrongStreak, isCorrect);
@@ -699,17 +779,46 @@ function submitAnswer() {
     updateLevelBadge(state.level);
     flashLevelEvent(next.event);
   }
-  // 短暂停留后下一题
+  // 短暂停留后下一题 (correct answer path — no card shown)
   setTimeout(nextQuestion, 280);
+}
+
+// v0.8 (#116, T4 = #34b): inline explanation card helpers. The card
+// is hidden by default (CSS), and shown on wrong answers. "下一题"
+// button hides the card and advances to the next question — same as
+// the auto-advance that used to fire on wrong answers before v0.8.
+function showExplanationCard(explanation) {
+  const card = document.getElementById("explanation-card");
+  document.getElementById("explanation-title").textContent = explanation.title;
+  document.getElementById("explanation-body").textContent = explanation.body;
+  card.classList.add("visible");
+  // Don't auto-advance — the kid reads, then taps the button.
+}
+
+function hideExplanationCard() {
+  const card = document.getElementById("explanation-card");
+  if (card) card.classList.remove("visible");
 }
 
 function endQuiz() {
   if (state.tickHandle) { clearInterval(state.tickHandle); state.tickHandle = null; }
   state.endedAt = Date.now();
+  // v0.8 (#116, T4 = #34b): hide the explanation card on session
+  // end so the result page renders clean. (Without this the card
+  // would linger if the timer reached 0 while the card was showing.)
+  hideExplanationCard();
   showResult();
   // 异步：先上报错题，再上报本局战绩，再拉今日累计
   syncToServer().then(recordSession).then(loadHomeStats).catch(() => {});
 }
+
+// v0.8 (#116, T4 = #34b): wire the "下一题" button. Hides the card
+// and advances to the next question. Same semantics as the auto-
+// advance that used to fire on wrong answers before v0.8.
+document.getElementById("explanation-next").onclick = () => {
+  hideExplanationCard();
+  nextQuestion();
+};
 
 document.getElementById("btn-quit").onclick = () => {
   if (state.totalQuestions === 0) { showPage("home"); return; }
