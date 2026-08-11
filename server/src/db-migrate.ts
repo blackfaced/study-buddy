@@ -57,6 +57,10 @@ export function migrateSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN source TEXT DEFAULT 'study-buddy'`); } catch {}
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN user_answer TEXT`); } catch {}
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN correct_answer TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN evidence_key TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN evidence_status TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN evidence_method TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN evidence_confirmed_at INTEGER`); } catch {}
   // v0.8 (#34a-1, issue #98): per-child mistake dedupe. Existing rows are
   // back-filled with child_id = 'default' so the UNIQUE index can be built
   // without conflicts. The endpoint (/api/game/mistake) accepts an explicit
@@ -64,22 +68,19 @@ export function migrateSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN child_id TEXT NOT NULL DEFAULT 'default'`); } catch {}
 
   // v0.8 (#34a-1, issue #98): deduplicate existing rows before building
-  // the UNIQUE index below. Older versions of the app could insert many
-  // mistakes with the same `problem` (e.g. candy-math-island sync fired
-  // every wrong answer), and now that child_id is filled with 'default'
-  // they would all collide on (default, problem). Keep the earliest row
-  // (smallest id) per (child_id, problem) and drop the rest. This is
-  // a one-time migration; subsequent inserts go through the new deduped
-  // /api/game/mistake endpoint so no further dupes can be created.
+  // the UNIQUE index below. Preserve independent source provenance: a game
+  // attempt and a confirmed vision record may describe the same problem.
+  // Keep the earliest row per (child_id, problem, source).
   // Wrapped in try/catch because the table may not exist yet on a fresh
   // DB (this DELETE runs before the CREATE TABLE block below).
   try {
     db.exec(`
+      UPDATE mistakes SET source = 'study-buddy' WHERE source IS NULL OR source = '';
       DELETE FROM mistakes
       WHERE id NOT IN (
         SELECT MIN(id)
         FROM mistakes
-        GROUP BY child_id, problem
+        GROUP BY child_id, problem, source
       );
     `);
   } catch {
@@ -188,8 +189,28 @@ export function migrateSchema(db: Database.Database): void {
       source TEXT DEFAULT 'study-buddy',
       user_answer TEXT,
       correct_answer TEXT,
+      evidence_key TEXT,
+      evidence_status TEXT,
+      evidence_method TEXT,
+      evidence_confirmed_at INTEGER,
       child_id TEXT NOT NULL DEFAULT 'default',
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS mistake_photo_confirmations (
+      draft_id TEXT PRIMARY KEY,
+      mistake_id INTEGER NOT NULL,
+      session_id TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      confirmation_method TEXT NOT NULL CHECK (
+        confirmation_method IN ('explicit_acceptance', 'explicit_correction')
+      ),
+      confirmed_at INTEGER NOT NULL,
+      FOREIGN KEY (mistake_id) REFERENCES mistakes(id) ON DELETE CASCADE,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_id) REFERENCES children(id),
+      FOREIGN KEY (device_id) REFERENCES paired_devices(device_id)
     );
 
     CREATE TABLE IF NOT EXISTS settings (
@@ -278,11 +299,13 @@ export function migrateSchema(db: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_game_sessions_source_record
       ON game_sessions(source_record_id) WHERE source_record_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
-    -- v0.8 (#34a-1, issue #98): UNIQUE on (child_id, problem) — the
-    -- foundation for "auto-record once, dedupe across multiple wrong
-    -- answers" without a SELECT-then-INSERT race. T2 (#99) and T3 (#100)
-    -- build on top of this index.
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_child_problem ON mistakes(child_id, problem);
+    -- Dedupe repeated records within one source while preserving provenance
+    -- when game and vision both contribute the same normalized problem.
+    DROP INDEX IF EXISTS idx_mistakes_child_problem;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_child_problem_source
+      ON mistakes(child_id, problem, source);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_evidence_key
+      ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL;
 
     CREATE TRIGGER IF NOT EXISTS source_installation_immutable_update
       BEFORE UPDATE ON source_installation

@@ -98,6 +98,10 @@ function runMigrations(inst: Database.Database) {
     "ALTER TABLE mistakes ADD COLUMN source TEXT DEFAULT 'study-buddy'",
     "ALTER TABLE mistakes ADD COLUMN user_answer TEXT",
     "ALTER TABLE mistakes ADD COLUMN correct_answer TEXT",
+    "ALTER TABLE mistakes ADD COLUMN evidence_key TEXT",
+    "ALTER TABLE mistakes ADD COLUMN evidence_status TEXT",
+    "ALTER TABLE mistakes ADD COLUMN evidence_method TEXT",
+    "ALTER TABLE mistakes ADD COLUMN evidence_confirmed_at INTEGER",
     "ALTER TABLE mistakes ADD COLUMN child_id TEXT NOT NULL DEFAULT 'default'",
     // Explainable handwriting attempts (mirror server/src/db-migrate.ts).
     "ALTER TABLE writing_attempts ADD COLUMN score INTEGER",
@@ -111,6 +115,20 @@ function runMigrations(inst: Database.Database) {
   ];
   for (const sql of alters) {
     try { inst.exec(sql); } catch { /* column already exists */ }
+  }
+
+  // Mirror server/src/db-migrate.ts: keep one row per source provenance
+  // before replacing the legacy (child_id, problem) unique index.
+  try {
+    inst.exec(`
+      UPDATE mistakes SET source = 'study-buddy' WHERE source IS NULL OR source = '';
+      DELETE FROM mistakes
+      WHERE id NOT IN (
+        SELECT MIN(id) FROM mistakes GROUP BY child_id, problem, source
+      );
+    `);
+  } catch {
+    /* fresh DB — mistakes does not exist yet */
   }
 
   widenSourceEventVocabulary(inst);
@@ -203,8 +221,28 @@ function runMigrations(inst: Database.Database) {
       source TEXT DEFAULT 'study-buddy',
       user_answer TEXT,
       correct_answer TEXT,
+      evidence_key TEXT,
+      evidence_status TEXT,
+      evidence_method TEXT,
+      evidence_confirmed_at INTEGER,
       child_id TEXT NOT NULL DEFAULT 'default',
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS mistake_photo_confirmations (
+      draft_id TEXT PRIMARY KEY,
+      mistake_id INTEGER NOT NULL,
+      session_id TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      confirmation_method TEXT NOT NULL CHECK (
+        confirmation_method IN ('explicit_acceptance', 'explicit_correction')
+      ),
+      confirmed_at INTEGER NOT NULL,
+      FOREIGN KEY (mistake_id) REFERENCES mistakes(id) ON DELETE CASCADE,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_id) REFERENCES children(id),
+      FOREIGN KEY (device_id) REFERENCES paired_devices(device_id)
     );
 
     CREATE TABLE IF NOT EXISTS settings (
@@ -287,6 +325,11 @@ function runMigrations(inst: Database.Database) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_game_sessions_source_record
       ON game_sessions(source_record_id) WHERE source_record_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
+    DROP INDEX IF EXISTS idx_mistakes_child_problem;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_child_problem_source
+      ON mistakes(child_id, problem, source);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_evidence_key
+      ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL;
 
     CREATE TRIGGER IF NOT EXISTS source_installation_immutable_update
       BEFORE UPDATE ON source_installation

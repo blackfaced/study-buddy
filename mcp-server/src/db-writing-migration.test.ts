@@ -35,6 +35,13 @@ describe("MCP writing schema migration", () => {
     expect(db.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'paired_devices'",
     ).get()).toBeDefined();
+    expect(db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mistake_photo_confirmations'",
+    ).get()).toBeDefined();
+    const mistakeIndex = db.prepare(
+      "PRAGMA index_info(idx_mistakes_child_problem_source)",
+    ).all() as Array<{ name: string }>;
+    expect(mistakeIndex.map((column) => column.name)).toEqual(["child_id", "problem", "source"]);
   });
 
   it("upgrades a legacy writing_attempts table in place", () => {
@@ -98,5 +105,35 @@ describe("MCP writing schema migration", () => {
     expect(() => db.prepare(
       "UPDATE paired_devices SET device_id = NULL WHERE device_id = 'device-1'",
     ).run()).toThrow();
+  });
+
+  it("deduplicates legacy mistakes within each source without merging provenance", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "study-buddy-mcp-mistakes-"));
+    const path = join(tempDir, "study.db");
+    const legacy = new Database(path);
+    legacy.exec(`
+      CREATE TABLE mistakes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        ts INTEGER NOT NULL DEFAULT 0,
+        child_id TEXT NOT NULL,
+        problem TEXT,
+        source TEXT
+      );
+      INSERT INTO mistakes (session_id, child_id, problem, source) VALUES
+        ('legacy', 'default', '1+1', 'game'),
+        ('legacy', 'default', '1+1', 'game'),
+        ('legacy', 'default', '1+1', 'vision');
+    `);
+    legacy.close();
+
+    const db = initDb(path);
+    const rows = db.prepare(
+      "SELECT source, COUNT(*) AS count FROM mistakes GROUP BY source ORDER BY source",
+    ).all();
+    expect(rows).toEqual([
+      { source: "game", count: 1 },
+      { source: "vision", count: 1 },
+    ]);
   });
 });

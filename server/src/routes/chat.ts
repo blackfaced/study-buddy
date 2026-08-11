@@ -23,9 +23,7 @@
 //   - registerChatRoutes(app, deps)
 // =====================================================================
 import sharp from "sharp";
-import { unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import type { Logger } from "../logger.js";
@@ -33,13 +31,19 @@ import type { VisionClient } from "../vision.js";
 import { buildSystemPrompt, buildChatPrompt } from "../llm-prompt.js";
 import { detectNameChange } from "../child-name.js";
 import { parseEmotionTag, detectLoopFromTexts } from "../chat-signal.js";
-import { analyzeMistakeImage } from "../vision.js";
 import { appendChatTurnSourceEvent } from "../source-events.js";
 import {
   devicePrincipal,
   type DeviceRequestAuthenticator,
 } from "../device-auth.js";
-import { findOwnedActiveSession } from "./session.js";
+import {
+  findOwnedActiveSession,
+  requireOwnedActiveSession,
+  respondOwnedSessionFailure,
+  type OwnedSessionFailure,
+} from "./session.js";
+import { registerMistakePhotoRoutes } from "./mistake-photo.js";
+import { MistakePhotoWorkflow } from "../mistake-photo-workflow.js";
 
 const OFFTOPIC_KEYWORDS = [
   "奥特曼", "汪汪队", "冰雪奇缘", "艾莎", "公主", "巴啦啦",
@@ -74,6 +78,8 @@ export interface ChatRouteDeps {
   /** LLM call. Injected so tests can stub it without hitting the network. */
   callMinimax: CallMinimax;
   auth: DeviceRequestAuthenticator;
+  mistakePhotoWorkflow?: MistakePhotoWorkflow;
+  beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
 }
 
 const FRAME_WARN_DEBOUNCE = 3;
@@ -121,7 +127,7 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
 
   // ============== 摄像头帧 ==============
   app.post("/api/video-mode", auth.requireDevice, (req: Request, res: Response) => {
-    const session = ownedActiveSession(req, res, db);
+    const session = requireOwnedActiveSession(req, res, db);
     if (!session) return;
     const { enabled } = req.body ?? {};
     if (typeof enabled !== "boolean") {
@@ -134,7 +140,7 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
   });
 
   app.post("/api/frame", auth.requireDevice, upload.single("frame"), async (req: Request, res: Response) => {
-    const session = ownedActiveSession(req, res, db);
+    const session = requireOwnedActiveSession(req, res, db);
     if (!session) return;
     if (!req.file) return res.status(400).json({ error: "no frame" });
     const sessionKey = session.id;
@@ -216,7 +222,7 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
     if (!text || typeof text !== "string" || text.length > 4000) {
       return res.status(400).json({ error: "no text" });
     }
-    const session = ownedActiveSession(req, res, db);
+    const session = requireOwnedActiveSession(req, res, db);
     if (!session) return;
     const child = db.prepare("SELECT * FROM children WHERE id = ?").get(session.child_id) as
       | { name: string }
@@ -325,118 +331,19 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
     });
   });
 
-  // ============== 错题拍照（v0.5） ==============
-  app.post(
-    "/api/mistake-photo",
-    auth.requireDevice,
-    upload.single("photo"),
-    async (req: Request, res: Response) => {
-      const session = ownedActiveSession(req, res, db);
-      if (!session) return;
-      if (!visionClient) {
-        return res.status(503).json({
-          error: "vision not configured (MINIMAX_API_KEY not set on the server)",
-        });
-      }
-      if (!req.file) return res.status(400).json({ error: "no photo" });
-
-      const mistakeId = randomUUID();
-      const filename = `${mistakeId}.jpg`;
-      const imagePath = join(mistakesDir, filename);
-      try {
-        writeFileSync(imagePath, req.file.buffer);
-      } catch (error: any) {
-        logger.error("mistake photo save failed", { errorCode: error?.code ?? "unknown" });
-        return res.status(500).json({ error: "failed to save photo" });
-      }
-
-      const base64 = req.file.buffer.toString("base64");
-      let analysis;
-      try {
-        analysis = await analyzeMistakeImage(visionClient, base64);
-      } catch (error: any) {
-        cleanupPhoto(imagePath);
-        logger.error("mistake photo vision failed", { errorType: error?.name ?? "Error" });
-        return res.status(502).json({ error: "vision failed" });
-      }
-
-      const now = Date.now();
-      const current = findOwnedActiveSession(db, session.id, devicePrincipal(res));
-      if (current.status !== "ok") {
-        cleanupPhoto(imagePath);
-        return respondOwnedSessionFailure(res, current.status);
-      }
-      try {
-        db.prepare(
-          `INSERT INTO mistakes
-           (session_id, subject, problem, error_type, image_path, vision_input, vision_reasoning, vision_model, vision_ts)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(
-          session.id,
-          "math",
-          analysis.problemText || "(无题目文字)",
-          "vision_pending",
-          imagePath,
-          analysis.problemText,
-          analysis.reasoning,
-          analysis.model,
-          now
-        );
-      } catch {
-        cleanupPhoto(imagePath);
-        logger.error("mistake photo database insert failed");
-        return res.status(500).json({ error: "mistake could not be recorded" });
-      }
-
-      res.json({
-        mistakeId,
-        imagePath,
-        problemText: analysis.problemText,
-        reasoning: analysis.reasoning,
-        model: analysis.model,
-        visionTs: now,
-      });
-    },
-  );
+  registerMistakePhotoRoutes(app, {
+    db,
+    logger,
+    visionClient,
+    upload,
+    auth,
+    workflow: deps.mistakePhotoWorkflow ?? new MistakePhotoWorkflow({ rootDir: mistakesDir }),
+    beforeSourceEventAppend: deps.beforeSourceEventAppend,
+  });
 }
-
-function ownedActiveSession(
-  req: Request,
-  res: Response,
-  db: Database.Database,
-): { id: string; child_id: string } | null {
-  const sessionId = typeof req.body?.sessionId === "string" ? req.body.sessionId : "";
-  if (!sessionId) {
-    res.status(400).json({ error: "sessionId is required" });
-    return null;
-  }
-  const result = findOwnedActiveSession(db, sessionId, devicePrincipal(res));
-  if (result.status !== "ok") {
-    respondOwnedSessionFailure(res, result.status);
-    return null;
-  }
-  return result.session;
-}
-
-function cleanupPhoto(imagePath: string): void {
-  try { unlinkSync(imagePath); } catch { /* best-effort orphan cleanup */ }
-}
-
-type OwnedSessionFailure = Exclude<
-  ReturnType<typeof findOwnedActiveSession>["status"],
-  "ok"
->;
 
 class OwnedSessionChanged extends Error {
   constructor(readonly status: OwnedSessionFailure) {
     super(`owned session changed: ${status}`);
   }
-}
-
-function respondOwnedSessionFailure(res: Response, status: OwnedSessionFailure): Response {
-  if (status === "not-found") return res.status(404).json({ error: "session not found" });
-  if (status === "forbidden") {
-    return res.status(403).json({ error: "session does not belong to device" });
-  }
-  return res.status(409).json({ error: "session is not active" });
 }

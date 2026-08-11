@@ -47,6 +47,7 @@ window.Buddy.state = {
 
   // 拍照
   photoInFlight: false,
+  photoFlow: null,
 };
 
 /**

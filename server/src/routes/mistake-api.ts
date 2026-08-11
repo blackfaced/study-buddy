@@ -190,11 +190,12 @@ export interface InsertMistakeResult {
 }
 
 /**
- * Insert a wrong-answer row into `mistakes` deduped by (child_id, problem).
+ * Insert a wrong-answer row into `mistakes` deduped by
+ * (child_id, problem, source).
  *
  * Behavior:
- *   - New (child_id, problem) pair → INSERT, return {id, created: true}
- *   - Existing (child_id, problem) pair → UNIQUE conflict, return the
+ *   - New (child_id, problem, source) tuple → INSERT, return {id, created: true}
+ *   - Existing tuple → UNIQUE conflict, return the
  *     existing id with {id, created: false} (idempotent retry)
  *
  * On collision we DO NOT update user_answer / correct_answer / error_type
@@ -245,8 +246,8 @@ export function insertMistake(
       return { id, created: true };
     }
     const existing = db
-      .prepare("SELECT id FROM mistakes WHERE child_id = ? AND problem = ?")
-      .get(input.childId, input.problem) as { id: number } | undefined;
+      .prepare("SELECT id FROM mistakes WHERE child_id = ? AND problem = ? AND source = ?")
+      .get(input.childId, input.problem, input.source) as { id: number } | undefined;
     if (!existing) {
       throw new Error(
         `insertMistake: UNIQUE collision but row not found ` +

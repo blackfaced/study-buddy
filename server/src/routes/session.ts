@@ -45,6 +45,8 @@ export type OwnedSessionResult =
   | { status: "forbidden" }
   | { status: "ended" };
 
+export type OwnedSessionFailure = Exclude<OwnedSessionResult["status"], "ok">;
+
 export function findOwnedActiveSession(
   db: Database.Database,
   sessionId: string,
@@ -67,6 +69,36 @@ export function findOwnedActiveSession(
   if (!activeDevice) return { status: "forbidden" };
   if (session.ended_at !== null) return { status: "ended" };
   return { status: "ok", session: { id: session.id, child_id: session.child_id } };
+}
+
+export function requireOwnedActiveSession(
+  req: Request,
+  res: Response,
+  db: Database.Database,
+): { id: string; child_id: string } | null {
+  const candidate = req.body?.sessionId ?? req.query?.sessionId;
+  const sessionId = typeof candidate === "string" ? candidate : "";
+  if (!sessionId) {
+    res.status(400).json({ error: "sessionId is required" });
+    return null;
+  }
+  const result = findOwnedActiveSession(db, sessionId, devicePrincipal(res));
+  if (result.status !== "ok") {
+    respondOwnedSessionFailure(res, result.status);
+    return null;
+  }
+  return result.session;
+}
+
+export function respondOwnedSessionFailure(
+  res: Response,
+  status: OwnedSessionFailure,
+): Response {
+  if (status === "not-found") return res.status(404).json({ error: "session not found" });
+  if (status === "forbidden") {
+    return res.status(403).json({ error: "session does not belong to device" });
+  }
+  return res.status(409).json({ error: "session is not active" });
 }
 
 /**

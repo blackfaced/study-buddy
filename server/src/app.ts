@@ -34,6 +34,7 @@ import { registerQuizContextRoutes } from "./routes/quiz-context.js";
 import { registerIntegrationRoutes } from "./routes/integration.js";
 import { DeviceAuth, type DeviceRequestAuthenticator } from "./device-auth.js";
 import { registerPairingRoutes } from "./routes/pairing.js";
+import { MistakePhotoWorkflow } from "./mistake-photo-workflow.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -70,6 +71,8 @@ export interface AppOptions {
   callMinimax?: CallMinimax;
   /** Throw-only test seam; the real immutable writer always runs afterward. */
   beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
+  /** Test seam for mistake-photo expiry and startup cleanup. */
+  mistakePhotoWorkflow?: MistakePhotoWorkflow;
 }
 
 const OFFTOPIC_KEYWORDS = [
@@ -144,6 +147,8 @@ export function createApp(opts: AppOptions): express.Express {
     upload,
     callMinimax: opts.callMinimax ?? defaultCallMinimax,
     auth: deviceAuthenticator,
+    mistakePhotoWorkflow: opts.mistakePhotoWorkflow,
+    beforeSourceEventAppend: opts.beforeSourceEventAppend,
   });
 
   // Game + write + extract routes

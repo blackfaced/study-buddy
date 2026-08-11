@@ -37,6 +37,7 @@ describe("migrateSchema", () => {
     expect(names).toContain("chat_turns");
     expect(names).toContain("posture_events");
     expect(names).toContain("mistakes");
+    expect(names).toContain("mistake_photo_confirmations");
     expect(names).toContain("source_installation");
     expect(names).toContain("source_subjects");
     expect(names).toContain("source_events");
@@ -134,6 +135,23 @@ describe("migrateSchema", () => {
     const cols = db.prepare("PRAGMA table_info(mistakes)").all() as Array<{ name: string }>;
     const colNames = cols.map((c) => c.name);
     expect(colNames).toContain("source");
+    db.close();
+  });
+
+  it("adds confirmed-only mistake photo evidence fields and idempotency receipts", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const columns = db.prepare("PRAGMA table_info(mistakes)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "evidence_key", "evidence_status", "evidence_method", "evidence_confirmed_at",
+    ]));
+    const receiptColumns = db.prepare("PRAGMA table_info(mistake_photo_confirmations)").all() as Array<{ name: string }>;
+    expect(receiptColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "draft_id", "mistake_id", "session_id", "child_id", "device_id",
+      "confirmation_method", "confirmed_at",
+    ]));
+    const indexColumns = db.prepare("PRAGMA index_info(idx_mistakes_child_problem_source)").all() as Array<{ name: string }>;
+    expect(indexColumns.map((column) => column.name)).toEqual(["child_id", "problem", "source"]);
     db.close();
   });
 

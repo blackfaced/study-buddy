@@ -104,10 +104,10 @@ export function parseVisionResponse(content: string): { problemText: string; rea
 export async function analyzeMistakeImage(
   client: VisionClient,
   imageBase64: string,
-  options: { model?: string } = {},
+  options: { model?: string; signal?: AbortSignal } = {},
 ): Promise<MistakeAnalysis> {
   const { system, user } = buildMistakePrompt();
-  const { content, raw } = await client.chat({ system, user, imageBase64 });
+  const { content, raw } = await client.chat({ system, user, imageBase64, signal: options.signal });
   const { problemText, reasoning } = parseVisionResponse(content);
   return {
     problemText,
