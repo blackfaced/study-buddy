@@ -121,7 +121,6 @@ beforeAll(() => {
    ```
 3. 如果要写错题：
    - 调用 `POST /api/game/mistake`（参数跟 candy-math-island 一样，复用同 schema）
-   - 或自己直接 `INSERT INTO mistakes ... source='<your-source>'`
 4. 如果要读错题：
    - `GET /api/game/weak-topics?days=7`（聚合所有 source=game 的）
    - 或 MCP 工具 `get_weak_topics` / `get_game_weak_topics`

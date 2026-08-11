@@ -3,6 +3,7 @@ import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import {
   DEFAULT_SOURCE_EVENT_PAGE_SIZE,
+  isValidSourceEventCursor,
   MAX_SOURCE_EVENT_PAGE_SIZE,
   chatTurnRecordId,
   parseChatSessionRef,
@@ -56,6 +57,10 @@ export function registerIntegrationRoutes(
       }
       if (requestedSchemaVersion !== SOURCE_EVENT_SCHEMA_VERSION) {
         res.status(400).json({ error: "unsupported source event schema version" });
+        return;
+      }
+      if (!isValidSourceEventCursor(deps.db, after)) {
+        res.status(400).json({ error: "cursor was not issued by this feed" });
         return;
       }
 

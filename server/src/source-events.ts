@@ -330,6 +330,15 @@ export function readSourceEventPage(
   };
 }
 
+/** A feed cursor is either the initial zero or an immutable sequence already issued. */
+export function isValidSourceEventCursor(
+  db: Database.Database,
+  after: number,
+): boolean {
+  if (after === 0) return true;
+  return db.prepare("SELECT 1 FROM source_events WHERE seq = ?").get(after) !== undefined;
+}
+
 function sourceEventFromRow(row: SourceEventRow): SourceEvent {
   if (
     row.event_schema_version !== SOURCE_EVENT_SCHEMA_VERSION ||

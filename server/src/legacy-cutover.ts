@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -88,38 +88,74 @@ export async function inventoryLegacyJsonl(
 export async function enableSourceFeedCutover(
   options: EnableCutoverOptions,
 ): Promise<{ marker: CutoverMarker; inventory: LegacyInventory }> {
-  if (options.producerEnabled ?? LEGACY_JSONL_PRODUCER_ENABLED) {
-    throw new Error("legacy JSONL producer is still enabled");
-  }
-
-  const isProcessRunning = options.isProcessRunning ?? processIsRunning;
-  for (const pidPath of options.workerPidPaths) {
-    const pid = await readPid(pidPath);
-    if (pid !== null && isProcessRunning(pid)) {
-      throw new Error("legacy JSONL worker is still running");
+  const workerLocks = await acquireWorkerCutoverLocks(options.workerPidPaths);
+  try {
+    if (options.producerEnabled ?? LEGACY_JSONL_PRODUCER_ENABLED) {
+      throw new Error("legacy JSONL producer is still enabled");
     }
-  }
-  for (const pidPath of options.producerPidPaths ?? []) {
-    const pid = await readPid(pidPath);
-    if (pid !== null && isProcessRunning(pid)) {
-      throw new Error("legacy JSONL producer process may still be running");
-    }
-  }
 
-  const inventory = await inventoryLegacyJsonl(options.legacyFiles);
-  const marker: CutoverMarker = {
-    version: SOURCE_FEED_CUTOVER_VERSION,
-    enabled: true,
-    enabledAt: new Date(options.enabledAt ?? Date.now()).toISOString(),
-    legacyFilesInventoried: inventory.files.length,
-    legacyRecordsInventoried: inventory.totals.records,
-  };
-  await mkdir(dirname(options.markerPath), { recursive: true });
-  await writeFile(options.markerPath, `${JSON.stringify(marker)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-  });
-  return { marker, inventory };
+    const isProcessRunning = options.isProcessRunning ?? processIsRunning;
+    for (const pidPath of options.workerPidPaths) {
+      const pid = await readPid(pidPath);
+      if (pid !== null && isProcessRunning(pid)) {
+        throw new Error("legacy JSONL worker is still running");
+      }
+    }
+    for (const pidPath of options.producerPidPaths ?? []) {
+      const pid = await readPid(pidPath);
+      if (pid !== null && isProcessRunning(pid)) {
+        throw new Error("legacy JSONL producer process may still be running");
+      }
+    }
+
+    const inventory = await inventoryLegacyJsonl(options.legacyFiles);
+    const marker: CutoverMarker = {
+      version: SOURCE_FEED_CUTOVER_VERSION,
+      enabled: true,
+      enabledAt: new Date(options.enabledAt ?? Date.now()).toISOString(),
+      legacyFilesInventoried: inventory.files.length,
+      legacyRecordsInventoried: inventory.totals.records,
+    };
+    await mkdir(dirname(options.markerPath), { recursive: true });
+    await writeFile(options.markerPath, `${JSON.stringify(marker)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+    return { marker, inventory };
+  } finally {
+    await releaseWorkerCutoverLocks(workerLocks);
+  }
+}
+
+async function acquireWorkerCutoverLocks(pidPaths: string[]): Promise<string[]> {
+  const acquired: string[] = [];
+  try {
+    for (const pidPath of new Set(pidPaths)) {
+      const lockPath = `${pidPath}.lock`;
+      await mkdir(dirname(lockPath), { recursive: true });
+      try {
+        await mkdir(lockPath);
+      } catch (error: any) {
+        if (error?.code === "EEXIST") {
+          throw new Error("legacy JSONL worker lease is already held");
+        }
+        throw error;
+      }
+      acquired.push(lockPath);
+    }
+    return acquired;
+  } catch (error) {
+    await releaseWorkerCutoverLocks(acquired);
+    throw error;
+  }
+}
+
+async function releaseWorkerCutoverLocks(lockPaths: string[]): Promise<void> {
+  for (const lockPath of [...lockPaths].reverse()) {
+    await rmdir(lockPath).catch((error: any) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+  }
 }
 
 export async function assertLegacyWorkerCanRun(

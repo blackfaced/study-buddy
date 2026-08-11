@@ -40,6 +40,7 @@ import { appendLearningAttemptSourceEvent } from "../source-events.js";
 
 export interface MistakeRouteDeps {
   db: Database.Database;
+  beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
 }
 
 interface MistakeRequestBody {
@@ -98,14 +99,18 @@ export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): voi
 
     let result: InsertMistakeResult;
     try {
-      result = insertMistake(db, {
-        childId,
-        problem: body.problem,
-        userAnswer: body.userAnswer,
-        correctAnswer,
-        errorType,
-        source,
-      });
+      result = insertMistake(
+        db,
+        {
+          childId,
+          problem: body.problem,
+          userAnswer: body.userAnswer,
+          correctAnswer,
+          errorType,
+          source,
+        },
+        deps.beforeSourceEventAppend,
+      );
     } catch {
       res.status(500).json({ error: "mistake could not be recorded" });
       return;
@@ -201,6 +206,7 @@ export interface InsertMistakeResult {
 export function insertMistake(
   db: Database.Database,
   input: InsertMistakeInput,
+  beforeSourceEventAppend?: (recordType: "learning_attempt") => void,
 ): InsertMistakeResult {
   return db.transaction(() => {
     ensureChildRow(db, input.childId);
@@ -223,6 +229,7 @@ export function insertMistake(
     );
     if (result.changes === 1) {
       const id = Number(result.lastInsertRowid);
+      beforeSourceEventAppend?.("learning_attempt");
       appendLearningAttemptSourceEvent(db, {
         mistakeId: id,
         childId: input.childId,

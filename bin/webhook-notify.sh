@@ -36,6 +36,7 @@ STATE="${WEBHOOK_STATE:-$ROOT/server/data/nexus-outbox.webhook-state.json}"
 PROCESSED="${WEBHOOK_PROCESSED:-$ROOT/server/data/nexus-outbox.webhook-processed.jsonl}"
 URL="${DINGTALK_WEBHOOK_URL:-}"
 CUTOVER_MARKER="${SOURCE_FEED_CUTOVER_MARKER:-$ROOT/data/source-feed-cutover.json}"
+source "$ROOT/bin/legacy-worker-lease.sh"
 
 # The actual worker is a small tsx script. We keep the script tiny so
 # it can be re-run / hot-swapped without restarting the daemon.
@@ -57,10 +58,6 @@ is_running() {
 }
 
 cmd_start() {
-  if is_running; then
-    err "already running (pid=$(cat "$PIDFILE"))"
-    exit 3
-  fi
   if [[ ! -f "$WORKER" ]]; then
     err "worker script not found at $WORKER — did the server/src/webhook-notify.ts file get committed?"
     exit 4
@@ -70,25 +67,51 @@ cmd_start() {
     warn "DINGTALK_WEBHOOK_URL is empty — running in no-op mode (outbox will not be drained)"
   fi
   info "starting webhook-notify (outbox=$OUTBOX poll=${POLL_MS}ms log=$LOGFILE)"
-  # nohup + &  so the worker outlives the parent shell.
-  nohup npx --prefix "$ROOT/server" tsx "$WORKER" \
-    --outbox "$OUTBOX" \
-    --processed "$PROCESSED" \
-    --state "$STATE" \
-    --url "$URL" \
-    --cutover-marker "$CUTOVER_MARKER" \
-    --poll-ms "$POLL_MS" \
-    > "$LOGFILE" 2>&1 &
+  nohup "$0" __daemon >"$LOGFILE" 2>&1 &
   local pid=$!
-  echo "$pid" > "$PIDFILE"
+  local ready_file="${PIDFILE}.ready.${pid}"
+  local attempts=0
+  while [[ ! -f "$ready_file" ]]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || true
+      err "worker failed to acquire its lease — see $LOGFILE"
+      exit 3
+    fi
+    attempts=$((attempts + 1))
+    if (( attempts >= 200 )); then
+      kill -TERM "$pid" 2>/dev/null || true
+      err "worker timed out while acquiring its lease — see $LOGFILE"
+      exit 3
+    fi
+    sleep 0.01
+  done
+  rm -f "$ready_file"
   info "started pid=$pid"
   # Give tsx a moment to fail fast if there's an obvious problem.
   sleep 1
   if ! kill -0 "$pid" 2>/dev/null; then
     err "worker died immediately — see $LOGFILE"
-    rm -f "$PIDFILE"
+    legacy_worker_release_lease "$lease_token" "$pid" || true
     exit 1
   fi
+}
+
+cmd_daemon() {
+  legacy_worker_acquire_lease || exit 3
+  local lease_token=$LEGACY_WORKER_LEASE_TOKEN
+  legacy_worker_begin_supervisor "$lease_token"
+  if legacy_worker_cutover_is_enabled; then
+    err "webhook-notify is retired after source-feed cutover"
+    exit 5
+  fi
+  printf "ready\n" >"${PIDFILE}.ready.$$"
+  legacy_worker_supervise_command npx --prefix "$ROOT/server" tsx "$WORKER" \
+    --outbox "$OUTBOX" \
+    --processed "$PROCESSED" \
+    --state "$STATE" \
+    --url "$URL" \
+    --cutover-marker "$CUTOVER_MARKER" \
+    --poll-ms "$POLL_MS"
 }
 
 cmd_stop() {
@@ -97,19 +120,14 @@ cmd_stop() {
     return 0
   fi
   local pid; pid=$(cat "$PIDFILE")
+  local lease_token=""
+  lease_token=$(cat "$LEGACY_WORKER_LOCKDIR/token" 2>/dev/null || true)
   info "stopping pid=$pid"
-  kill -TERM "$pid" 2>/dev/null || true
-  for _ in 1 2 3 4 5; do
-    sleep 1
-    if ! kill -0 "$pid" 2>/dev/null; then
-      rm -f "$PIDFILE"
-      info "stopped"
-      return 0
-    fi
-  done
-  warn "did not exit after 5s, sending SIGKILL"
-  kill -KILL "$pid" 2>/dev/null || true
-  rm -f "$PIDFILE"
+  if ! legacy_worker_stop_owner "$lease_token" "$pid"; then
+    err "worker or supervised child is still alive; lease retained"
+    return 1
+  fi
+  info "stopped"
 }
 
 cmd_status() {
@@ -136,8 +154,18 @@ cmd_once() {
     err "worker script not found at $WORKER"
     exit 4
   fi
+  if ! legacy_worker_acquire_lease; then
+    err "webhook-notify lease is already held"
+    exit 3
+  fi
+  local lease_token=$LEGACY_WORKER_LEASE_TOKEN
+  legacy_worker_begin_supervisor "$lease_token"
+  if legacy_worker_cutover_is_enabled; then
+    err "webhook-notify is retired after source-feed cutover"
+    exit 5
+  fi
   info "running single drain (outbox=$OUTBOX url=${URL:0:40}${URL:+…})"
-  npx --prefix "$ROOT/server" tsx "$WORKER" \
+  legacy_worker_supervise_command npx --prefix "$ROOT/server" tsx "$WORKER" \
     --once \
     --outbox "$OUTBOX" \
     --processed "$PROCESSED" \
@@ -169,6 +197,7 @@ cmd_help() {
 }
 
 case "${1:-help}" in
+  __daemon) shift; cmd_daemon "$@" ;;
   start)  shift; cmd_start "$@" ;;
   stop)   shift; cmd_stop "$@" ;;
   restart) shift; cmd_stop; cmd_start "$@" ;;

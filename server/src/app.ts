@@ -58,6 +58,8 @@ export interface AppOptions {
   integrationLoopbackCheck?: (req: Request) => boolean;
   /** Test seam for chat completion; production defaults to MiniMax. */
   callMinimax?: CallMinimax;
+  /** Throw-only test seam; the real immutable writer always runs afterward. */
+  beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
 }
 
 const OFFTOPIC_KEYWORDS = [
@@ -131,7 +133,10 @@ export function createApp(opts: AppOptions): express.Express {
     visionClient: opts.visionClient === undefined ? null : opts.visionClient,
   });
   registerWhoamiRoutes(app, { db, version: "0.1.0" });
-  registerMistakeRoutes(app, { db });
+  registerMistakeRoutes(app, {
+    db,
+    beforeSourceEventAppend: opts.beforeSourceEventAppend,
+  });
   registerQuizContextRoutes(app, { db });
   const integrationToken =
     opts.integrationToken === undefined
