@@ -64,6 +64,7 @@ Event logs are domain-specific (`session started`, `frame sharp error`, etc.) an
 | `STUDY_DB` | `data/study.db` | absolute path preferred. |
 | `SSL_KEY` / `SSL_CERT` | `server.key` / `server.cert` (project root) | self-signed. If either is missing, the server falls back to plain HTTP. |
 | `MINIMAX_API_KEY` | — | required for `/api/mistake-photo`. Without it, the endpoint returns 503. |
+| `INTEGRATION_API_TOKEN` | — | independent high-entropy Bearer token for the loopback-only `GET /api/integration/source-events` provider feed. Do not reuse `BUDDY_PIN`; when unset, the feed stays unauthorized. |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_DIR` | `data/logs` | |
 | `LOG_FILE` | `$LOG_DIR/study-buddy-server.log` | |

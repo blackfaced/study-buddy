@@ -26,7 +26,7 @@ import { registerWriteRoutes } from "./routes/write.js";
 import { registerWhoamiRoutes } from "./routes/whoami.js";
 import { registerMistakeRoutes } from "./routes/mistake-api.js";
 import { registerQuizContextRoutes } from "./routes/quiz-context.js";
-
+import { registerIntegrationRoutes } from "./routes/integration.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -47,6 +47,10 @@ export interface AppOptions {
   logger?: Logger;
   /** Override the 4-digit PIN for /api/buddy/unlock. Defaults to env BUDDY_PIN. Empty/null = unlocked. */
   buddyPin?: string | null;
+  /** Independent credential for loopback-only provider integration APIs. */
+  integrationToken?: string | null;
+  /** Test seam for the socket-level loopback policy. */
+  integrationLoopbackCheck?: (req: Request) => boolean;
 }
 
 const OFFTOPIC_KEYWORDS = [
@@ -126,6 +130,15 @@ export function createApp(opts: AppOptions): express.Express {
   registerWhoamiRoutes(app, { db, version: "0.1.0" });
   registerMistakeRoutes(app, { db });
   registerQuizContextRoutes(app, { db });
+  const integrationToken =
+    opts.integrationToken === undefined
+      ? (process.env.INTEGRATION_API_TOKEN ?? null)
+      : opts.integrationToken;
+  registerIntegrationRoutes(app, {
+    db,
+    token: integrationToken,
+    isLoopback: opts.integrationLoopbackCheck,
+  });
 
   return app;
 }

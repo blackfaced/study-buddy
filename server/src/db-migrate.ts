@@ -12,6 +12,7 @@
 // throws "duplicate column" on the second call.
 
 import type Database from "better-sqlite3";
+import { randomUUID } from "node:crypto";
 
 export function migrateSchema(db: Database.Database): void {
   db.pragma("journal_mode = WAL");
@@ -202,6 +203,38 @@ export function migrateSchema(db: Database.Database): void {
       FOREIGN KEY (char) REFERENCES writing_words(char) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS source_installation (
+      singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+      installation_id TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS source_subjects (
+      child_id TEXT PRIMARY KEY,
+      subject_ref TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      FOREIGN KEY (child_id) REFERENCES children(id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS source_events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL UNIQUE,
+      source_product TEXT NOT NULL CHECK (source_product = 'study_buddy'),
+      source_installation_id TEXT NOT NULL,
+      subject_ref TEXT NOT NULL,
+      record_type TEXT NOT NULL CHECK (record_type = 'learning_attempt'),
+      record_id TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      occurred_at INTEGER NOT NULL,
+      event_type TEXT NOT NULL CHECK (event_type = 'learning_attempt_recorded'),
+      event_schema_version INTEGER NOT NULL CHECK (event_schema_version = 1),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json) AND length(payload_json) <= 4096),
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      UNIQUE (record_type, record_id, revision),
+      FOREIGN KEY (source_installation_id) REFERENCES source_installation(installation_id) ON DELETE RESTRICT,
+      FOREIGN KEY (subject_ref) REFERENCES source_subjects(subject_ref) ON DELETE RESTRICT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sessions_child ON sessions(child_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posture_session ON posture_events(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_turns(session_id, ts);
@@ -213,7 +246,24 @@ export function migrateSchema(db: Database.Database): void {
     -- answers" without a SELECT-then-INSERT race. T2 (#99) and T3 (#100)
     -- build on top of this index.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_child_problem ON mistakes(child_id, problem);
+
+    CREATE TRIGGER IF NOT EXISTS source_installation_immutable_update
+      BEFORE UPDATE ON source_installation
+      BEGIN SELECT RAISE(ABORT, 'source installation identity is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS source_installation_immutable_delete
+      BEFORE DELETE ON source_installation
+      BEGIN SELECT RAISE(ABORT, 'source installation identity is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS source_events_immutable_update
+      BEFORE UPDATE ON source_events
+      BEGIN SELECT RAISE(ABORT, 'source events are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS source_events_immutable_delete
+      BEFORE DELETE ON source_events
+      BEGIN SELECT RAISE(ABORT, 'source events are immutable'); END;
   `);
+
+  db.prepare(
+    "INSERT OR IGNORE INTO source_installation (singleton_id, installation_id) VALUES (1, ?)",
+  ).run(randomUUID());
 
   // 首次启动：建一个默认孩子
   const existing = db.prepare("SELECT id FROM children WHERE id = 'default'").get();

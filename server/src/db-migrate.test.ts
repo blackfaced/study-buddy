@@ -37,6 +37,9 @@ describe("migrateSchema", () => {
     expect(names).toContain("chat_turns");
     expect(names).toContain("posture_events");
     expect(names).toContain("mistakes");
+    expect(names).toContain("source_installation");
+    expect(names).toContain("source_subjects");
+    expect(names).toContain("source_events");
     db.close();
   });
 
@@ -71,6 +74,49 @@ describe("migrateSchema", () => {
     const db = freshDb();
     (globalThis as any).__migrateSchema(db);
     expect(() => (globalThis as any).__migrateSchema(db)).not.toThrow();
+    db.close();
+  });
+
+  it("keeps one immutable installation identity across migrations", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const first = db
+      .prepare("SELECT installation_id AS id FROM source_installation")
+      .get() as { id: string };
+    (globalThis as any).__migrateSchema(db);
+    const second = db
+      .prepare("SELECT installation_id AS id FROM source_installation")
+      .get() as { id: string };
+    expect(second.id).toBe(first.id);
+    expect(first.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(() =>
+      db.prepare("UPDATE source_installation SET installation_id = ?").run("replacement"),
+    ).toThrow(/immutable/);
+    expect(() => db.prepare("DELETE FROM source_installation").run()).toThrow(
+      /immutable/,
+    );
+    db.close();
+  });
+
+  it("binds every source event to the persistent source installation", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const foreignKeys = db.prepare("PRAGMA foreign_key_list(source_events)").all() as Array<{
+      from: string;
+      table: string;
+      to: string;
+    }>;
+    expect(foreignKeys).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          from: "source_installation_id",
+          table: "source_installation",
+          to: "installation_id",
+        }),
+      ]),
+    );
     db.close();
   });
 

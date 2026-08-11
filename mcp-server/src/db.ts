@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // 解析 <repo>/data/study.db，与部署路径无关（之前硬编码 /Users/mac/study-buddy/...）
@@ -209,13 +210,61 @@ function runMigrations(inst: Database.Database) {
       FOREIGN KEY (char) REFERENCES writing_words(char) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS source_installation (
+      singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+      installation_id TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS source_subjects (
+      child_id TEXT PRIMARY KEY,
+      subject_ref TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      FOREIGN KEY (child_id) REFERENCES children(id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS source_events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL UNIQUE,
+      source_product TEXT NOT NULL CHECK (source_product = 'study_buddy'),
+      source_installation_id TEXT NOT NULL,
+      subject_ref TEXT NOT NULL,
+      record_type TEXT NOT NULL CHECK (record_type = 'learning_attempt'),
+      record_id TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      occurred_at INTEGER NOT NULL,
+      event_type TEXT NOT NULL CHECK (event_type = 'learning_attempt_recorded'),
+      event_schema_version INTEGER NOT NULL CHECK (event_schema_version = 1),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json) AND length(payload_json) <= 4096),
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      UNIQUE (record_type, record_id, revision),
+      FOREIGN KEY (source_installation_id) REFERENCES source_installation(installation_id) ON DELETE RESTRICT,
+      FOREIGN KEY (subject_ref) REFERENCES source_subjects(subject_ref) ON DELETE RESTRICT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sessions_child ON sessions(child_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posture_session ON posture_events(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_turns(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_mistakes_session ON mistakes(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_game_sessions_child ON game_sessions(child_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
+
+    CREATE TRIGGER IF NOT EXISTS source_installation_immutable_update
+      BEFORE UPDATE ON source_installation
+      BEGIN SELECT RAISE(ABORT, 'source installation identity is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS source_installation_immutable_delete
+      BEFORE DELETE ON source_installation
+      BEGIN SELECT RAISE(ABORT, 'source installation identity is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS source_events_immutable_update
+      BEFORE UPDATE ON source_events
+      BEGIN SELECT RAISE(ABORT, 'source events are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS source_events_immutable_delete
+      BEFORE DELETE ON source_events
+      BEGIN SELECT RAISE(ABORT, 'source events are immutable'); END;
   `);
+  inst.prepare(
+    "INSERT OR IGNORE INTO source_installation (singleton_id, installation_id) VALUES (1, ?)",
+  ).run(randomUUID());
 }
 
 function ensureDefaultChild(inst: Database.Database) {

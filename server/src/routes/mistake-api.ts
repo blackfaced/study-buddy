@@ -36,6 +36,7 @@
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import { appendLearningAttemptSourceEvent } from "../source-events.js";
 
 export interface MistakeRouteDeps {
   db: Database.Database;
@@ -71,26 +72,44 @@ export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): voi
 
     // problem is the dedupe key (paired with childId by the UNIQUE index).
     // Reject missing/non-string early so we never INSERT a NULL problem.
-    if (typeof body.problem !== "string" || body.problem.length === 0) {
+    if (!isBoundedText(body.problem, 200)) {
       res.status(400).json({ error: "problem is required" });
       return;
     }
 
     // userAnswer is required so the agent can see what the kid typed.
-    if (typeof body.userAnswer !== "string") {
+    if (!isBoundedText(body.userAnswer, 100, true)) {
       res.status(400).json({ error: "userAnswer is required" });
       return;
     }
 
-    const result = insertMistake(db, {
-      childId,
-      problem: body.problem,
-      userAnswer: body.userAnswer,
-      correctAnswer:
-        typeof body.correctAnswer === "string" ? body.correctAnswer : null,
-      errorType: typeof body.errorType === "string" ? body.errorType : null,
-      source: typeof body.source === "string" ? body.source : "game",
-    });
+    const correctAnswer =
+      typeof body.correctAnswer === "string" ? body.correctAnswer : null;
+    const errorType = typeof body.errorType === "string" ? body.errorType : null;
+    const source = typeof body.source === "string" ? body.source : "game";
+    if (
+      (correctAnswer !== null && !isBoundedText(correctAnswer, 100, true)) ||
+      (errorType !== null && !isBoundedText(errorType, 64, true)) ||
+      !isBoundedText(source, 64)
+    ) {
+      res.status(400).json({ error: "attempt fields exceed the source contract" });
+      return;
+    }
+
+    let result: InsertMistakeResult;
+    try {
+      result = insertMistake(db, {
+        childId,
+        problem: body.problem,
+        userAnswer: body.userAnswer,
+        correctAnswer,
+        errorType,
+        source,
+      });
+    } catch {
+      res.status(500).json({ error: "mistake could not be recorded" });
+      return;
+    }
 
     res
       .status(result.created ? 201 : 200)
@@ -183,39 +202,63 @@ export function insertMistake(
   db: Database.Database,
   input: InsertMistakeInput,
 ): InsertMistakeResult {
-  ensureChildRow(db, input.childId);
-  const sessionId = ensureActiveSession(db, input.childId);
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO mistakes (
-      session_id, child_id, problem, user_answer, correct_answer, error_type, source
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-  const result = stmt.run(
-    sessionId,
-    input.childId,
-    input.problem,
-    input.userAnswer,
-    input.correctAnswer,
-    input.errorType,
-    input.source,
-  );
-  if (result.changes === 1) {
-    return { id: Number(result.lastInsertRowid), created: true };
-  }
-  // INSERT OR IGNORE skipped — the row already exists. Look up its id.
-  const existing = db
-    .prepare("SELECT id FROM mistakes WHERE child_id = ? AND problem = ?")
-    .get(input.childId, input.problem) as { id: number } | undefined;
-  if (!existing) {
-    // Should be impossible: UNIQUE said we collided, but the row is gone.
-    // Throwing (not returning 500 manually) lets the express error handler
-    // log it once with full stack instead of swallowing a phantom dedupe.
-    throw new Error(
-      `insertMistake: UNIQUE collision but row not found ` +
-        `(child_id=${input.childId}, problem=${input.problem})`,
+  return db.transaction(() => {
+    ensureChildRow(db, input.childId);
+    const sessionId = ensureActiveSession(db, input.childId);
+    const occurredAt = Date.now();
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO mistakes (
+        session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      sessionId,
+      input.childId,
+      occurredAt,
+      input.problem,
+      input.userAnswer,
+      input.correctAnswer,
+      input.errorType,
+      input.source,
     );
-  }
-  return { id: existing.id, created: false };
+    if (result.changes === 1) {
+      const id = Number(result.lastInsertRowid);
+      appendLearningAttemptSourceEvent(db, {
+        mistakeId: id,
+        childId: input.childId,
+        occurredAt,
+        problem: input.problem,
+        submittedAnswer: input.userAnswer,
+        expectedAnswer: input.correctAnswer,
+        mistakeType: input.errorType,
+        source: input.source,
+      });
+      return { id, created: true };
+    }
+    const existing = db
+      .prepare("SELECT id FROM mistakes WHERE child_id = ? AND problem = ?")
+      .get(input.childId, input.problem) as { id: number } | undefined;
+    if (!existing) {
+      throw new Error(
+        `insertMistake: UNIQUE collision but row not found ` +
+          `(child_id=${input.childId}, problem=${input.problem})`,
+      );
+    }
+    return { id: existing.id, created: false };
+  })();
+}
+
+function isBoundedText(
+  value: unknown,
+  maxLength: number,
+  allowEmpty = false,
+): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= maxLength &&
+    (allowEmpty || value.length > 0) &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
 }
 
 /**
