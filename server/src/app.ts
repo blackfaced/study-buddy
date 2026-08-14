@@ -32,6 +32,7 @@ import { registerWhoamiRoutes } from "./routes/whoami.js";
 import { registerMistakeRoutes } from "./routes/mistake-api.js";
 import { registerQuizContextRoutes } from "./routes/quiz-context.js";
 import { registerIntegrationRoutes } from "./routes/integration.js";
+import { registerMnObservationRoutes } from "./routes/mn-observation.js";
 import { DeviceAuth, type DeviceRequestAuthenticator } from "./device-auth.js";
 import { registerPairingRoutes } from "./routes/pairing.js";
 import { MistakePhotoWorkflow } from "./mistake-photo-workflow.js";
@@ -171,6 +172,11 @@ export function createApp(opts: AppOptions): express.Express {
       ? (process.env.INTEGRATION_API_TOKEN ?? null)
       : opts.integrationToken;
   registerIntegrationRoutes(app, {
+    db,
+    token: integrationToken,
+    isLoopback: opts.integrationLoopbackCheck,
+  });
+  registerMnObservationRoutes(app, {
     db,
     token: integrationToken,
     isLoopback: opts.integrationLoopbackCheck,
