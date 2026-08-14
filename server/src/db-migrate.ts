@@ -321,6 +321,45 @@ export function migrateSchema(db: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_evidence_key
       ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL;
 
+    -- v0.8 (#13): MemoryNexus incoming return path.
+    -- mn_bindings maps a MemoryNexus subject (the external MN subject
+    -- ref) to a study-buddy child. A child may have at most one active
+    -- binding — the binding_id is the join key for projections and the
+    -- lookup token the kid app carries to read observations back.
+    --
+    -- mn_observation_projections is the projection cache. Each row is
+    -- one observation materialized from MN. The UNIQUE(binding_id,
+    -- observation_id) constraint is the idempotency anchor — re-running
+    -- the worker with the same observationId will not duplicate. The
+    -- payload_json is opaque to study-buddy (MN owns its schema).
+    CREATE TABLE IF NOT EXISTS mn_bindings (
+      binding_id TEXT PRIMARY KEY,
+      child_id TEXT NOT NULL,
+      mn_subject TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'revoked')),
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      FOREIGN KEY (child_id) REFERENCES children(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mn_bindings_child_active
+      ON mn_bindings(child_id) WHERE status = 'active';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mn_bindings_subject
+      ON mn_bindings(mn_subject);
+
+    CREATE TABLE IF NOT EXISTS mn_observation_projections (
+      projection_id TEXT PRIMARY KEY,
+      binding_id TEXT NOT NULL,
+      observation_id TEXT NOT NULL,
+      generated_at INTEGER NOT NULL,
+      payload_json TEXT NOT NULL,
+      materialized_at INTEGER NOT NULL,
+      FOREIGN KEY (binding_id) REFERENCES mn_bindings(binding_id) ON DELETE CASCADE,
+      UNIQUE (binding_id, observation_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mn_observations_binding_materialized
+      ON mn_observation_projections(binding_id, materialized_at DESC);
+
     CREATE TRIGGER IF NOT EXISTS source_installation_immutable_update
       BEFORE UPDATE ON source_installation
       BEGIN SELECT RAISE(ABORT, 'source installation identity is immutable'); END;

@@ -156,7 +156,7 @@ export function registerIntegrationRoutes(
   );
 }
 
-function authorizeIntegration(
+export function authorizeIntegration(
   req: Request,
   res: Response,
   token: string | null,
