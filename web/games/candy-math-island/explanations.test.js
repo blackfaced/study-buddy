@@ -13,8 +13,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getExplanation, EXPLANATIONS, GENERIC_FALLBACK } from "./explanations.js";
 
-test("explanations: EXPLANATIONS has entries for the 4 core errorTypes", () => {
-  for (const et of ["compute", "carry", "borrow", "multiply"]) {
+test("explanations: EXPLANATIONS has entries for all known errorTypes (v0.5)", () => {
+  // v0.5 expansion: 4 core + 4 meta (审题 / 钟表 / 应用题 / vision_pending).
+  for (const et of [
+    "compute",
+    "carry",
+    "borrow",
+    "multiply",
+    "审题",
+    "钟表",
+    "应用题",
+    "vision_pending",
+  ]) {
     assert.ok(EXPLANATIONS[et], `EXPLANATIONS must have entry for "${et}"`);
     const e = EXPLANATIONS[et];
     assert.equal(typeof e.title, "string", `${et}.title must be string`);
@@ -32,10 +42,28 @@ test("explanations: GENERIC_FALLBACK has title + body", () => {
 });
 
 test("getExplanation: returns EXPLANATIONS[errorType] for known types", () => {
-  for (const et of ["compute", "carry", "borrow", "multiply"]) {
+  for (const et of [
+    "compute",
+    "carry",
+    "borrow",
+    "multiply",
+    "审题",
+    "钟表",
+    "应用题",
+    "vision_pending",
+  ]) {
     const e = getExplanation(et);
     assert.equal(e, EXPLANATIONS[et], `${et} should map to its own entry`);
   }
+});
+
+test("getExplanation: returns 审题 / 钟表 / 应用题 / vision_pending specific cards", () => {
+  // Spot-check that the v0.5 expansion actually carries distinct
+  // kid-friendly content rather than aliasing the fallback.
+  assert.match(getExplanation("审题").title, /看清/);
+  assert.match(getExplanation("钟表").body, /时针|分针|5 分钟/);
+  assert.match(getExplanation("应用题").body, /算式/);
+  assert.match(getExplanation("vision_pending").body, /拍/);
 });
 
 test("getExplanation: returns GENERIC_FALLBACK for unknown errorType", () => {

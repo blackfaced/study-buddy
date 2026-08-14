@@ -1,20 +1,23 @@
 // explanations.js
 //
 // Static errorType → explanation map for the inline wrong-answer card
-// (issue #116, T4 of #34 split).
+// (issue #116, T4 of #34 split; #34b v0.5 expansion).
 //
-// v0.1 design: hand-written templates per errorType, no LLM. The
-// kid-facing quiz candy-math-island declares 4 core errorTypes
-// (compute / carry / borrow / multiply); each gets a short
-// kid-friendly Chinese explanation. Anything else falls through to
-// a generic "再仔细看看题目" so the card is never blank.
+// v0.1: hand-written templates per errorType, no LLM. The kid-facing
+// quiz candy-math-island declared 4 core errorTypes (compute / carry
+// / borrow / multiply); each got a short kid-friendly Chinese
+// explanation. Anything else fell through to a generic "再仔细看看题目".
 //
-// Extending in v0.5+:
-//   - Add more errorTypes (审题, 应用题 templates) when the generator
-//     declares them
-//   - Personalize via LLM (per-question explanations like the original
-//     #34 spec called for)
-//   - i18n (English translation) when the UI goes bilingual
+// v0.5: extends coverage to the meta errorTypes the real kid data
+// shows up most (审题 / 钟表 / 应用题 / vision_pending). v0.1 砍半
+// left 8 vision_pending + 5 null + 1 审题 + 1 钟表 in the data, all
+// falling through to the generic fallback. v0.5 gives each its own
+// hand-tuned card so the kid actually sees useful coaching on the
+// errors that are happening.
+//
+// LLM-generated per-question explanations remain a v1.0 design. v0.5
+// keeps the no-LLM contract; cost is zero per request, quality is
+// uniform, and templates are hand-tunable.
 //
 // Used by web/games/candy-math-island/index.html: on a wrong answer,
 // the answer handler looks up the question's errorType and shows the
@@ -44,9 +47,28 @@ export const EXPLANATIONS = Object.freeze({
     title: "✏️ 乘法小提示",
     body: "乘法就是连加: 6×7 = 6+6+6+6+6+6+7 次.\n熟记 1-9 乘法表最快.",
   }),
+  // v0.5 expansion: covers the meta errorTypes the real kid data
+  // (14 real mistakes: 8 vision_pending + 2 borrow + 2 compute +
+  // 1 carry + 1 审题 + 1 钟表) was hitting the fallback for.
+  审题: Object.freeze({
+    title: "✏️ 看清题目",
+    body: "题目要求啥先看清楚, 是问加还是减.\n把关键词圈出来, 再动笔.",
+  }),
+  钟表: Object.freeze({
+    title: "✏️ 钟表题",
+    body: "时针短, 分针长, 短的指小时.\n看准是几点几分, 一格是 5 分钟.",
+  }),
+  应用题: Object.freeze({
+    title: "✏️ 应用题",
+    body: "先把题目变成算式, 再算.\n已知啥, 要求啥, 一步步来.",
+  }),
+  vision_pending: Object.freeze({
+    title: "✏️ 拍题确认",
+    body: "题目没看清, 拍下来再确认一次.\n用 /buddy/ 的拍照功能最稳.",
+  }),
 });
 
-/** Used when the errorType isn't one of the 4 core kid-facing types. */
+/** Used when the errorType isn't one of the known kid-facing types. */
 export const GENERIC_FALLBACK = Object.freeze({
   title: "✏️ 再仔细看看",
   body: "看清楚题目要求, 再试一次.",
@@ -56,7 +78,7 @@ export const GENERIC_FALLBACK = Object.freeze({
  * Look up the explanation for an errorType.
  *
  * Behavior:
- *   - known errorType (one of the 4 core) → its entry
+ *   - known errorType (one of the 8 entries) → its entry
  *   - null / undefined / "" / unknown string → GENERIC_FALLBACK
  *
  * Pure: same input always returns the same reference (handy for
