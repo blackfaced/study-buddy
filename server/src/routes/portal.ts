@@ -44,6 +44,14 @@ export const APPS: AppDescriptor[] = [
     status: "ready",
   },
   {
+    id: "multiplication-drill",
+    name: "乘法大冒险",
+    url: "/games/multiplication-drill/",
+    emoji: "✖️",
+    description: "1-9 乘法表 60 秒挑战，答错时显示完整 9×9 表。",
+    status: "ready",
+  },
+  {
     id: "write",
     name: "写字练字",
     url: "/write/",

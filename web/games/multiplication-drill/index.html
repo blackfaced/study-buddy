@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#7C5CD3">
+  <title>✖️ 乘法大冒险 · 60秒挑战</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <link rel="stylesheet" href="/shared/theme.css">
+  <style>
+    /* ===== Multiplication theme override =====
+     * Purple-violet palette distinct from candy-math-island's pink so
+     * the kid can tell the apps apart at a glance. Layout, components,
+     * iOS fixes all come from /shared/theme.css. */
+    :root {
+      --accent: #7C5CD3;
+      --accent-soft: #EDE5FA;
+      --bg-page-start: #EDE5FA;
+      --bg-page-end: #F8F4FF;
+      --bg-card: rgba(255, 255, 255, 0.85);
+      --bg-input: #FAF6FF;
+      --text-primary: #2E2A4D;
+      --text-secondary: #6B6280;
+      --text-on-accent: white;
+    }
+    body { overflow-x: hidden; }
+
+    .app { max-width: 640px; margin: 0 auto; min-height: 100vh; padding: var(--space-4); }
+    .home { text-align: center; padding-top: 6vh; }
+    .home-sub { font-size: var(--text-body); color: var(--text-secondary); margin-bottom: var(--space-6); }
+    .start-card {
+      background: linear-gradient(135deg, #9F7DFF 0%, #7C5CD3 100%);
+      color: white;
+      border-radius: 28px;
+      padding: var(--space-5);
+      box-shadow: 0 12px 32px rgba(124, 92, 211, 0.35);
+      margin-bottom: var(--space-5);
+    }
+    .start-card .big { font-size: 60px; font-weight: 900; line-height: 1; }
+    .start-card .label { font-size: var(--text-title); margin-top: var(--space-1); opacity: 0.95; }
+    .btn-start {
+      background: white;
+      color: var(--accent);
+      font-size: 22px;
+      font-weight: 800;
+      padding: var(--space-4) var(--space-7);
+      margin-top: var(--space-4);
+    }
+
+    .quiz-topbar {
+      display: flex; justify-content: space-between; align-items: center;
+      background: var(--bg-card); backdrop-filter: blur(10px);
+      border-radius: var(--radius-card); padding: var(--space-3) var(--space-4);
+      margin-bottom: var(--space-4); font-weight: 700;
+    }
+    .quiz-timer { font-size: 26px; color: var(--accent); font-variant-numeric: tabular-nums; }
+    .quiz-timer.warn { color: #FF4757; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+    .quiz-counter { font-size: var(--text-body); color: var(--text-secondary); }
+    .quiz-counter b { color: var(--accent); font-size: var(--text-title); }
+
+    .quiz-card {
+      background: var(--bg-card); backdrop-filter: blur(10px);
+      border-radius: var(--radius-card); padding: var(--space-6);
+      text-align: center; box-shadow: var(--shadow-card);
+    }
+    .problem { font-size: 64px; font-weight: 900; color: var(--text-primary); letter-spacing: 2px; margin: var(--space-5) 0; }
+    .answer-input {
+      width: 200px; font-size: 32px; font-weight: 800; text-align: center;
+      padding: var(--space-3); border: 3px solid var(--accent-soft);
+      border-radius: 16px; background: var(--bg-input); color: var(--text-primary);
+      font-variant-numeric: tabular-nums;
+    }
+    .answer-input:focus { outline: none; border-color: var(--accent); }
+
+    .table-hint {
+      margin-top: var(--space-5); padding: var(--space-4);
+      background: var(--accent-soft); border-radius: 16px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 13px; line-height: 1.7; color: var(--text-primary);
+      white-space: pre; overflow-x: auto;
+      animation: fade-in 0.3s ease;
+    }
+    @keyframes fade-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .wrong-mark { color: #FF4757; font-weight: 800; font-size: 18px; margin-top: var(--space-3); }
+
+    .result { text-align: center; padding-top: 4vh; }
+    .result-emoji { font-size: 64px; }
+    .result-title { font-size: var(--text-title); font-weight: 800; color: var(--text-primary); margin-bottom: var(--space-1); }
+    .result-rate { font-size: 56px; font-weight: 900; color: var(--accent); line-height: 1; }
+    .result-rate-label { font-size: var(--text-caption); color: var(--text-secondary); margin-bottom: var(--space-5); }
+    .stat-card { background: var(--bg-card); border-radius: var(--radius-card); padding: var(--space-4); margin-bottom: var(--space-3); }
+    .stat-row { display: flex; justify-content: space-between; font-size: var(--text-body); padding: var(--space-1) 0; }
+    .stat-row b { color: var(--accent); font-variant-numeric: tabular-nums; }
+    .result-actions { display: flex; gap: var(--space-2); justify-content: center; margin-top: var(--space-3); flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ============== Home ============== -->
+  <div id="page-home" class="page home">
+    <div class="start-card">
+      <div class="big">✖️</div>
+      <div class="label">乘法大冒险</div>
+      <div style="font-size:14px;opacity:0.9;margin-top:6px;">1-9 乘法表 · 60 秒挑战</div>
+    </div>
+    <div class="home-sub">填一填，答对加分，答错看完整表</div>
+    <button id="btn-start" class="btn-start">开始挑战</button>
+  </div>
+
+  <!-- ============== Quiz ============== -->
+  <div id="page-quiz" class="page quiz" style="display:none">
+    <div class="quiz-topbar">
+      <div class="quiz-counter">第 <b id="q-num">1</b> 题</div>
+      <div class="quiz-timer" id="q-timer">60</div>
+      <div class="quiz-counter">对 <b id="q-correct">0</b></div>
+    </div>
+    <div class="quiz-card">
+      <div class="problem" id="q-problem">3 × 4 = ?</div>
+      <input id="q-input" class="answer-input" type="tel" inputmode="numeric"
+             pattern="[0-9]*" autocomplete="off" maxlength="3" />
+      <div id="q-feedback" style="display:none">
+        <div class="wrong-mark" id="q-wrong"></div>
+        <div class="table-hint" id="q-table"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============== Result ============== -->
+  <div id="page-result" class="page result" style="display:none">
+    <div class="result-emoji" id="r-emoji">🏆</div>
+    <div class="result-title" id="r-title">太厉害啦！</div>
+    <div class="result-rate" id="r-rate">100%</div>
+    <div class="result-rate-label">正确率</div>
+    <div class="stat-card">
+      <div class="stat-row"><span>答题数</span><b id="r-total">0</b></div>
+      <div class="stat-row"><span>答对数</span><b id="r-correct">0</b></div>
+      <div class="stat-row"><span>平均速度</span><b id="r-avg">0.0 秒/题</b></div>
+    </div>
+    <div class="result-actions">
+      <button id="btn-again" class="btn-start">再来一局</button>
+      <a href="/" class="btn-start" style="text-decoration:none;display:inline-block;">回主页</a>
+    </div>
+  </div>
+</div>
+
+<script src="/shared/app.js"></script>
+<script type="module">
+import { pickMultiplicationQuestion, makeMultiplicationTable } from "./pick-gen.js";
+
+const APP_ID = "multiplication-drill";
+const DURATION_SEC = 60;
+const TABLE_HINT_MS = 2200;
+const STORAGE_KEY = "multiplication-drill-session";
+
+function showPage(id) {
+  document.querySelectorAll(".page").forEach(p => (p.style.display = "none"));
+  document.getElementById("page-" + id).style.display = "block";
+}
+
+function rand() { return Math.random(); }
+
+// ============== State ==============
+const state = {
+  startedAt: 0,
+  endedAt: 0,
+  totalQuestions: 0,
+  correctCount: 0,
+  current: null,
+  pendingMistakes: [],
+  timerId: null,
+  hintTimeoutId: null,
+  acceptingInput: true,
+};
+
+function startQuiz() {
+  state.startedAt = Date.now();
+  state.endedAt = 0;
+  state.totalQuestions = 0;
+  state.correctCount = 0;
+  state.pendingMistakes = [];
+  state.acceptingInput = true;
+  document.getElementById("q-correct").textContent = "0";
+  document.getElementById("q-num").textContent = "1";
+  showPage("quiz");
+  nextQuestion();
+  startTimer();
+  const input = document.getElementById("q-input");
+  input.value = "";
+  setTimeout(() => input.focus(), 50);
+}
+
+function startTimer() {
+  let remaining = DURATION_SEC;
+  const timerEl = document.getElementById("q-timer");
+  timerEl.textContent = remaining;
+  timerEl.classList.remove("warn");
+  if (state.timerId) clearInterval(state.timerId);
+  state.timerId = setInterval(() => {
+    remaining -= 1;
+    timerEl.textContent = remaining;
+    if (remaining <= 10) timerEl.classList.add("warn");
+    if (remaining <= 0) endQuiz();
+  }, 1000);
+}
+
+function nextQuestion() {
+  state.current = pickMultiplicationQuestion(rand);
+  document.getElementById("q-problem").textContent = state.current.problem;
+  document.getElementById("q-feedback").style.display = "none";
+  document.getElementById("q-num").textContent = state.totalQuestions + 1;
+  state.acceptingInput = true;
+  const input = document.getElementById("q-input");
+  input.value = "";
+  setTimeout(() => input.focus(), 50);
+}
+
+function handleAnswer() {
+  if (!state.acceptingInput) return;
+  const input = document.getElementById("q-input");
+  const raw = input.value.trim();
+  if (raw === "") return;
+  const userAnswer = Number.parseInt(raw, 10);
+  if (!Number.isFinite(userAnswer)) return;
+
+  state.acceptingInput = false;
+  state.totalQuestions += 1;
+  const correct = userAnswer === state.current.answer;
+  if (correct) {
+    state.correctCount += 1;
+    document.getElementById("q-correct").textContent = state.correctCount;
+    nextQuestion();
+  } else {
+    state.pendingMistakes.push({
+      problem: state.current.problem,
+      userAnswer: String(userAnswer),
+      correctAnswer: String(state.current.answer),
+    });
+    document.getElementById("q-wrong").textContent = `正确答案是 ${state.current.answer}，没关系，看清楚表再继续 👇`;
+    document.getElementById("q-table").textContent = makeMultiplicationTable();
+    document.getElementById("q-feedback").style.display = "block";
+    if (state.hintTimeoutId) clearTimeout(state.hintTimeoutId);
+    state.hintTimeoutId = setTimeout(nextQuestion, TABLE_HINT_MS);
+  }
+}
+
+document.getElementById("q-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") handleAnswer();
+});
+
+async function endQuiz() {
+  if (state.timerId) clearInterval(state.timerId);
+  state.endedAt = Date.now();
+  showResult();
+  await postSession();
+}
+
+function showResult() {
+  const rate = state.totalQuestions === 0
+    ? 0
+    : Math.round((state.correctCount / state.totalQuestions) * 100);
+  const dur = (state.endedAt - state.startedAt) / 1000;
+  const avg = state.totalQuestions > 0 ? (dur / state.totalQuestions).toFixed(1) : "0.0";
+  document.getElementById("r-emoji").textContent = rate >= 90 ? "🏆" : rate >= 70 ? "🎉" : rate >= 50 ? "💪" : "🌱";
+  document.getElementById("r-title").textContent = rate >= 90 ? "太厉害啦！" : rate >= 70 ? "不错哟" : rate >= 50 ? "继续加油" : "慢慢来不急";
+  document.getElementById("r-rate").textContent = rate + "%";
+  document.getElementById("r-total").textContent = state.totalQuestions;
+  document.getElementById("r-correct").textContent = state.correctCount;
+  document.getElementById("r-avg").textContent = avg + " 秒/题";
+  showPage("result");
+}
+
+async function postSession() {
+  const sessionId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : `s-${Date.now()}-${Math.random()}`;
+  const dur = Math.round((state.endedAt - state.startedAt) / 1000);
+  try {
+    const StudyBuddy = window.StudyBuddy;
+    const base = (StudyBuddy && StudyBuddy.apiBase) || "";
+    await StudyBuddy.fetch(base + "/api/game/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        appId: APP_ID,
+        childId: "default",
+        durationSec: dur,
+        totalQuestions: state.totalQuestions,
+        correctCount: state.correctCount,
+        startedAt: state.startedAt,
+        endedAt: state.endedAt,
+      }),
+    });
+  } catch (e) {
+    // best-effort; kid doesn't need to see network errors
+    console.warn("postSession failed", e);
+  }
+  // Post each mistake individually (game_sessions + mistakes contract).
+  for (const m of state.pendingMistakes) {
+    try {
+      const StudyBuddy = window.StudyBuddy;
+      const base = (StudyBuddy && StudyBuddy.apiBase) || "";
+      await StudyBuddy.fetch(base + "/api/game/mistake", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          childId: "default",
+          problem: m.problem,
+          userAnswer: m.userAnswer,
+          correctAnswer: m.correctAnswer,
+          errorType: "multiply",
+          source: APP_ID,
+        }),
+      });
+    } catch (e) {
+      console.warn("postMistake failed", e);
+    }
+  }
+}
+
+document.getElementById("btn-start").onclick = startQuiz;
+document.getElementById("btn-again").onclick = startQuiz;
+showPage("home");
+</script>
+</body>
+</html>
