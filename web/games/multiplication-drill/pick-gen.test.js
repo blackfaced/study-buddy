@@ -13,12 +13,9 @@
 // formatting, and the on-wrong table rendering.
 // =====================================================================
 
-const test = require("node:test");
-const assert = require("node:assert/strict");
-const {
-  pickMultiplicationQuestion,
-  makeMultiplicationTable,
-} = require("./pick-gen.js");
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { pickMultiplicationQuestion, makeMultiplicationTable } from "./pick-gen.js";
 
 function makeRng(sequence) {
   let i = 0;
