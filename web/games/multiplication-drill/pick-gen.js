@@ -6,6 +6,11 @@
 //   - pickMultiplicationQuestion(rng) -> { a, b, answer, problem }
 //   - makeMultiplicationTable()       -> string
 //
+// ESM module (uses `export`) because the browser side imports it as
+// `import { ... } from "./pick-gen.js"` from the multiplication-drill
+// HTML. The Node test runner uses dynamic `import('./pick-gen.js')`
+// to load it.
+//
 // `rng` is injected so tests can drive it deterministically; the
 // real UI uses Math.random wrapped in a closure. `a` and `b` are
 // sampled independently from [1, 9] so the distribution is uniform
@@ -19,7 +24,7 @@
  * @param {() => number} rng Returns a float in [0, 1).
  * @returns {{ a: number, b: number, answer: number, problem: string }}
  */
-function pickMultiplicationQuestion(rng) {
+export function pickMultiplicationQuestion(rng) {
   const a = Math.floor(rng() * 9) + 1;
   const b = Math.floor(rng() * 9) + 1;
   return {
@@ -42,7 +47,7 @@ function pickMultiplicationQuestion(rng) {
  *
  * @returns {string} 9 lines, each with 9 cells separated by two spaces.
  */
-function makeMultiplicationTable() {
+export function makeMultiplicationTable() {
   const lines = [];
   for (let a = 1; a <= 9; a += 1) {
     const cells = [];
@@ -53,8 +58,3 @@ function makeMultiplicationTable() {
   }
   return lines.join("\n");
 }
-
-module.exports = {
-  pickMultiplicationQuestion,
-  makeMultiplicationTable,
-};
