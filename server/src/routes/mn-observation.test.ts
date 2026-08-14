@@ -43,10 +43,12 @@ const MN_SUBJECT = "mn-subject-1";
 const CHILD = "default";
 
 function buildApp(
+  db: Database.Database,
   loopback = true,
   overrides: Partial<AppOptions> = {},
 ): ReturnType<typeof createApp> {
   return createApp({
+    db,
     httpsPort: 3000,
     integrationToken: INTEGRATION_TOKEN,
     integrationLoopbackCheck: () => loopback,
@@ -68,7 +70,7 @@ describe("POST /api/mn-observation/materialize", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "mn-route-mat-"));
     db = new Database(join(tmpDir, "study.db"));
     migrateSchema(db);
-    app = buildApp(true, { db });
+    app = buildApp(db, true, {});
   });
 
   afterEach(() => {
@@ -102,7 +104,7 @@ describe("POST /api/mn-observation/materialize", () => {
   });
 
   it("403s when the request is not from loopback (even with the right token)", async () => {
-    const nonLoopbackApp = buildApp(false, { db });
+    const nonLoopbackApp = buildApp(db, false, {});
     const response = await request(nonLoopbackApp)
       .post("/api/mn-observation/materialize")
       .set("Authorization", bearer(INTEGRATION_TOKEN))
@@ -260,7 +262,7 @@ describe("POST /api/mn-observation/observation (kid-app read)", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "mn-route-read-"));
     db = new Database(join(tmpDir, "study.db"));
     migrateSchema(db);
-    app = buildApp(true, { db });
+    app = buildApp(db, true, {});
   });
 
   afterEach(() => {
