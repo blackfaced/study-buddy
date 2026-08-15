@@ -117,16 +117,10 @@ function runMigrations(inst: Database.Database) {
     try { inst.exec(sql); } catch { /* column already exists */ }
   }
 
-  // Mirror server/src/db-migrate.ts: keep one row per source provenance
-  // before replacing the legacy (child_id, problem) unique index.
+  // Mirror server/src/db-migrate.ts: normalize source on legacy rows while
+  // preserving every row as original evidence for the compatibility model.
   try {
-    inst.exec(`
-      UPDATE mistakes SET source = 'study-buddy' WHERE source IS NULL OR source = '';
-      DELETE FROM mistakes
-      WHERE id NOT IN (
-        SELECT MIN(id) FROM mistakes GROUP BY child_id, problem, source
-      );
-    `);
+    inst.exec("UPDATE mistakes SET source = 'study-buddy' WHERE source IS NULL OR source = ''");
   } catch {
     /* fresh DB — mistakes does not exist yet */
   }
@@ -243,6 +237,40 @@ function runMigrations(inst: Database.Database) {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    -- Compatibility model for the mistake-closure rollout. Legacy mistakes
+    -- remain the evidence source; these tables add explicit cases, attempts,
+    -- and correction obligations without changing old readers.
+    CREATE TABLE IF NOT EXISTS mistake_cases (
+      case_id TEXT PRIMARY KEY,
+      original_mistake_id INTEGER NOT NULL UNIQUE,
+      child_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      opened_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS learning_attempts (
+      attempt_id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL,
+      attempt_kind TEXT NOT NULL CHECK (attempt_kind IN ('original', 'correction', 'reinforcement')),
+      mistake_id INTEGER,
+      child_id TEXT NOT NULL,
+      problem TEXT,
+      user_answer TEXT,
+      correct_answer TEXT,
+      is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
+      occurred_at INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS correction_obligations (
+      case_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'verified')),
+      opened_at INTEGER NOT NULL,
+      verified_at INTEGER,
+      FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS mistake_photo_confirmations (
       draft_id TEXT PRIMARY KEY,
       mistake_id INTEGER NOT NULL,
@@ -340,10 +368,14 @@ function runMigrations(inst: Database.Database) {
       ON game_sessions(source_record_id) WHERE source_record_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
     DROP INDEX IF EXISTS idx_mistakes_child_problem;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_child_problem_source
-      ON mistakes(child_id, problem, source);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_evidence_key
-      ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL;
+    DROP INDEX IF EXISTS idx_mistakes_child_problem_source;
+    DROP INDEX IF EXISTS idx_mistakes_evidence_key;
+    CREATE INDEX IF NOT EXISTS idx_mistake_cases_child_opened
+      ON mistake_cases(child_id, opened_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_learning_attempts_case_occurred
+      ON learning_attempts(case_id, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_learning_attempts_child_occurred
+      ON learning_attempts(child_id, occurred_at DESC);
 
     CREATE TRIGGER IF NOT EXISTS source_installation_immutable_update
       BEFORE UPDATE ON source_installation
@@ -379,12 +411,80 @@ function runMigrations(inst: Database.Database) {
         AND EXISTS (SELECT 1 FROM sessions WHERE device_id = OLD.device_id)
       BEGIN SELECT RAISE(ABORT, 'paired device is referenced by sessions'); END;
   `);
+  ensureMistakeCompatibilityIndexes(inst);
+  backfillMistakeCompatibility(inst);
   inst.prepare(
     "DELETE FROM safety_incidents WHERE status = 'resolved' AND resolved_at < ?",
   ).run(Date.now() - 30 * 24 * 60 * 60 * 1000);
   inst.prepare(
     "INSERT OR IGNORE INTO source_installation (singleton_id, installation_id) VALUES (1, ?)",
   ).run(randomUUID());
+}
+
+function ensureMistakeCompatibilityIndexes(inst: Database.Database): void {
+  inst.exec(`
+    DROP INDEX IF EXISTS idx_mistakes_child_problem_source;
+    DROP INDEX IF EXISTS idx_mistakes_evidence_key;
+  `);
+
+  const hasDuplicateProblem = inst.prepare(`
+    SELECT 1 FROM mistakes
+    GROUP BY child_id, problem, source
+    HAVING COUNT(*) > 1
+    LIMIT 1
+  `).get();
+  const hasDuplicateEvidence = inst.prepare(`
+    SELECT 1 FROM mistakes
+    WHERE evidence_key IS NOT NULL
+    GROUP BY evidence_key
+    HAVING COUNT(*) > 1
+    LIMIT 1
+  `).get();
+
+  inst.exec(hasDuplicateProblem
+    ? "CREATE INDEX idx_mistakes_child_problem_source ON mistakes(child_id, problem, source)"
+    : "CREATE UNIQUE INDEX idx_mistakes_child_problem_source ON mistakes(child_id, problem, source)");
+  inst.exec(hasDuplicateEvidence
+    ? "CREATE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL"
+    : "CREATE UNIQUE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL");
+}
+
+function backfillMistakeCompatibility(inst: Database.Database): void {
+  inst.transaction(() => {
+    inst.exec(`
+      INSERT OR IGNORE INTO mistake_cases (
+        case_id, original_mistake_id, child_id, source, opened_at
+      )
+      SELECT
+        'mistake:' || id,
+        id,
+        child_id,
+        COALESCE(NULLIF(source, ''), 'study-buddy'),
+        ts
+      FROM mistakes;
+
+      INSERT OR IGNORE INTO learning_attempts (
+        attempt_id, case_id, attempt_kind, mistake_id, child_id,
+        problem, user_answer, correct_answer, is_correct, occurred_at, source
+      )
+      SELECT
+        'original:mistake:' || id,
+        'mistake:' || id,
+        'original',
+        id,
+        child_id,
+        problem,
+        user_answer,
+        correct_answer,
+        0,
+        ts,
+        COALESCE(NULLIF(source, ''), 'study-buddy')
+      FROM mistakes;
+
+      INSERT OR IGNORE INTO correction_obligations (case_id, status, opened_at)
+      SELECT 'mistake:' || id, 'open', ts FROM mistakes;
+    `);
+  })();
 }
 
 function widenSourceEventVocabulary(inst: Database.Database): void {

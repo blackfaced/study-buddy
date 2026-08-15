@@ -67,24 +67,13 @@ export function migrateSchema(db: Database.Database): void {
   // childId; missing/empty defaults to 'default' for backwards compat.
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN child_id TEXT NOT NULL DEFAULT 'default'`); } catch {}
 
-  // v0.8 (#34a-1, issue #98): deduplicate existing rows before building
-  // the UNIQUE index below. Preserve independent source provenance: a game
-  // attempt and a confirmed vision record may describe the same problem.
-  // Keep the earliest row per (child_id, problem, source).
-  // Wrapped in try/catch because the table may not exist yet on a fresh
-  // DB (this DELETE runs before the CREATE TABLE block below).
+  // v0.8 (#34a-1, issue #98): normalize the source on legacy rows. Do not
+  // delete duplicate rows: each row is original evidence for the mistake
+  // compatibility model created below.
   try {
-    db.exec(`
-      UPDATE mistakes SET source = 'study-buddy' WHERE source IS NULL OR source = '';
-      DELETE FROM mistakes
-      WHERE id NOT IN (
-        SELECT MIN(id)
-        FROM mistakes
-        GROUP BY child_id, problem, source
-      );
-    `);
+    db.exec("UPDATE mistakes SET source = 'study-buddy' WHERE source IS NULL OR source = ''");
   } catch {
-    /* fresh DB — mistakes table doesn't exist yet, nothing to dedupe */
+    /* fresh DB — mistakes table does not exist yet */
   }
 
   // Explainable handwriting coach attempt payload (issues #103/#108).
@@ -211,6 +200,40 @@ export function migrateSchema(db: Database.Database): void {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    -- Compatibility model for the mistake-closure rollout. Legacy mistakes
+    -- remain the evidence source; these tables add explicit cases, attempts,
+    -- and correction obligations without changing old readers.
+    CREATE TABLE IF NOT EXISTS mistake_cases (
+      case_id TEXT PRIMARY KEY,
+      original_mistake_id INTEGER NOT NULL UNIQUE,
+      child_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      opened_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS learning_attempts (
+      attempt_id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL,
+      attempt_kind TEXT NOT NULL CHECK (attempt_kind IN ('original', 'correction', 'reinforcement')),
+      mistake_id INTEGER,
+      child_id TEXT NOT NULL,
+      problem TEXT,
+      user_answer TEXT,
+      correct_answer TEXT,
+      is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
+      occurred_at INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS correction_obligations (
+      case_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'verified')),
+      opened_at INTEGER NOT NULL,
+      verified_at INTEGER,
+      FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS mistake_photo_confirmations (
       draft_id TEXT PRIMARY KEY,
       mistake_id INTEGER NOT NULL,
@@ -313,13 +336,15 @@ export function migrateSchema(db: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_game_sessions_source_record
       ON game_sessions(source_record_id) WHERE source_record_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
-    -- Dedupe repeated records within one source while preserving provenance
-    -- when game and vision both contribute the same normalized problem.
     DROP INDEX IF EXISTS idx_mistakes_child_problem;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_child_problem_source
-      ON mistakes(child_id, problem, source);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_mistakes_evidence_key
-      ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL;
+    DROP INDEX IF EXISTS idx_mistakes_child_problem_source;
+    DROP INDEX IF EXISTS idx_mistakes_evidence_key;
+    CREATE INDEX IF NOT EXISTS idx_mistake_cases_child_opened
+      ON mistake_cases(child_id, opened_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_learning_attempts_case_occurred
+      ON learning_attempts(case_id, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_learning_attempts_child_occurred
+      ON learning_attempts(child_id, occurred_at DESC);
 
     -- v0.8 (#13): MemoryNexus incoming return path.
     -- mn_bindings maps a MemoryNexus subject (the external MN subject
@@ -395,6 +420,9 @@ export function migrateSchema(db: Database.Database): void {
       BEGIN SELECT RAISE(ABORT, 'paired device is referenced by sessions'); END;
   `);
 
+  ensureMistakeCompatibilityIndexes(db);
+  backfillMistakeCompatibility(db);
+
   db.prepare(
     "DELETE FROM safety_incidents WHERE status = 'resolved' AND resolved_at < ?",
   ).run(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -416,6 +444,72 @@ export function migrateSchema(db: Database.Database): void {
       JSON.stringify(["作业", "老师", "课本", "同学", "数学", "语文", "英语", "拼音", "生字"])
     );
   }
+}
+
+function ensureMistakeCompatibilityIndexes(db: Database.Database): void {
+  db.exec(`
+    DROP INDEX IF EXISTS idx_mistakes_child_problem_source;
+    DROP INDEX IF EXISTS idx_mistakes_evidence_key;
+  `);
+
+  const hasDuplicateProblem = db.prepare(`
+    SELECT 1 FROM mistakes
+    GROUP BY child_id, problem, source
+    HAVING COUNT(*) > 1
+    LIMIT 1
+  `).get();
+  const hasDuplicateEvidence = db.prepare(`
+    SELECT 1 FROM mistakes
+    WHERE evidence_key IS NOT NULL
+    GROUP BY evidence_key
+    HAVING COUNT(*) > 1
+    LIMIT 1
+  `).get();
+
+  db.exec(hasDuplicateProblem
+    ? "CREATE INDEX idx_mistakes_child_problem_source ON mistakes(child_id, problem, source)"
+    : "CREATE UNIQUE INDEX idx_mistakes_child_problem_source ON mistakes(child_id, problem, source)");
+  db.exec(hasDuplicateEvidence
+    ? "CREATE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL"
+    : "CREATE UNIQUE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL");
+}
+
+function backfillMistakeCompatibility(db: Database.Database): void {
+  db.transaction(() => {
+    db.exec(`
+      INSERT OR IGNORE INTO mistake_cases (
+        case_id, original_mistake_id, child_id, source, opened_at
+      )
+      SELECT
+        'mistake:' || id,
+        id,
+        child_id,
+        COALESCE(NULLIF(source, ''), 'study-buddy'),
+        ts
+      FROM mistakes;
+
+      INSERT OR IGNORE INTO learning_attempts (
+        attempt_id, case_id, attempt_kind, mistake_id, child_id,
+        problem, user_answer, correct_answer, is_correct, occurred_at, source
+      )
+      SELECT
+        'original:mistake:' || id,
+        'mistake:' || id,
+        'original',
+        id,
+        child_id,
+        problem,
+        user_answer,
+        correct_answer,
+        0,
+        ts,
+        COALESCE(NULLIF(source, ''), 'study-buddy')
+      FROM mistakes;
+
+      INSERT OR IGNORE INTO correction_obligations (case_id, status, opened_at)
+      SELECT 'mistake:' || id, 'open', ts FROM mistakes;
+    `);
+  })();
 }
 
 function widenSourceEventVocabulary(db: Database.Database): void {

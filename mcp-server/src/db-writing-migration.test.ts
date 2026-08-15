@@ -107,7 +107,7 @@ describe("MCP writing schema migration", () => {
     ).run()).toThrow();
   });
 
-  it("deduplicates legacy mistakes within each source without merging provenance", () => {
+  it("preserves legacy mistake evidence while keeping source provenance separate", () => {
     tempDir = mkdtempSync(join(tmpdir(), "study-buddy-mcp-mistakes-"));
     const path = join(tempDir, "study.db");
     const legacy = new Database(path);
@@ -132,8 +132,11 @@ describe("MCP writing schema migration", () => {
       "SELECT source, COUNT(*) AS count FROM mistakes GROUP BY source ORDER BY source",
     ).all();
     expect(rows).toEqual([
-      { source: "game", count: 1 },
+      { source: "game", count: 2 },
       { source: "vision", count: 1 },
     ]);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM mistake_cases").get()).toEqual({ count: 3 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM learning_attempts").get()).toEqual({ count: 3 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM correction_obligations").get()).toEqual({ count: 3 });
   });
 });
