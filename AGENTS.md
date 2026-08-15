@@ -107,4 +107,4 @@ Five canonical roles, all default names: `needs-triage` / `needs-info` / `ready-
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` at root + `docs/adr/`. See `docs/agents/domain.md`.
+Single-context layout: `CONTEXT.md` at root + `docs/adr/`. Both are created lazily by `/domain-modeling` as terms get resolved; absent is fine — see `docs/agents/domain.md`.
