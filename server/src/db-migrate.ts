@@ -453,6 +453,7 @@ function ensureMistakeCompatibilityIndexes(db: Database.Database): void {
 
     const hasDuplicateProblem = db.prepare(`
       SELECT 1 FROM mistakes
+      WHERE problem IS NOT NULL
       GROUP BY child_id, problem, source
       HAVING COUNT(*) > 1
       LIMIT 1

@@ -410,8 +410,10 @@ const MAX_CAS_RETRIES = 5;
  *
  * Behavior:
  *   - correct=false  → no-op, return current reviewedCount (or 0 if row gone)
- *   - correct=true   → CAS-increment reviewed_count; if post-increment count
- *                      reaches `CASCADE_THRESHOLD` (3), delete the row
+ *   - correct=true   → CAS-increment reviewed_count and record a correction
+ *                      attempt; when the count reaches `CASCADE_THRESHOLD`
+ *                      (3), close the explicit obligation and delete the
+ *                      legacy queue row
  *   - row not found  → no-op, return reviewedCount:0
  *   - wrong child    → no-op, return reviewedCount:0 (cross-child isolation)
  *
@@ -451,9 +453,16 @@ export function reviewMistake(
   // correct=true: read current, then CAS-increment with retry on race.
   let current = db
     .prepare(
-      "SELECT reviewed_count FROM mistakes WHERE id = ? AND child_id = ?",
+      `SELECT reviewed_count, ts, problem, correct_answer, source
+         FROM mistakes WHERE id = ? AND child_id = ?`,
     )
-    .get(mistakeId, childId) as { reviewed_count: number } | undefined;
+    .get(mistakeId, childId) as {
+      reviewed_count: number;
+      ts: number;
+      problem: string | null;
+      correct_answer: string | null;
+      source: string;
+    } | undefined;
 
   // Row not found (or wrong child) — collapse to no-op so the queue
   // can flush cleanly across devices.
@@ -471,28 +480,32 @@ export function reviewMistake(
 
     if (update.changes === 1) {
       const newCount = current.reviewed_count + 1;
-      if (newCount >= CASCADE_THRESHOLD) {
-        // CAS-delete: only delete if count is still ≥ threshold (defensive
-        // against a race that already cascade-deleted it). Even if the
-        // DELETE is a no-op, we still report deleted:true because the
-        // post-increment state implies the row is no longer reviewable.
-        const del = db
-          .prepare(
-            "DELETE FROM mistakes " +
-              "WHERE id = ? AND child_id = ? AND reviewed_count >= ?",
-          )
-          .run(mistakeId, childId, CASCADE_THRESHOLD);
-        return { mistakeId, reviewedCount: newCount, deleted: del.changes === 1 || true };
-      }
-      return { mistakeId, reviewedCount: newCount, deleted: false };
+      const deleted = recordReviewCompatibility(db, {
+        mistakeId,
+        childId,
+        source: current.source,
+        occurredAt: current.ts,
+        problem: current.problem,
+        correctAnswer: current.correct_answer,
+        reviewCount: newCount,
+        closeObligation: newCount >= CASCADE_THRESHOLD,
+      });
+      return { mistakeId, reviewedCount: newCount, deleted };
     }
 
     // Lost the race. Re-read and retry.
     current = db
       .prepare(
-        "SELECT reviewed_count FROM mistakes WHERE id = ? AND child_id = ?",
+        `SELECT reviewed_count, ts, problem, correct_answer, source
+           FROM mistakes WHERE id = ? AND child_id = ?`,
       )
-      .get(mistakeId, childId) as { reviewed_count: number } | undefined;
+      .get(mistakeId, childId) as {
+        reviewed_count: number;
+        ts: number;
+        problem: string | null;
+        correct_answer: string | null;
+        source: string;
+      } | undefined;
     if (!current) {
       // Row was deleted by another concurrent review (the other device
       // hit 3 first). Report it as a no-op.
@@ -504,4 +517,60 @@ export function reviewMistake(
   throw new Error(
     `reviewMistake: CAS retries exhausted (mistakeId=${mistakeId}, childId=${childId})`,
   );
+}
+
+interface ReviewCompatibilityInput {
+  mistakeId: number;
+  childId: string;
+  source: string;
+  occurredAt: number;
+  problem: string | null;
+  correctAnswer: string | null;
+  reviewCount: number;
+  closeObligation: boolean;
+}
+
+function recordReviewCompatibility(
+  db: Database.Database,
+  input: ReviewCompatibilityInput,
+): boolean {
+  return db.transaction(() => {
+    ensureMistakeCompatibility(db, {
+      mistakeId: input.mistakeId,
+      childId: input.childId,
+      source: input.source,
+      occurredAt: input.occurredAt,
+      problem: input.problem,
+      correctAnswer: input.correctAnswer,
+    });
+    db.prepare(`
+      INSERT OR IGNORE INTO learning_attempts
+        (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
+         user_answer, correct_answer, is_correct, occurred_at, source)
+      VALUES (?, ?, 'correction', ?, ?, ?, NULL, ?, 1, ?, ?)
+    `).run(
+      `review:${input.mistakeId}:${input.reviewCount}`,
+      `mistake:${input.mistakeId}`,
+      input.mistakeId,
+      input.childId,
+      input.problem,
+      input.correctAnswer,
+      Date.now(),
+      input.source,
+    );
+    if (!input.closeObligation) return false;
+
+    const verifiedAt = Date.now();
+    db.prepare(`
+      UPDATE correction_obligations
+         SET status = 'verified', verified_at = ?
+       WHERE case_id = ?
+    `).run(verifiedAt, `mistake:${input.mistakeId}`);
+    // Keep the explicit case and attempts as durable evidence while retaining
+    // the legacy queue's historical cascade-delete response.
+    db.prepare(
+      "DELETE FROM mistakes WHERE id = ? AND child_id = ? AND reviewed_count >= ?",
+    ).run(input.mistakeId, input.childId, CASCADE_THRESHOLD);
+    return true;
+  })();
 }

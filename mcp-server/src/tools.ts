@@ -358,6 +358,27 @@ export async function handleTool(name: string, args: any) {
       return db.transaction(() => {
         const session = requireSession(args.sessionId);
         const occurredAt = Date.now();
+        const existing = db.prepare(
+          `SELECT id, ts, problem, source
+             FROM mistakes
+            WHERE child_id = ? AND problem = ? AND source = 'study-buddy'
+            ORDER BY id LIMIT 1`,
+        ).get(session.child_id, args.problem) as {
+          id: number;
+          ts: number;
+          problem: string | null;
+          source: string;
+        } | undefined;
+        if (existing) {
+          ensureMistakeCompatibility({
+            mistakeId: existing.id,
+            childId: session.child_id,
+            source: existing.source,
+            occurredAt: existing.ts,
+            problem: existing.problem,
+          });
+          return { id: existing.id, ts: existing.ts };
+        }
         const id = Number(db.prepare(
           `INSERT INTO mistakes
              (session_id, child_id, ts, subject, problem, error_type, hint, source)

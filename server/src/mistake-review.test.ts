@@ -101,6 +101,12 @@ describe("POST /api/game/mistake-review (issue #100: 3-correct cascade delete)",
     // Row should be gone from DB
     const row = db.prepare("SELECT id FROM mistakes WHERE id = ?").get(id);
     expect(row).toBeUndefined();
+    expect(db.prepare(
+      "SELECT status FROM correction_obligations WHERE case_id = ?",
+    ).get(`mistake:${id}`)).toEqual({ status: "verified" });
+    expect(db.prepare(
+      "SELECT COUNT(*) AS count FROM learning_attempts WHERE case_id = ?",
+    ).get(`mistake:${id}`)).toEqual({ count: 2 });
   });
 
   it("REV4: already-deleted mistake → idempotent no-op (no 5xx, no crash)", async () => {
