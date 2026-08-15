@@ -25,6 +25,9 @@ describe("MCP transactional Source Event writes", () => {
       problem: "2 + 2",
       errorType: "compute",
     });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM mistake_cases").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM learning_attempts").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM correction_obligations").get()).toEqual({ count: 1 });
     const completed = await handleTool("end_session", {
       sessionId: started.sessionId,
     }) as { revision: number };

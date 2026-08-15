@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
+import { insertMistake } from "./routes/mistake-api.js";
 
 let db: Database.Database;
 let app: ReturnType<typeof createApp>;
@@ -61,6 +62,47 @@ describe("POST /api/game/mistake (issue #98: auto-record wrong answers)", () => 
       .prepare("SELECT COUNT(*) as c FROM mistakes WHERE child_id = ? AND problem = ?")
       .get("default", "7+5") as { c: number }).c;
     expect(count).toBe(1);
+  });
+
+  it("keeps game writes idempotent when a legacy database retains duplicate evidence", () => {
+    const legacyDb = new Database(":memory:");
+    migrateSchema(legacyDb);
+    const sessionId = "legacy-game-session";
+    legacyDb.prepare(
+      "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)",
+    ).run(sessionId, "default", "game-only");
+    legacyDb.exec("DROP INDEX idx_mistakes_child_problem_source");
+    legacyDb.exec(
+      "CREATE INDEX idx_mistakes_child_problem_source ON mistakes(child_id, problem, source)",
+    );
+    legacyDb.prepare(
+      `INSERT INTO mistakes
+       (session_id, child_id, ts, problem, user_answer, correct_answer, source)
+       VALUES (?, 'default', 1, 'legacy-dup', 'wrong-1', 'right', 'game')`,
+    ).run(sessionId);
+    legacyDb.prepare(
+      `INSERT INTO mistakes
+       (session_id, child_id, ts, problem, user_answer, correct_answer, source)
+       VALUES (?, 'default', 2, 'legacy-dup', 'wrong-2', 'right', 'game')`,
+    ).run(sessionId);
+    migrateSchema(legacyDb);
+
+    const first = insertMistake(legacyDb, {
+      childId: "default",
+      problem: "legacy-dup",
+      userAnswer: "wrong-3",
+      correctAnswer: "right",
+      errorType: "compute",
+      source: "game",
+    });
+
+    expect(first.created).toBe(false);
+    expect(first.id).toBe(1);
+    expect(legacyDb.prepare(
+      "SELECT COUNT(*) AS count FROM mistakes WHERE problem = 'legacy-dup'",
+    ).get()).toEqual({ count: 2 });
+    expect(legacyDb.prepare("SELECT COUNT(*) AS count FROM mistake_cases").get()).toEqual({ count: 2 });
+    legacyDb.close();
   });
 
   // AT2: cross-child isolation — two children, same problem, two rows

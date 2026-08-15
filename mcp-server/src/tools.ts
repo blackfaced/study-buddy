@@ -3,7 +3,7 @@
 // handleTool without triggering the stdio transport (which would hang
 // waiting for stdin).
 import { randomUUID } from "node:crypto";
-import { db } from "./db.js";
+import { db, ensureMistakeCompatibility } from "./db.js";
 import {
   computeChatStats,
   computeOfftopicRate,
@@ -366,6 +366,13 @@ export async function handleTool(name: string, args: any) {
           args.sessionId, session.child_id, occurredAt, args.subject,
           args.problem, args.errorType, args.hint || null,
         ).lastInsertRowid);
+        ensureMistakeCompatibility({
+          mistakeId: id,
+          childId: session.child_id,
+          source: "study-buddy",
+          occurredAt,
+          problem: args.problem,
+        });
         appendMcpMistakeSourceEvent(db, {
           mistakeId: id,
           childId: session.child_id,
