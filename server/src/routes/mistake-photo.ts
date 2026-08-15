@@ -12,6 +12,7 @@ import {
   type OwnedSessionFailure,
 } from "./session.js";
 import { appendLearningAttemptSourceEvent } from "../source-events.js";
+import { ensureMistakeCompatibility } from "../db-migrate.js";
 import {
   MISTAKE_PHOTO_MAX_BYTES,
   MISTAKE_PHOTO_TYPES,
@@ -174,13 +175,25 @@ export function registerMistakePhotoRoutes(app: Express, deps: MistakePhotoRoute
       const result = db.transaction(() => {
         const current = findOwnedActiveSession(db, session.id, devicePrincipal(res));
         if (current.status !== "ok") throw new SessionChanged(current.status);
-        const inserted = db.prepare(
-          `INSERT INTO mistakes
+        const existingBeforeInsert = db.prepare(
+          `SELECT id, ts, problem, user_answer, correct_answer, source
+             FROM mistakes
+            WHERE child_id = ? AND problem = ? AND source = 'vision'
+            ORDER BY id LIMIT 1`,
+        ).get(session.child_id, normalized) as {
+          id: number;
+          ts: number;
+          problem: string | null;
+          user_answer: string | null;
+          correct_answer: string | null;
+          source: string;
+        } | undefined;
+        const inserted = existingBeforeInsert ? null : db.prepare(
+          `INSERT OR IGNORE INTO mistakes
              (session_id, subject, problem, error_type, source, child_id,
               vision_model, vision_ts, evidence_key, evidence_status,
               evidence_method, evidence_confirmed_at)
-           VALUES (?, 'math', ?, 'confirmed', 'vision', ?, ?, ?, ?, 'confirmed', ?, ?)
-           ON CONFLICT(child_id, problem, source) DO NOTHING`,
+           VALUES (?, 'math', ?, 'confirmed', 'vision', ?, ?, ?, ?, 'confirmed', ?, ?)`,
         ).run(
           session.id,
           normalized,
@@ -191,13 +204,40 @@ export function registerMistakePhotoRoutes(app: Express, deps: MistakePhotoRoute
           method,
           confirmedAt,
         );
-        let mistakeId = Number(inserted.lastInsertRowid);
-        if (inserted.changes === 0) {
-          const existing = db.prepare(
-            "SELECT id FROM mistakes WHERE child_id = ? AND problem = ? AND source = 'vision'",
-          ).get(session.child_id, normalized) as { id: number };
+        let mistakeId = existingBeforeInsert?.id ?? Number(inserted?.lastInsertRowid);
+        if (existingBeforeInsert || inserted?.changes === 0) {
+          const existing = existingBeforeInsert ?? db.prepare(
+            `SELECT id, ts, problem, user_answer, correct_answer, source
+               FROM mistakes
+              WHERE child_id = ? AND problem = ? AND source = 'vision'
+              ORDER BY id LIMIT 1`,
+          ).get(session.child_id, normalized) as {
+            id: number;
+            ts: number;
+            problem: string | null;
+            user_answer: string | null;
+            correct_answer: string | null;
+            source: string;
+          } | undefined;
+          if (!existing) throw new Error("vision mistake collision without a row");
           mistakeId = existing.id;
+          ensureMistakeCompatibility(db, {
+            mistakeId: existing.id,
+            childId: session.child_id,
+            source: existing.source,
+            occurredAt: existing.ts,
+            problem: existing.problem,
+            userAnswer: existing.user_answer,
+            correctAnswer: existing.correct_answer,
+          });
         } else {
+          ensureMistakeCompatibility(db, {
+            mistakeId,
+            childId: session.child_id,
+            source: "vision",
+            occurredAt: confirmedAt,
+            problem: normalized,
+          });
           deps.beforeSourceEventAppend?.("learning_attempt");
           appendLearningAttemptSourceEvent(db, {
             mistakeId,

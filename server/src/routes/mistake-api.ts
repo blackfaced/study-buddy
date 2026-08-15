@@ -39,6 +39,7 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { GAME_ONLY_SESSION_SUBJECT } from "../session-kind.js";
 import { appendLearningAttemptSourceEvent } from "../source-events.js";
+import { ensureMistakeCompatibility } from "../db-migrate.js";
 
 export interface MistakeRouteDeps {
   db: Database.Database;
@@ -193,12 +194,14 @@ export interface InsertMistakeResult {
 
 /**
  * Insert a wrong-answer row into `mistakes` deduped by
- * (child_id, problem, source).
+ * (child_id, problem, source). The pre-insert lookup also preserves this
+ * contract when a migrated legacy database has retained duplicate evidence
+ * and therefore cannot carry the old unique index.
  *
  * Behavior:
  *   - New (child_id, problem, source) tuple → INSERT, return {id, created: true}
- *   - Existing tuple → UNIQUE conflict, return the
- *     existing id with {id, created: false} (idempotent retry)
+ *   - Existing tuple → return the earliest existing id with
+ *     {id, created: false} (idempotent retry)
  *
  * On collision we DO NOT update user_answer / correct_answer / error_type
  * — the first wrong answer is the "authoritative" record. The 30% mix
@@ -216,6 +219,31 @@ export function insertMistake(
   return db.transaction(() => {
     ensureChildRow(db, input.childId);
     const sessionId = ensureActiveSession(db, input.childId);
+    const existingBeforeInsert = db.prepare(
+      `SELECT id, ts, problem, user_answer, correct_answer, source
+         FROM mistakes
+        WHERE child_id = ? AND problem = ? AND source = ?
+        ORDER BY id LIMIT 1`,
+    ).get(input.childId, input.problem, input.source) as {
+      id: number;
+      ts: number;
+      problem: string | null;
+      user_answer: string | null;
+      correct_answer: string | null;
+      source: string;
+    } | undefined;
+    if (existingBeforeInsert) {
+      ensureMistakeCompatibility(db, {
+        mistakeId: existingBeforeInsert.id,
+        childId: input.childId,
+        source: existingBeforeInsert.source,
+        occurredAt: existingBeforeInsert.ts,
+        problem: existingBeforeInsert.problem,
+        userAnswer: existingBeforeInsert.user_answer,
+        correctAnswer: existingBeforeInsert.correct_answer,
+      });
+      return { id: existingBeforeInsert.id, created: false };
+    }
     const occurredAt = Date.now();
     const stmt = db.prepare(`
       INSERT OR IGNORE INTO mistakes (
@@ -234,6 +262,15 @@ export function insertMistake(
     );
     if (result.changes === 1) {
       const id = Number(result.lastInsertRowid);
+      ensureMistakeCompatibility(db, {
+        mistakeId: id,
+        childId: input.childId,
+        source: input.source,
+        occurredAt,
+        problem: input.problem,
+        userAnswer: input.userAnswer,
+        correctAnswer: input.correctAnswer,
+      });
       beforeSourceEventAppend?.("learning_attempt");
       appendLearningAttemptSourceEvent(db, {
         mistakeId: id,
@@ -247,15 +284,34 @@ export function insertMistake(
       });
       return { id, created: true };
     }
-    const existing = db
-      .prepare("SELECT id FROM mistakes WHERE child_id = ? AND problem = ? AND source = ?")
-      .get(input.childId, input.problem, input.source) as { id: number } | undefined;
+    const existing = db.prepare(
+      `SELECT id, ts, problem, user_answer, correct_answer, source
+         FROM mistakes
+        WHERE child_id = ? AND problem = ? AND source = ?
+        ORDER BY id LIMIT 1`,
+    ).get(input.childId, input.problem, input.source) as {
+      id: number;
+      ts: number;
+      problem: string | null;
+      user_answer: string | null;
+      correct_answer: string | null;
+      source: string;
+    } | undefined;
     if (!existing) {
       throw new Error(
         `insertMistake: UNIQUE collision but row not found ` +
           `(child_id=${input.childId}, problem=${input.problem})`,
       );
     }
+    ensureMistakeCompatibility(db, {
+      mistakeId: existing.id,
+      childId: input.childId,
+      source: existing.source,
+      occurredAt: existing.ts,
+      problem: existing.problem,
+      userAnswer: existing.user_answer,
+      correctAnswer: existing.correct_answer,
+    });
     return { id: existing.id, created: false };
   })();
 }

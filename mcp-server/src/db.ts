@@ -367,9 +367,6 @@ function runMigrations(inst: Database.Database) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_game_sessions_source_record
       ON game_sessions(source_record_id) WHERE source_record_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_writing_attempts_char ON writing_attempts(char, ts DESC);
-    DROP INDEX IF EXISTS idx_mistakes_child_problem;
-    DROP INDEX IF EXISTS idx_mistakes_child_problem_source;
-    DROP INDEX IF EXISTS idx_mistakes_evidence_key;
     CREATE INDEX IF NOT EXISTS idx_mistake_cases_child_opened
       ON mistake_cases(child_id, opened_at DESC);
     CREATE INDEX IF NOT EXISTS idx_learning_attempts_case_occurred
@@ -422,31 +419,75 @@ function runMigrations(inst: Database.Database) {
 }
 
 function ensureMistakeCompatibilityIndexes(inst: Database.Database): void {
-  inst.exec(`
-    DROP INDEX IF EXISTS idx_mistakes_child_problem_source;
-    DROP INDEX IF EXISTS idx_mistakes_evidence_key;
-  `);
+  inst.transaction(() => {
+    inst.exec(`
+      DROP INDEX IF EXISTS idx_mistakes_child_problem;
+      DROP INDEX IF EXISTS idx_mistakes_child_problem_source;
+      DROP INDEX IF EXISTS idx_mistakes_evidence_key;
+    `);
 
-  const hasDuplicateProblem = inst.prepare(`
-    SELECT 1 FROM mistakes
-    GROUP BY child_id, problem, source
-    HAVING COUNT(*) > 1
-    LIMIT 1
-  `).get();
-  const hasDuplicateEvidence = inst.prepare(`
-    SELECT 1 FROM mistakes
-    WHERE evidence_key IS NOT NULL
-    GROUP BY evidence_key
-    HAVING COUNT(*) > 1
-    LIMIT 1
-  `).get();
+    const hasDuplicateProblem = inst.prepare(`
+      SELECT 1 FROM mistakes
+      GROUP BY child_id, problem, source
+      HAVING COUNT(*) > 1
+      LIMIT 1
+    `).get();
+    const hasDuplicateEvidence = inst.prepare(`
+      SELECT 1 FROM mistakes
+      WHERE evidence_key IS NOT NULL
+      GROUP BY evidence_key
+      HAVING COUNT(*) > 1
+      LIMIT 1
+    `).get();
 
-  inst.exec(hasDuplicateProblem
-    ? "CREATE INDEX idx_mistakes_child_problem_source ON mistakes(child_id, problem, source)"
-    : "CREATE UNIQUE INDEX idx_mistakes_child_problem_source ON mistakes(child_id, problem, source)");
-  inst.exec(hasDuplicateEvidence
-    ? "CREATE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL"
-    : "CREATE UNIQUE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL");
+    inst.exec(hasDuplicateProblem
+      ? "CREATE INDEX idx_mistakes_child_problem_source ON mistakes(child_id, problem, source)"
+      : "CREATE UNIQUE INDEX idx_mistakes_child_problem_source ON mistakes(child_id, problem, source)");
+    inst.exec(hasDuplicateEvidence
+      ? "CREATE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL"
+      : "CREATE UNIQUE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL");
+  })();
+}
+
+export interface MistakeCompatibilityRecord {
+  mistakeId: number;
+  childId: string;
+  source: string;
+  occurredAt: number;
+  problem: string | null;
+  userAnswer?: string | null;
+  correctAnswer?: string | null;
+}
+
+/** Keep newly written legacy rows visible in the explicit mistake model. */
+export function ensureMistakeCompatibility(record: MistakeCompatibilityRecord): void {
+  const inst = getDb();
+  const caseId = `mistake:${record.mistakeId}`;
+  inst.prepare(`
+    INSERT OR IGNORE INTO mistake_cases
+      (case_id, original_mistake_id, child_id, source, opened_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(caseId, record.mistakeId, record.childId, record.source, record.occurredAt);
+  inst.prepare(`
+    INSERT OR IGNORE INTO learning_attempts
+      (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
+       user_answer, correct_answer, is_correct, occurred_at, source)
+    VALUES (?, ?, 'original', ?, ?, ?, ?, ?, 0, ?, ?)
+  `).run(
+    `original:${caseId}`,
+    caseId,
+    record.mistakeId,
+    record.childId,
+    record.problem,
+    record.userAnswer ?? null,
+    record.correctAnswer ?? null,
+    record.occurredAt,
+    record.source,
+  );
+  inst.prepare(`
+    INSERT OR IGNORE INTO correction_obligations (case_id, status, opened_at)
+    VALUES (?, 'open', ?)
+  `).run(caseId, record.occurredAt);
 }
 
 function backfillMistakeCompatibility(inst: Database.Database): void {
