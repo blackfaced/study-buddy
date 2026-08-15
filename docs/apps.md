@@ -78,6 +78,7 @@ app.get("/api/apps", (req, res) => res.json({ apps: APPS }));
 study-buddy 跟 MemoryNexus 等外部消费者保持**产品边界上的松耦合**：
 
 - eligible domain row 和 `source_events` 在同一 SQLite 事务提交；消费者停机不影响孩子继续使用
+- 每个 Source Event envelope 都携带 provider-owned opaque `subjectRef`；即使 tombstone 的 payload 为空，消费者也能先验证孩子边界再处理撤回
 - `GET /api/integration/source-events` 是带独立 Bearer token、仅 loopback 可访问的单调游标 feed
 - Learning Attempt、Learning Session 和 Chat Turn 使用 Study Buddy 自己的稳定身份、revision 和 withdrawal 语义
 - Chat Source Event 只带 `sessionRef` / `turnRef`；正文只能通过 `POST /api/integration/chat-turns` 在 14 天以内、最多 50 个明确引用的窗口中读取
