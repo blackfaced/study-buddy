@@ -1,2 +1,25 @@
-server/node_modules
+# Node
+node_modules/
+*.log
+npm-debug.log*
+.DS_Store
+
+# Runtime data (SQLite is shared between mcp-server and HTTP server)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/logs/*
+data/mistakes/*
+
+# Secrets / local TLS
 .env
+.env.local
+*.pem
+server.cert
+server.key
+
+# Git worktrees (feature/fix branches live here, not in main checkout)
+.worktrees/
+
+# Coverage output
+coverage/
