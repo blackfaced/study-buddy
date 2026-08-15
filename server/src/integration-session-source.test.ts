@@ -241,6 +241,7 @@ describe("learning Session revisions and withdrawals (#106)", () => {
         revision: 3,
       },
     });
+    expect(events[2].subjectRef).toBe(events[0].payload.subjectRef);
     const serialized = JSON.stringify(events[2]);
     expect(serialized).not.toContain("arithmetic");
     expect(serialized).not.toContain("durationMinutes");
