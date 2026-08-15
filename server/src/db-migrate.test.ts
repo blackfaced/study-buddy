@@ -138,6 +138,80 @@ describe("migrateSchema", () => {
     db.close();
   });
 
+  it("creates mistake-case compatibility tables and preserves duplicate legacy evidence", () => {
+    const db = freshDb();
+    db.exec(`
+      CREATE TABLE children (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+      INSERT INTO children (id, name) VALUES
+        ('default', '小宝'),
+        ('other', '另一个孩子');
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        child_id TEXT NOT NULL,
+        started_at INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO sessions (id, child_id) VALUES ('legacy', 'default');
+      INSERT INTO sessions (id, child_id) VALUES ('legacy-other', 'other');
+      CREATE TABLE mistakes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        subject TEXT,
+        problem TEXT,
+        error_type TEXT,
+        source TEXT,
+        user_answer TEXT,
+        correct_answer TEXT,
+        child_id TEXT NOT NULL
+      );
+      INSERT INTO mistakes
+        (session_id, ts, subject, problem, error_type, source, user_answer, correct_answer, child_id)
+      VALUES
+        ('legacy', 10, 'math', '1+1', 'compute', 'game', '3', '2', 'default'),
+        ('legacy', 20, 'math', '1+1', 'compute', 'game', '4', '2', 'default'),
+        ('legacy-other', 30, 'math', '1+1', 'compute', 'game', '5', '2', 'other');
+    `);
+
+    (globalThis as any).__migrateSchema(db);
+
+    expect(db.prepare("SELECT COUNT(*) AS count FROM mistakes").get()).toEqual({ count: 3 });
+    expect(db.prepare("SELECT child_id, COUNT(*) AS count FROM mistake_cases GROUP BY child_id ORDER BY child_id").all()).toEqual([
+      { child_id: "default", count: 2 },
+      { child_id: "other", count: 1 },
+    ]);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM learning_attempts").get()).toEqual({ count: 3 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM correction_obligations").get()).toEqual({ count: 3 });
+    expect(db.prepare(
+      "SELECT attempt_kind, user_answer, correct_answer FROM learning_attempts ORDER BY occurred_at",
+    ).all()).toEqual([
+      { attempt_kind: "original", user_answer: "3", correct_answer: "2" },
+      { attempt_kind: "original", user_answer: "4", correct_answer: "2" },
+      { attempt_kind: "original", user_answer: "5", correct_answer: "2" },
+    ]);
+
+    db.prepare(
+      `INSERT INTO mistake_cases (case_id, original_mistake_id, child_id, source, opened_at)
+       VALUES ('manual:1', 1000, 'default', 'manual', 40)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO learning_attempts
+       (attempt_id, case_id, attempt_kind, child_id, problem, user_answer, correct_answer, is_correct, occurred_at, source)
+       VALUES ('attempt:manual:1', 'manual:1', 'correction', 'default', '1+1', '2', '2', 1, 50, 'manual')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO correction_obligations (case_id, status, opened_at)
+       VALUES ('manual:1', 'open', 40)`,
+    ).run();
+    expect(db.prepare("SELECT attempt_kind, is_correct FROM learning_attempts WHERE attempt_id = 'attempt:manual:1'").get()).toEqual({
+      attempt_kind: "correction",
+      is_correct: 1,
+    });
+
+    expect(() => (globalThis as any).__migrateSchema(db)).not.toThrow();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM learning_attempts").get()).toEqual({ count: 4 });
+    db.close();
+  });
+
   it("adds confirmed-only mistake photo evidence fields and idempotency receipts", () => {
     const db = freshDb();
     (globalThis as any).__migrateSchema(db);
