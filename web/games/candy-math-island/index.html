@@ -701,7 +701,7 @@ function tick() {
   if (sec <= 10) t.classList.add("warn"); else t.classList.remove("warn");
 }
 
-function submitAnswer() {
+async function submitAnswer() {
   if (!state.currentQuestion) return;
   const raw = state.currentAnswer.trim();
   if (raw === "") return;  // 忽略空提交
