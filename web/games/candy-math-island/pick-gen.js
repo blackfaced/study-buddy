@@ -79,11 +79,16 @@ export function pickGenWithBias(items, errorTypeBias, rng = Math.random, opts = 
 
   return function pick() {
     // 1. Mistake-mix gate (only when configured). On a hit, try the
-    //    provider; null means "pool empty", fall through to the regular
-    //    path so the session never starves.
+    //    provider; null OR a multi-question mistake means "skip this
+    //    one and fall through to the regular path" so the session
+    //    never starves and never shows a kid two questions in one
+    //    card. Multi-question mistakes are still shifted off the
+    //    provider's pool by the caller, so they don't re-surface
+    //    until the upstream VLM capture (#128 T04) splits them at
+    //    the source.
     if (mistakeGateEnabled && rng() < mistakeRate) {
       const m = mistakeProvider();
-      if (m) {
+      if (m && !isMultiQuestionProblem(m.problem)) {
         // Wrap the raw mistake into the Question shape so the renderer
         // and the regular picker can share downstream code. We tag
         // `fromMistake` so the caller can route the answer to the
@@ -115,6 +120,38 @@ export function pickGenWithBias(items, errorTypeBias, rng = Math.random, opts = 
 // this set is ignored when reading from weak-topics, so the server is
 // free to add new errorTypes in the future without breaking the client.
 const KNOWN_ERROR_TYPES = ["carry", "borrow", "multiply", "compute"];
+
+// v0.8.16 (candy-math-island start button): VLM photo capture of a
+// whole homework page produced mistake records whose `problem` field
+// contains MULTIPLE questions glued together. pickGenWithBias rendered
+// the raw problem text in the quiz, so kids saw two questions in one
+// card and could not answer either. We detect this at the picker
+// boundary and skip such mistakes, falling through to the regular
+// weighted-sampling path. The proper fix is at the VLM capture layer
+// (split one photo into N confirmed mistakes, #128 T04); this
+// client-side skip is a defence-in-depth while that's still pending.
+//
+// Detection rules — any one of:
+//   - the problem contains a newline (clearly two+ lines / two+ questions)
+//   - the problem contains the bold "第" question marker sequence
+//     (VLM sometimes uses "**第一题：**" / "**第二题：**" inline)
+const MULTI_Q_NEWLINE = /\n/;
+const MULTI_Q_BOLD = /\*\*第[一二三四五六七八九十]+题/g;
+
+/**
+ * @param {string} problem
+ * @returns {boolean} true if the problem text looks like multiple questions
+ */
+export function isMultiQuestionProblem(problem) {
+  if (typeof problem !== "string" || problem.length === 0) return false;
+  if (MULTI_Q_NEWLINE.test(problem)) return true;
+  // If we see TWO OR MORE "第N题" markers, it's multi-question even
+  // without newlines. One marker could be a single problem that
+  // happens to say "first question" — only skip on ≥ 2 to avoid
+  // false positives.
+  const matches = problem.match(MULTI_Q_BOLD);
+  return Array.isArray(matches) && matches.length >= 2;
+}
 
 // Top-1 weak topic weight. Per issue #16, we want ~60% of the 60s
 // session to target the weakest area, with the remaining 40% keeping

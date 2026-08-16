@@ -139,6 +139,94 @@ test("pickGenWithBias: default rng is Math.random (smoke test, runs once)", () =
   assert.ok(["carry", "compute", "borrow", "multiply"].includes(q.errorType));
 });
 
+// v0.8.16 (candy-math-island start button): VLM photo capture of a whole
+// homework page produced mistake records whose `problem` field contains
+// MULTIPLE questions glued together ("**第一题：** ... \n\n**第二题：** ...").
+// pickGenWithBias was rendering the raw problem text in the quiz, so
+// kids saw two questions in one card and could not answer either.
+// pickGenWithBias must skip multi-question mistakes and fall through to
+// the regular weighted-sampling path. The provider's pool still
+// advances past them; they'll be re-eligible once #128 T04 splits
+// multi-question mistakes at the VLM capture boundary.
+
+test("pickGenWithBias: multi-question mistake (newline-separated) is skipped → falls through to weighted sampling", () => {
+  // Provider returns a multi-question mistake on the first call, a
+  // single-question one on the second. Gate is forced open (mistakeRate=1,
+  // rng always < 1). The first pick must NOT serve the multi-question
+  // mistake — it must fall through to a regular generator question.
+  const multiQ = {
+    id: 100,
+    problem: "**第一题：** 一根铁丝先用去一半，又用去剩下的一半，还剩 3 米。\n\n**第二题：** 小明有 20 块糖，他先吃了一半多 2 块。",
+    answer: 12,
+    errorType: "multiply",
+  };
+  const singleQ = {
+    id: 101,
+    problem: "7 × 8",
+    answer: 56,
+    errorType: "multiply",
+  };
+  let calls = 0;
+  const provider = () => (calls++ === 0 ? multiQ : singleQ);
+  const pick = pickGenWithBias(
+    items,
+    { compute: 1, carry: 1, borrow: 1, multiply: 1 },
+    // Always less than 1 → always hit the mistake gate.
+    () => 0.1,
+    { mistakeProvider: provider, mistakeRate: 1 },
+  );
+  const q1 = pick();
+  assert.equal(
+    q1.fromMistake,
+    undefined,
+    "first pick must NOT serve the multi-question mistake; should fall through to weighted",
+  );
+  assert.ok(
+    ["carry", "compute", "borrow", "multiply"].includes(q1.errorType),
+    "first pick should be a regular generator question",
+  );
+  // Second pick: provider returns the single-question mistake, which IS served.
+  const q2 = pick();
+  assert.equal(q2.fromMistake, true, "second pick serves the single-question mistake");
+  assert.equal(q2.mistakeId, 101);
+  assert.equal(q2.display, "7 × 8");
+});
+
+test("pickGenWithBias: multi-question mistake (第一题/第二题 markers, no newline) is skipped", () => {
+  // Some VLM outputs use bold markers without inserting a newline.
+  const multiQ = {
+    id: 200,
+    problem: "**第一题：** 2+3=?\n**第二题：** 4+5=?",
+    answer: 5,
+    errorType: "compute",
+  };
+  let calls = 0;
+  const provider = () => (calls++ === 0 ? multiQ : null);
+  const pick = pickGenWithBias(
+    items,
+    { compute: 1, carry: 1, borrow: 1, multiply: 1 },
+    () => 0.1,
+    { mistakeProvider: provider, mistakeRate: 1 },
+  );
+  const q = pick();
+  assert.equal(q.fromMistake, undefined, "must skip multi-question mistake without newline separators");
+  assert.ok(["carry", "compute", "borrow", "multiply"].includes(q.errorType));
+});
+
+test("pickGenWithBias: single-question mistake is served normally", () => {
+  const singleQ = { id: 1, problem: "5+3", answer: 8, errorType: "carry" };
+  const pick = pickGenWithBias(
+    items,
+    { carry: 1, compute: 1, borrow: 1, multiply: 1 },
+    () => 0.1,
+    { mistakeProvider: () => singleQ, mistakeRate: 1 },
+  );
+  const q = pick();
+  assert.equal(q.fromMistake, true);
+  assert.equal(q.display, "5+3");
+  assert.equal(q.answer, 8);
+});
+
 test("buildBiasFromWeakTopics: empty input → balanced default", () => {
   const bias = buildBiasFromWeakTopics([]);
   // Default should sum to 1 and have a sensible compute-heavy floor.
