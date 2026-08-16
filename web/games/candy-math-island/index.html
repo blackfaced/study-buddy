@@ -420,6 +420,22 @@ async function loadExplanations() {
   _getExplanation = mod.getExplanation;
 }
 
+// v0.8.x (candy answer type-compare): the picker returns Question
+// objects whose `answer` field is `number | string` — regular gen()
+// returns Number (e.g. 17), but /api/game/quiz-context returns the
+// `correct_answer TEXT` column as a String. Strict `===` between
+// parsed-Number user input and String answer was marking every
+// mistake-review question wrong. This helper normalises both sides
+// to a Number before compare. Lazy-loaded because submitAnswer is
+// only triggered after the kid types + taps confirm, and we want the
+// page-load path lean (the module is < 1KB).
+let _isAnswerCorrect;
+async function loadAnswerCompare() {
+  if (_isAnswerCorrect) return;
+  const mod = await import("./answer-compare.js");
+  _isAnswerCorrect = mod.isAnswerCorrect;
+}
+
 const QUIZ_ITEMS = [
   { errorType: "compute",  level: 1, gen: genAddCompute },
   { errorType: "compute",  level: 1, gen: genSubCompute },
@@ -705,12 +721,22 @@ async function submitAnswer() {
   if (!state.currentQuestion) return;
   const raw = state.currentAnswer.trim();
   if (raw === "") return;  // 忽略空提交
+  // v0.8.x: delegate the comparison to the answer-compare module.
+  // The picker can return a Number (regular gen) or a String
+  // (mistake review, where /api/game/quiz-context returns the
+  // `correct_answer TEXT` column as a String). The helper
+  // normalises both sides to Number — see answer-compare.js.
+  // Lazy-load the module on first answer; fallback to legacy
+  // strict-equals if the module fails to import (defence).
+  await loadAnswerCompare();
   const user = parseInt(raw, 10);
   if (isNaN(user)) return;
   const correct = state.currentQuestion.answer;
+  const isCorrect = _isAnswerCorrect
+    ? _isAnswerCorrect(user, correct)
+    : (user === correct);  // legacy fallback (shouldn't reach)
   state.totalQuestions++;
   const inputEl = document.getElementById("answer-input");
-  const isCorrect = (user === correct);
   if (isCorrect) {
     state.correctCount++;
     inputEl.classList.add("correct");
