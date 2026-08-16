@@ -377,3 +377,126 @@ describe("POST /api/mn-observation/observation (kid-app read)", () => {
     expect(r2.body.observations[0].payload).toEqual({ who: "child-2" });
   });
 });
+
+// =====================================================================
+// Same-child binding rotation — the core "namespace isolation" test
+// for the MN system. A child may rotate their binding (revoke old,
+// create new) when MN re-auths, the kid switches devices, or the
+// upstream namespace changes. After rotation, the old binding's
+// observations must NOT leak into the kid's read view.
+//
+// The schema enforces "at most one active binding per child" via
+// `idx_mn_bindings_child_active` UNIQUE INDEX WHERE status='active',
+// so this is the "namespace rotation" pattern. The test below
+// validates the read path respects rotation.
+//
+// See: server/src/mn-observation.ts (readLatestObservations,
+// upsertBinding) + server/src/db-migrate.ts (idx_mn_bindings_child_active).
+// =====================================================================
+
+describe("Same-child binding rotation (namespace isolation)", () => {
+  let db: Database.Database;
+  let tmpDir: string;
+  let app: ReturnType<typeof createApp>;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "mn-namespace-rotation-"));
+    db = new Database(join(tmpDir, "study.db"));
+    migrateSchema(db);
+    app = buildApp(db, true, {});
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("child sees binding-A's observations while A is the active binding", async () => {
+    db.prepare("INSERT OR IGNORE INTO children (id, name) VALUES (?, ?)").run("rot-child", "rot");
+    await request(app)
+      .post("/api/mn-observation/materialize")
+      .set("Authorization", bearer(INTEGRATION_TOKEN))
+      .send({
+        bindingId: "b-A",
+        mnSubject: "subj-A",
+        childId: "rot-child",
+        observations: [
+          { observationId: "obs-A1", generatedAt: NOW, payload: { era: "A" } },
+          { observationId: "obs-A2", generatedAt: NOW + 1, payload: { era: "A" } },
+        ],
+      });
+
+    const r = await request(app)
+      .post("/api/mn-observation/observation")
+      .send({ childId: "rot-child" });
+    expect(r.body.bindingId).toBe("b-A");
+    expect(r.body.observations).toHaveLength(2);
+    expect(r.body.observations.every((o: { payload: { era: string } }) => o.payload.era === "A")).toBe(true);
+  });
+
+  it("after revoking A and creating B, child sees B's observations, NOT A's", async () => {
+    db.prepare("INSERT OR IGNORE INTO children (id, name) VALUES (?, ?)").run("rot-child", "rot");
+    // Phase 1: binding-A is active, has observations.
+    await request(app)
+      .post("/api/mn-observation/materialize")
+      .set("Authorization", bearer(INTEGRATION_TOKEN))
+      .send({
+        bindingId: "b-A",
+        mnSubject: "subj-A",
+        childId: "rot-child",
+        observations: [
+          { observationId: "obs-A1", generatedAt: NOW, payload: { era: "A" } },
+        ],
+      });
+    // Phase 2: rotate — revoke A, create B (now active), materialize to B.
+    db.prepare("UPDATE mn_bindings SET status = 'revoked' WHERE binding_id = ?").run("b-A");
+    await request(app)
+      .post("/api/mn-observation/materialize")
+      .set("Authorization", bearer(INTEGRATION_TOKEN))
+      .send({
+        bindingId: "b-B",
+        mnSubject: "subj-B",
+        childId: "rot-child",
+        observations: [
+          { observationId: "obs-B1", generatedAt: NOW + 100, payload: { era: "B" } },
+        ],
+      });
+    // Phase 3: read should now return B's binding + B's observations only.
+    const r = await request(app)
+      .post("/api/mn-observation/observation")
+      .send({ childId: "rot-child" });
+    expect(r.body.bindingId).toBe("b-B");
+    expect(r.body.observations).toHaveLength(1);
+    expect(r.body.observations[0].payload).toEqual({ era: "B" });
+    // A's observation must NOT leak into the read view.
+    const leakedFromA = r.body.observations.some(
+      (o: { observationId: string }) => o.observationId === "obs-A1",
+    );
+    expect(leakedFromA).toBe(false);
+  });
+
+  it("UNIQUE INDEX prevents two active bindings for the same child (rotation is required)", async () => {
+    // This is the schema-level guarantee that makes namespace rotation
+    // safe: you can't have two active bindings for one child at once.
+    // Trying to insert a second active binding must fail.
+    db.prepare("INSERT OR IGNORE INTO children (id, name) VALUES (?, ?)").run("rot-child", "rot");
+    await request(app)
+      .post("/api/mn-observation/materialize")
+      .set("Authorization", bearer(INTEGRATION_TOKEN))
+      .send({
+        bindingId: "b-A",
+        mnSubject: "subj-A",
+        childId: "rot-child",
+        observations: [],
+      });
+    // A is now active. Try to insert b-B (also active) via direct SQL
+    // (bypassing the API which doesn't have a "force create" path) —
+    // the partial UNIQUE index must reject it.
+    expect(() => {
+      db.prepare(`
+        INSERT INTO mn_bindings (binding_id, child_id, mn_subject, status, created_at, updated_at)
+        VALUES (?, ?, ?, 'active', ?, ?)
+      `).run("b-B", "rot-child", "subj-B", NOW, NOW);
+    }).toThrow(/UNIQUE/i);
+  });
+});

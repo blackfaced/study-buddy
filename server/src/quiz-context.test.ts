@@ -246,3 +246,86 @@ describe("POST /api/game/quiz-context (issue #99: 30% mistake-mix window)", () =
     }
   });
 });
+
+// =====================================================================
+// Namespace isolation for mistakes (regression for the test-fixture
+// pollution bug, 2026-08-16).
+//
+// The picker already filters by child_id in the WHERE clause
+// (see server/src/routes/quiz-context.ts line 142), so a test
+// script that POSTs /api/game/mistake with `childId: "test-..."`
+// will write to a different namespace than the production kid. This
+// test pins the contract: a mistake recorded under childId "test-x"
+// must NOT appear in the production kid's ("default") quiz-context
+// pool. Without this, future test scripts could regress to the
+// 2026-08-16 pattern of using childId="default" and polluting the
+// kid's mistake pool with "nexus-test-7+5" / "live-..." garbage.
+//
+// The same childId-as-namespace pattern is used in the MN system
+// (see mn-observation.test.ts "Same-child binding rotation"). The
+// mistakes table doesn't have MN's binding_id, but childId serves
+// the same isolation purpose here.
+// =====================================================================
+
+describe("POST /api/game/quiz-context (namespace isolation)", () => {
+  it("test-fixture mistakes under a non-default childId are NOT served to the production kid", async () => {
+    // The production kid (childId="default") has one real mistake.
+    db.prepare(`
+      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
+      VALUES (?, ?, '7+5', '11', '12', 'compute', 'game', 'default')
+    `).run(testSessionId, TODAY_START);
+    // A test run (childId="test-runner") polluted the DB with garbage.
+    db.prepare(`
+      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
+      VALUES (?, ?, 'nexus-test-7+5', '11', '12', 'compute', 'game', 'test-runner')
+    `).run(testSessionId, TODAY_START);
+    db.prepare(`
+      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
+      VALUES (?, ?, 'live-nexus-3+4', '99', '0', 'compute', 'game', 'test-runner')
+    `).run(testSessionId, TODAY_START);
+
+    // The production kid asks for their quiz-context.
+    const res = await request(app)
+      .post("/api/game/quiz-context")
+      .send({ childId: "default", date: TODAY });
+
+    expect(res.status).toBe(200);
+    expect(res.body.eligible).toBe(true);
+    // Namespace isolation: no mistake whose child_id != "default" leaks.
+    // (The shared test DB accumulates mistakes from earlier tests, so we
+    // assert on the SET of returned problems, not the absolute count.)
+    const returnedProblems = (res.body.mistakes as Array<{ problem: string }>).map((m) => m.problem);
+    expect(returnedProblems).toContain("7+5");                       // real prod mistake is there
+    expect(returnedProblems).not.toContain("nexus-test-7+5");        // test-runner did NOT leak
+    expect(returnedProblems).not.toContain("live-nexus-3+4");        // test-runner did NOT leak
+    const testFixtureLeak = returnedProblems.some((p) => /nexus|live-|^test-/.test(p));
+    expect(testFixtureLeak).toBe(false);
+  });
+
+  it("a different kid's mistakes are isolated from the production kid", async () => {
+    // Two kids, two distinct namespaces — the cross-child test the
+    // user reported in 2026-08-16. Picker must filter by child_id.
+    db.prepare(`
+      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
+      VALUES (?, ?, 'iso-4+3', '6', '7', 'compute', 'game', 'alice')
+    `).run(testSessionId, TODAY_START);
+    db.prepare(`
+      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
+      VALUES (?, ?, 'iso-5+2', '6', '7', 'compute', 'game', 'bob')
+    `).run(testSessionId, TODAY_START);
+
+    const aliceRes = await request(app)
+      .post("/api/game/quiz-context")
+      .send({ childId: "alice", date: TODAY });
+    const aliceProblems = (aliceRes.body.mistakes as Array<{ problem: string }>).map((m) => m.problem);
+    expect(aliceProblems).toContain("iso-4+3");
+    expect(aliceProblems).not.toContain("iso-5+2"); // bob's did NOT leak
+
+    const bobRes = await request(app)
+      .post("/api/game/quiz-context")
+      .send({ childId: "bob", date: TODAY });
+    const bobProblems = (bobRes.body.mistakes as Array<{ problem: string }>).map((m) => m.problem);
+    expect(bobProblems).toContain("iso-5+2");
+    expect(bobProblems).not.toContain("iso-4+3"); // alice's did NOT leak
+  });
+});
