@@ -189,15 +189,17 @@ describe("POST /api/game/session (v0.6 time-mode)", () => {
 
 describe("GET /api/game/daily (v0.6 daily aggregation)", () => {
   it("returns one row per day for recent sessions", async () => {
-    // Use absolute UTC timestamps that are guaranteed to land on different
-    // local-time days regardless of when the test runs. Previously this
+    // Use dynamic UTC timestamps anchored to today, so the test always lands
+    // inside the 7-day window regardless of when CI runs. Previously this
     // test used `Date.now() - 24*3600*1000` for "yesterday", which broke
     // in CI when the runner hit 00:00 UTC (both "today" sessions and
     // "yesterday" ended up in the same localtime day → only 1 group).
-    // Pick mid-day UTC timestamps so the localtime conversion always
-    // lands on a unique YYYY-MM-DD.
-    const todayNoon = Date.UTC(2026, 7, 10, 12, 0, 0);   // 2026-08-10 12:00 UTC
-    const yesterdayNoon = Date.UTC(2026, 7, 9, 12, 0, 0); // 2026-08-09 12:00 UTC
+    // A later variant hard-coded 2026-08-09/10, which aged out 7 days later
+    // when the API's 7-day window started excluding them.
+    const dayMs = 86_400_000;
+    const nowMs = Date.now();
+    const todayNoon = nowMs - (nowMs % dayMs) + 12 * 3_600_000;
+    const yesterdayNoon = todayNoon - dayMs;
     // Today: 2 sessions, 20 questions, 17 correct (85%)
     for (const [total, correct] of [[12, 9], [8, 8]] as const) {
       await request(app).post("/api/game/session").send({
