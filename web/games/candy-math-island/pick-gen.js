@@ -88,7 +88,7 @@ export function pickGenWithBias(items, errorTypeBias, rng = Math.random, opts = 
     //    the source.
     if (mistakeGateEnabled && rng() < mistakeRate) {
       const m = mistakeProvider();
-      if (m && !isMultiQuestionProblem(m.problem)) {
+      if (m && !shouldSkipMistake(m.problem)) {
         // Wrap the raw mistake into the Question shape so the renderer
         // and the regular picker can share downstream code. We tag
         // `fromMistake` so the caller can route the answer to the
@@ -151,6 +151,51 @@ export function isMultiQuestionProblem(problem) {
   // false positives.
   const matches = problem.match(MULTI_Q_BOLD);
   return Array.isArray(matches) && matches.length >= 2;
+}
+
+// v0.8.x: defence-in-depth at the picker boundary. The kid saw
+// "nexus-test-7+5" as a quiz problem because old test/debug mistake
+// records from my own test runs were still in the DB. The proper
+// fix is at the source (VLM capture + a server-side test-mode flag),
+// but the picker should refuse to render ANY non-math problem text.
+// Otherwise future test scripts, VLM misfires, or manual DB writes
+// can pollute the pool and the kid will see garbage again.
+//
+// Detection — a problem is "non-math" if ANY of:
+//   - empty / non-string
+//   - contains a VLM refusal phrase
+//     ("题目..." / "无法识别" / "重新拍" / "小书童" / "光线" / "模糊")
+//   - contains a test/debug marker
+//     ("test" / "nexus" / starts with "live-")
+//   - contains no digit (real problems always have a number)
+const NON_MATH_VLM_REFUSAL = /题目|无法识别|重新拍|小书童|光线|模糊|拍糊|看不清/;
+const NON_MATH_TEST_MARKER = /test|nexus|^live-|debug/;
+const HAS_DIGIT = /\d/;
+
+/**
+ * @param {unknown} problem
+ * @returns {boolean} true if the problem is NOT a real math problem
+ *                   (i.e. should be skipped by the picker)
+ */
+export function isNonMathProblem(problem) {
+  if (typeof problem !== "string" || problem.length === 0) return true;
+  if (NON_MATH_VLM_REFUSAL.test(problem)) return true;
+  if (NON_MATH_TEST_MARKER.test(problem)) return true;
+  if (!HAS_DIGIT.test(problem)) return true;
+  return false;
+}
+
+/**
+ * Combined "should we surface this mistake?" check. Both
+ * isMultiQuestionProblem and isNonMathProblem cause a skip — the
+ * provider's pool still advances past skipped mistakes so they
+ * don't re-surface.
+ *
+ * @param {unknown} problem
+ * @returns {boolean} true if the mistake should be skipped
+ */
+export function shouldSkipMistake(problem) {
+  return isMultiQuestionProblem(problem) || isNonMathProblem(problem);
 }
 
 // Top-1 weak topic weight. Per issue #16, we want ~60% of the 60s

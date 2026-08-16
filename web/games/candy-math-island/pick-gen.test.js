@@ -6,7 +6,7 @@
 // (also invoked from server/package.json's "test" script)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickGenWithBias, buildBiasFromWeakTopics } from "./pick-gen.js";
+import { pickGenWithBias, buildBiasFromWeakTopics, isNonMathProblem, isMultiQuestionProblem, shouldSkipMistake } from "./pick-gen.js";
 
 const fakeQ = (n) => ({ display: `q${n}`, answer: n, errorType: "compute", level: 1 });
 
@@ -262,4 +262,92 @@ test("buildBiasFromWeakTopics: unknown errorType in weak topics is ignored", () 
   assert.equal(bias.carry, 0.6);
   // Unknown "flying" should not pollute the bias map.
   assert.equal(bias.flying, undefined);
+});
+
+// =====================================================================
+// v0.8.x: isNonMathProblem + shouldSkipMistake — defence-in-depth at
+// the picker boundary. The kid saw "nexus-test-7+5" because old
+// test/debug mistake records from my own test runs were still in the
+// DB. Cleaned up the DB (#143-era), but we want the picker to refuse
+// to render ANY non-math problem text — even if future test scripts
+// or VLM misfires pollute the mistake pool.
+//
+// Detection rules — a problem is "non-math" if ANY of:
+//   - empty / non-string
+//   - contains a VLM refusal phrase ("题目...", "无法识别", "重新拍", "小书童", "光线", "模糊")
+//   - contains a test/debug marker ("test", "nexus", or starts with "live-")
+//   - contains no digits at all (real problems always have a number)
+// =====================================================================
+
+test("isNonMathProblem: detects VLM refusal phrases", () => {
+  assert.equal(isNonMathProblem("题目可以再拍给我看！"), true);
+  assert.equal(isNonMathProblem("题目呢~你可以重新拍一下数学题给我看吗？📸"), true);
+  assert.equal(isNonMathProblem("无法识别（图片是一本书的封面..."), true);
+  assert.equal(isNonMathProblem("题目内容。你可以重新拍一张清晰的照片再发过来吗？"), true);
+  assert.equal(isNonMathProblem("小书童学习空间"), true);
+  assert.equal(isNonMathProblem("拍糊了，光线太暗"), true);
+});
+
+test("isNonMathProblem: detects test/debug markers", () => {
+  assert.equal(isNonMathProblem("nexus-test-7+5"), true);
+  assert.equal(isNonMathProblem("live-2-7+8"), true);
+  assert.equal(isNonMathProblem("live-nexus-3+4"), true);
+  assert.equal(isNonMathProblem("live-test-7+5"), true);
+  assert.equal(isNonMathProblem("debug-puzzle-9"), true);
+});
+
+test("isNonMathProblem: detects empty / non-string / subject-only", () => {
+  assert.equal(isNonMathProblem(""), true);
+  assert.equal(isNonMathProblem(null), true);
+  assert.equal(isNonMathProblem(undefined), true);
+  assert.equal(isNonMathProblem(42), true);
+  assert.equal(isNonMathProblem("应用题"), true); // subject-only, no digit
+  assert.equal(isNonMathProblem("时针分针辨认"), true); // subject-only, no digit
+});
+
+test("isNonMathProblem: real math problems pass through (false)", () => {
+  // Regular candy-math-island display strings
+  assert.equal(isNonMathProblem("4 + 7 = ?"), false);
+  assert.equal(isNonMathProblem("45 - 28 = ?"), false);
+  assert.equal(isNonMathProblem("7 × 8 = ?"), false);
+  // Mistake-review problem text (no "= ?")
+  assert.equal(isNonMathProblem("7+5"), false);
+  assert.equal(isNonMathProblem("45-28"), false);
+  assert.equal(isNonMathProblem("4×4×4"), false);
+  // Scenario problem
+  assert.equal(isNonMathProblem("3 个 5，一共多少？"), false);
+  // Edge: a single digit (rare but valid for early-stage problems)
+  assert.equal(isNonMathProblem("5"), false);
+});
+
+test("shouldSkipMistake: combines isMultiQuestionProblem + isNonMathProblem", () => {
+  // Multi-q
+  assert.equal(shouldSkipMistake("**第一题：** 一根铁丝...\n\n**第二题：** 小明有..."), true);
+  assert.equal(shouldSkipMistake("第一题：...\n第二题：..."), true);
+  // Non-math
+  assert.equal(shouldSkipMistake("题目可以再拍给我看！"), true);
+  assert.equal(shouldSkipMistake("nexus-test-7+5"), true);
+  // Real problem
+  assert.equal(shouldSkipMistake("45 - 28 = ?"), false);
+  assert.equal(shouldSkipMistake("7+5"), false);
+});
+
+test("pickGenWithBias: non-math mistake is skipped, falls through to regular", () => {
+  // The user reported a "nexus-test-7+5" mistake rendering in the
+  // quiz. Picker should refuse to draw it and fall through to the
+  // weighted-sampling path. The provider's pool still advances so
+  // the bad record doesn't keep re-surfacing.
+  const badMistake = { id: 99, problem: "nexus-test-7+5", answer: 12, errorType: "compute" };
+  let calls = 0;
+  const provider = () => (calls++ === 0 ? badMistake : null);
+  const pick = pickGenWithBias(
+    items,
+    { compute: 1, carry: 1, borrow: 1, multiply: 1 },
+    () => 0.1,
+    { mistakeProvider: provider, mistakeRate: 1 },
+  );
+  const q = pick();
+  // Picker must have skipped the bad mistake and returned a regular Q.
+  assert.equal(q.fromMistake, undefined, "non-math mistake must be skipped");
+  assert.ok(["carry", "compute", "borrow", "multiply"].includes(q.errorType));
 });
