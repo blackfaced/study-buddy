@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "lint": "oxlint --config ../.oxlintrc.json src/",
     "test": "vitest run && node --test ../web/shared/*.test.js && node --test ../web/buddy/*.test.js && node --test ../web/games/candy-math-island/*.test.js && node --test ../web/write/*.test.js",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -26,6 +27,8 @@
     "@types/node": "^26.1.1",
     "@types/supertest": "^6.0.2",
     "@vitest/coverage-v8": "^2.1.9",
+    "oxlint": "^1.78.0",
+    "oxlint-tsgolint": "^7.0.2001",
     "supertest": "^7.0.0",
     "tsx": "^4.23.0",
     "typescript": "^7.0.2",

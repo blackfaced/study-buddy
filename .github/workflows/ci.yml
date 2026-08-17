@@ -43,5 +43,10 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Lint
+        # Skip mcp-server (no oxlint configured there); server runs `npm run lint` (oxlint syntax-level).
+        if: matrix.package == 'server'
+        run: npm run lint
+
       - name: Test
         run: npm test

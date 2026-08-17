@@ -4,11 +4,15 @@
   "private": true,
   "description": "Study Buddy — root workspace marker for pre-commit hooks",
   "scripts": {
+    "lint": "oxlint server/src/ && cd mcp-server && oxlint src/ || true",
+    "lint:type-aware": "oxlint --type-aware server/src/ || true",
     "prepare": "husky || true"
   },
   "devDependencies": {
     "husky": "^9.1.7",
     "lint-staged": "^17.3.0",
+    "oxlint": "^1.78.0",
+    "oxlint-tsgolint": "^7.0.2001",
     "prettier": "^3.9.6"
   },
   "lint-staged": {

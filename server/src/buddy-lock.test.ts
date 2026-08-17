@@ -8,7 +8,7 @@
 // - Different IPs are independent counters
 // - BUDDY_PIN unset (null) → always ok
 // - Non-4-digit input → 'wrong' (input validation)
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { BuddyLock } from "./buddy-lock.js";
 
 describe("BuddyLock: correct PIN", () => {

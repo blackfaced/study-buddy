@@ -50,7 +50,6 @@ export function registerWriteRoutes(app: Express, deps: WriteRouteDeps): void {
   const {
     db,
     logger,
-    mistakesDir,
     visionClient,
     handwritingReviewTimeoutMs = 4_000,
   } = deps;
