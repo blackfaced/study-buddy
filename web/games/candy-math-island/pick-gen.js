@@ -91,19 +91,19 @@ export function pickGenWithBias(items, errorTypeBias, rng = Math.random, opts = 
       // v0.8.x: two-stage skip — first, the problem text must look like
       // a real math problem (shouldSkipMistake, PR #144). Second, the
       // mistake's level must be ≤ the kid's current level (the user
-      // reported "4*4*4 超纲了" on 2026-08-17). If the kid is at L1
-      // and the only mistake in the pool is L3 multiply, we fall
-      // through to the regular path — no starvation, no over-level
-      // drilling. Source-of-truth fix is a `level` column on mistakes
-      // (so we don't have to infer from text), but until that ships
-      // this picker check is the bridge.
+      // reported "4*4*4 超纲了" on 2026-08-17). With the level column
+      // populated server-side at insert time (PR #148), this is now a
+      // direct numeric compare — no text heuristic. Rows with a null
+      // level (pre-migration data) are treated as "show anyway" so we
+      // never regress to over-blocking on legacy data.
       const maxAllowedLevel = Array.isArray(opts.levels) && opts.levels.length > 0
         ? Math.max(...opts.levels)
         : 3;
+      const mistakeLevel = typeof m?.level === "number" ? m.level : null;
       if (
         m &&
         !shouldSkipMistake(m.problem) &&
-        isMistakeAtOrBelowLevel(m, maxAllowedLevel)
+        (mistakeLevel === null || mistakeLevel <= maxAllowedLevel)
       ) {
         // Wrap the raw mistake into the Question shape so the renderer
         // and the regular picker can share downstream code. We tag
@@ -114,7 +114,7 @@ export function pickGenWithBias(items, errorTypeBias, rng = Math.random, opts = 
           display: m.problem,
           answer: m.answer,
           errorType: m.errorType,
-          level: null,
+          level: mistakeLevel,
           fromMistake: true,
           mistakeId: m.id,
         };
@@ -214,68 +214,11 @@ export function shouldSkipMistake(problem) {
   return isMultiQuestionProblem(problem) || isNonMathProblem(problem);
 }
 
-// v0.8.x (candy mistake level cap): infer a mistake's level from
-// errorType + problem text, so the picker can refuse to surface
-// over-level content to the kid. The user reported (2026-08-17):
-// "4*4*4 is over the kid's level" — VLM had OCR'd "4 × 4 × 4"
-// as a vision_pending mistake (no errorType), and the L1 kid
-// saw it in the 30% mistake-mix window.
-//
-// The proper fix is to add a `level` column on mistakes and
-// store it at mistake-creation time. This heuristic is the bridge
-// until that ships (and is also the safety net for any future
-// mistake source that doesn't populate the level field).
-//
-// Level inference rules (any one match wins):
-//   1. errorType = "multiply"               → L3
-//   2. problem text contains "×" or "×"     → L3 (VLM text fallback)
-//   3. problem text contains "个" / "几" / "多少" → L3 (counting-word fallback)
-//   4. errorType = "carry" or "borrow" + max number ≥ 20 → L2
-//   5. errorType = "carry" or "borrow" + max number < 20  → L1
-//   6. errorType = "compute" or "vision_pending" + small numbers → L1
-//   7. any text with small numbers (< 20) → L1 (default safe)
-//
-// L1 < L2 < L3 — if mistakeLevel ≤ kidLevel, surface the mistake.
-const HAS_MULTIPLY_OP = /[×x×]/;
-const HAS_COUNT_WORD = /个|几|多少/;
-const NUMBER_PATTERN = /\d+/g;
-// Carry/borrow can be either L1 (small) or L2 (large). L2 = the
-// two-digit problems in the level-2 generator. Threshold of 20
-// matches the generator's lower bound: genAddCarry uses a=10..49,
-// genSubBorrow uses big=20..49.
-const L2_NUMBER_THRESHOLD = 20;
-
-/**
- * @param {unknown} mistake  the mistake object (with problem, errorType, etc.)
- * @param {number} kidLevel  1, 2, or 3
- * @returns {boolean} true if the mistake's level is ≤ kidLevel
- */
-export function isMistakeAtOrBelowLevel(mistake, kidLevel) {
-  if (kidLevel >= 3) return true; // L3+ kids see everything
-  const m = mistake ?? {};
-  const problem = typeof m.problem === "string" ? m.problem : "";
-  const errorType = typeof m.errorType === "string" ? m.errorType : null;
-
-  // L3 indicators: multiply operator, or L3 counting words
-  if (errorType === "multiply") return false;
-  if (HAS_MULTIPLY_OP.test(problem)) return false;
-  if (HAS_COUNT_WORD.test(problem)) return false;
-
-  // L2 indicators: carry/borrow with large numbers
-  if (errorType === "carry" || errorType === "borrow") {
-    const maxNum = maxNumberIn(problem);
-    if (maxNum >= L2_NUMBER_THRESHOLD) return kidLevel >= 2;
-  }
-
-  // L1 by default (compute, vision_pending with small numbers, etc.)
-  return true;
-}
-
-function maxNumberIn(text) {
-  const matches = text.match(NUMBER_PATTERN);
-  if (!matches) return 0;
-  return Math.max(...matches.map(Number));
-}
+// v0.8.x (candy mistake level cap): the level column on mistakes
+// is now populated at insert time (server/src/mistake-level.ts +
+// backfill in db-migrate.ts). The picker compares m.level directly —
+// no client-side text heuristic. See PR #146 for the bridge version
+// (kept historically) and PR #148 for the source-of-truth migration.
 
 // Top-1 weak topic weight. Per issue #16, we want ~60% of the 60s
 // session to target the weakest area, with the remaining 40% keeping
