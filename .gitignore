@@ -10,6 +10,8 @@ data/*.db-shm
 data/*.db-wal
 data/logs/*
 data/mistakes/*
+# server/ has its own runtime data dir (study.db, logs, nexus-outbox)
+server/data/*
 
 # Secrets / local TLS
 .env
