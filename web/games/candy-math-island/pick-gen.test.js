@@ -6,7 +6,7 @@
 // (also invoked from server/package.json's "test" script)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickGenWithBias, buildBiasFromWeakTopics, isNonMathProblem, isMultiQuestionProblem, shouldSkipMistake } from "./pick-gen.js";
+import { pickGenWithBias, buildBiasFromWeakTopics, isNonMathProblem, isMultiQuestionProblem, shouldSkipMistake, isMistakeAtOrBelowLevel } from "./pick-gen.js";
 
 const fakeQ = (n) => ({ display: `q${n}`, answer: n, errorType: "compute", level: 1 });
 
@@ -350,4 +350,93 @@ test("pickGenWithBias: non-math mistake is skipped, falls through to regular", (
   // Picker must have skipped the bad mistake and returned a regular Q.
   assert.equal(q.fromMistake, undefined, "non-math mistake must be skipped");
   assert.ok(["carry", "compute", "borrow", "multiply"].includes(q.errorType));
+});
+
+// =====================================================================
+// v0.8.x (candy mistake level cap): the picker previously served any
+// mistake regardless of the kid's current level, so a L1 kid got L3
+// multiply problems (e.g. "4 × 4 × 4") in the 30% mistake-mix window.
+// The user reported: "题库里有 4*4*4 超纲了" (the question bank has
+// 4*4*4 which is over the level). Fix: infer the mistake's level
+// from errorType + problem text, skip if it's above the kid's level.
+//
+// Same defence-in-depth pattern as PR #144 (shouldSkipMistake for
+// non-math / multi-q) and PR #142 (multi-q). Source-of-truth fix is
+// to add a `level` column on mistakes and store it at creation time;
+// this picker check is the bridge until that ships.
+// =====================================================================
+
+test("isMistakeAtOrBelowLevel: errorType=multiply → L3 (only L3 kids can see)", () => {
+  // L3 mistake must NOT appear to L1 or L2 kids
+  const m = { problem: "4 × 4 × 4", errorType: "multiply" };
+  assert.equal(isMistakeAtOrBelowLevel(m, 1), false, "L3 mistake must not show to L1 kid");
+  assert.equal(isMistakeAtOrBelowLevel(m, 2), false, "L3 mistake must not show to L2 kid");
+  assert.equal(isMistakeAtOrBelowLevel(m, 3), true, "L3 mistake can show to L3 kid");
+});
+
+test("isMistakeAtOrBelowLevel: errorType=carry + small numbers → L1", () => {
+  const m = { problem: "5 + 7 = ?", errorType: "carry" };
+  assert.equal(isMistakeAtOrBelowLevel(m, 1), true);
+  assert.equal(isMistakeAtOrBelowLevel(m, 2), true);
+  assert.equal(isMistakeAtOrBelowLevel(m, 3), true);
+});
+
+test("isMistakeAtOrBelowLevel: errorType=carry + large numbers → L2", () => {
+  const m = { problem: "35 + 27 = ?", errorType: "carry" };
+  assert.equal(isMistakeAtOrBelowLevel(m, 1), false, "L2 carry must not show to L1 kid");
+  assert.equal(isMistakeAtOrBelowLevel(m, 2), true);
+  assert.equal(isMistakeAtOrBelowLevel(m, 3), true);
+});
+
+test("isMistakeAtOrBelowLevel: text fallback — problem contains × → L3", () => {
+  // VLM caught "4 × 4 × 4" but didn't classify (errorType=vision_pending).
+  // We must still detect it's L3 from the text.
+  const m = { problem: "4 × 4 × 4", errorType: "vision_pending" };
+  assert.equal(isMistakeAtOrBelowLevel(m, 1), false, "the actual user-reported bug");
+  assert.equal(isMistakeAtOrBelowLevel(m, 2), false);
+  assert.equal(isMistakeAtOrBelowLevel(m, 3), true);
+});
+
+test("isMistakeAtOrBelowLevel: text fallback — '个' (counting) → L3", () => {
+  const m = { problem: "3 个 5，一共多少？", errorType: null };
+  assert.equal(isMistakeAtOrBelowLevel(m, 1), false);
+  assert.equal(isMistakeAtOrBelowLevel(m, 2), false);
+  assert.equal(isMistakeAtOrBelowLevel(m, 3), true);
+});
+
+test("isMistakeAtOrBelowLevel: vision_pending with small numbers → L1", () => {
+  const m = { problem: "5 + 3 = ?", errorType: "vision_pending" };
+  assert.equal(isMistakeAtOrBelowLevel(m, 1), true);
+});
+
+test("pickGenWithBias: L3 mistake does NOT surface to L1 kid (the actual bug)", () => {
+  // The exact scenario the user reported: L1 kid, mistake "4 × 4 × 4"
+  // is in the pool, picker must skip it and fall through to a regular L1 Q.
+  const l3Mistake = { id: 99, problem: "4 × 4 × 4", answer: 64, errorType: "vision_pending" };
+  let calls = 0;
+  const provider = () => (calls++ === 0 ? l3Mistake : null);
+  const pick = pickGenWithBias(
+    items,
+    { compute: 1, carry: 1, borrow: 1, multiply: 1 },
+    () => 0.1,  // mistakeRate gate always hits
+    { mistakeProvider: provider, mistakeRate: 1, levels: [1] },  // L1 kid
+  );
+  const q = pick();
+  // L1 kid must NOT get the L3 mistake. Fall-through to a regular L1 item.
+  assert.equal(q.fromMistake, undefined, "L3 mistake must be skipped for L1 kid");
+  assert.ok(["carry", "compute", "borrow"].includes(q.errorType), "must fall through to L1-eligible gen");
+  assert.notEqual(q.errorType, "multiply");
+});
+
+test("pickGenWithBias: L3 mistake DOES surface to L3 kid (no over-blocking)", () => {
+  const l3Mistake = { id: 99, problem: "4 × 4 × 4", answer: 64, errorType: "multiply" };
+  const pick = pickGenWithBias(
+    items,
+    { compute: 1, carry: 1, borrow: 1, multiply: 1 },
+    () => 0.1,
+    { mistakeProvider: () => l3Mistake, mistakeRate: 1, levels: [3] },  // L3 kid
+  );
+  const q = pick();
+  assert.equal(q.fromMistake, true, "L3 kid must see the L3 mistake");
+  assert.equal(q.display, "4 × 4 × 4");
 });
