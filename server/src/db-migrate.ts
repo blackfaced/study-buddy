@@ -425,6 +425,7 @@ export function migrateSchema(db: Database.Database): void {
       BEGIN SELECT RAISE(ABORT, 'paired device is referenced by sessions'); END;
   `);
 
+  addMistakesChildIdForeignKey(db);
   ensureMistakeCompatibilityIndexes(db);
   backfillMistakeCompatibility(db);
   backfillMistakeLevel(db);
@@ -611,4 +612,92 @@ function backfillMistakeLevel(db: Database.Database): void {
     }
   });
   tx(rows);
+}
+
+// v0.8.x (PR #149): add a FK constraint on mistakes.child_id → children.id.
+// SQLite can't ALTER TABLE ... ADD CONSTRAINT, so the migration uses
+// the table-rebuild pattern. The rebuild drops the old table (taking
+// its indexes with it) and renames the new one; the index recreation
+// is delegated to ensureMistakeCompatibilityIndexes, which runs
+// right after.
+//
+// Idempotency: detect if the FK is already present via
+// `PRAGMA foreign_key_list(mistakes)` — if child_id has a FK, skip
+// the rebuild entirely. This makes the function safe to call on
+// fresh DBs (just-created, no FK yet), upgraded DBs (FK added),
+// and re-runs (FK present, skipped).
+//
+// Robustness: the SELECT uses pragma_table_info to copy only
+// columns that exist on the OLD table. This handles synthetic
+// legacy test fixtures (and real production upgrades where the
+// table was created with a subset of today's columns). Run inside
+// a transaction so the temp table never escapes to sqlite_master.
+function addMistakesChildIdForeignKey(db: Database.Database): void {
+  const fks = db
+    .prepare("PRAGMA foreign_key_list(mistakes)")
+    .all() as Array<{ from: string; table: string; to: string }>;
+  const childFk = fks.find((fk) => fk.from === "child_id");
+  if (childFk) return; // already migrated
+
+  // List the columns the OLD mistakes table has — only those get
+  // copied to the new table. NULL is used for columns the old
+  // table doesn't have (so they get the column DEFAULT).
+  const oldCols = (
+    db.prepare("PRAGMA table_info(mistakes)").all() as Array<{ name: string }>
+  ).map((c) => c.name);
+
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE mistakes_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+        subject TEXT,
+        problem TEXT,
+        error_type TEXT,
+        hint TEXT,
+        reviewed_count INTEGER DEFAULT 0,
+        image_path TEXT,
+        vision_input TEXT,
+        vision_reasoning TEXT,
+        vision_model TEXT,
+        vision_ts INTEGER,
+        source TEXT DEFAULT 'study-buddy',
+        user_answer TEXT,
+        correct_answer TEXT,
+        evidence_key TEXT,
+        evidence_status TEXT,
+        evidence_method TEXT,
+        evidence_confirmed_at INTEGER,
+        child_id TEXT NOT NULL DEFAULT 'default',
+        level INTEGER,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (child_id) REFERENCES children(id) ON DELETE CASCADE
+      )
+    `);
+    // Build INSERT...SELECT dynamically, projecting NULL for any
+    // column the old table doesn't have. The COALESCE for child_id
+    // ensures a non-null default ('default') even if the old row
+    // somehow had it null (defense-in-depth — column is NOT NULL).
+    const newCols = [
+      "id", "session_id", "ts", "subject", "problem", "error_type",
+      "hint", "reviewed_count", "image_path", "vision_input",
+      "vision_reasoning", "vision_model", "vision_ts", "source",
+      "user_answer", "correct_answer", "evidence_key", "evidence_status",
+      "evidence_method", "evidence_confirmed_at", "child_id", "level",
+    ];
+    const selectExprs = newCols.map((c) => {
+      if (c === "child_id") {
+        return `COALESCE(${c}, 'default')`;
+      }
+      return oldCols.includes(c) ? c : `NULL AS ${c}`;
+    });
+    const insert = db.prepare(`
+      INSERT INTO mistakes_new (${newCols.join(", ")})
+      SELECT ${selectExprs.join(", ")}
+      FROM mistakes
+    `);
+    insert.run();
+    db.exec(`DROP TABLE mistakes; ALTER TABLE mistakes_new RENAME TO mistakes;`);
+  })();
 }

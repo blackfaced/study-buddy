@@ -274,6 +274,10 @@ describe("POST /api/game/quiz-context (namespace isolation)", () => {
       INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
       VALUES (?, ?, '7+5', '11', '12', 'compute', 'game', 'default')
     `).run(testSessionId, TODAY_START);
+    // The mistakes table has a FK on child_id → children(id), so
+    // we need a real "test-runner" child row before we can insert
+    // test-fixture mistakes under it.
+    db.prepare("INSERT OR IGNORE INTO children (id, name) VALUES (?, ?)").run("test-runner", "test runner");
     // A test run (childId="test-runner") polluted the DB with garbage.
     db.prepare(`
       INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
@@ -305,6 +309,10 @@ describe("POST /api/game/quiz-context (namespace isolation)", () => {
   it("a different kid's mistakes are isolated from the production kid", async () => {
     // Two kids, two distinct namespaces — the cross-child test the
     // user reported in 2026-08-16. Picker must filter by child_id.
+    // The mistakes table has a FK on child_id → children(id), so we
+    // need to register alice / bob as real children first.
+    db.prepare("INSERT OR IGNORE INTO children (id, name) VALUES (?, ?)").run("alice", "Alice");
+    db.prepare("INSERT OR IGNORE INTO children (id, name) VALUES (?, ?)").run("bob", "Bob");
     db.prepare(`
       INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
       VALUES (?, ?, 'iso-4+3', '6', '7', 'compute', 'game', 'alice')
