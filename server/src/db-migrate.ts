@@ -13,6 +13,7 @@
 
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import { inferMistakeLevel } from "./mistake-level.js";
 
 const SOURCE_EVENTS_TABLE_SQL = `
   CREATE TABLE source_events (
@@ -66,6 +67,12 @@ export function migrateSchema(db: Database.Database): void {
   // without conflicts. The endpoint (/api/game/mistake) accepts an explicit
   // childId; missing/empty defaults to 'default' for backwards compat.
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN child_id TEXT NOT NULL DEFAULT 'default'`); } catch {}
+
+  // v0.8.x (#146/#148): per-mistake level. Stored at creation time so the
+  // candy-math-island picker can just compare `m.level <= kidLevel` instead
+  // of running a text-based heuristic on every draw. Backfill below
+  // populates level for any pre-existing rows that pre-date the column.
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN level INTEGER`); } catch {}
 
   // v0.8 (#34a-1, issue #98): normalize the source on legacy rows. Do not
   // delete duplicate rows: each row is original evidence for the mistake
@@ -197,6 +204,7 @@ export function migrateSchema(db: Database.Database): void {
       evidence_method TEXT,
       evidence_confirmed_at INTEGER,
       child_id TEXT NOT NULL DEFAULT 'default',
+      level INTEGER,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
@@ -419,6 +427,7 @@ export function migrateSchema(db: Database.Database): void {
 
   ensureMistakeCompatibilityIndexes(db);
   backfillMistakeCompatibility(db);
+  backfillMistakeLevel(db);
 
   db.prepare(
     "DELETE FROM safety_incidents WHERE status = 'resolved' AND resolved_at < ?",
@@ -580,4 +589,26 @@ function widenSourceEventVocabulary(db: Database.Database): void {
       DROP TABLE source_events_learning_attempt_only;
     `);
   })();
+}
+
+// v0.8.x (#146/#148): backfill mistakes.level for any pre-existing
+// rows. Idempotent: rows that already have a non-NULL level are
+// left alone. Uses inferMistakeLevel (same heuristic the picker
+// used pre-migration) so the backfill matches what the picker
+// would have guessed from text.
+function backfillMistakeLevel(db: Database.Database): void {
+  const rows = db
+    .prepare(
+      "SELECT id, problem, error_type FROM mistakes WHERE level IS NULL",
+    )
+    .all() as Array<{ id: number; problem: string | null; error_type: string | null }>;
+  if (rows.length === 0) return;
+  const update = db.prepare("UPDATE mistakes SET level = ? WHERE id = ?");
+  const tx = db.transaction((items: typeof rows) => {
+    for (const r of items) {
+      const level = inferMistakeLevel(r.problem, r.error_type);
+      update.run(level, r.id);
+    }
+  });
+  tx(rows);
 }

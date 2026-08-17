@@ -481,3 +481,79 @@ describe("migrateSchema", () => {
     db.close();
   });
 });
+
+// =====================================================================
+// v0.8.x (PR #148): mistakes.level column.
+//
+// The picker previously used a text-based heuristic (PR #146) to
+// filter out over-level mistakes. The proper source-of-truth fix
+// is to store the level on the row at creation time. This migration
+// adds the `level` column (INTEGER) and backfills it for any rows
+// that pre-date the column (using the same heuristic the picker
+// used to use). The picker can then drop its text-based inference
+// and just compare `m.level <= kidLevel`.
+// =====================================================================
+
+describe("migrateSchema — mistakes.level column", () => {
+  it("adds the `level` column to mistakes", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const cols = db
+      .prepare("PRAGMA table_info(mistakes)")
+      .all() as Array<{ name: string }>;
+    const colNames = cols.map((c) => c.name);
+    expect(colNames).toContain("level");
+    db.close();
+  });
+
+  it("adds the `level` column idempotently (second run is a no-op)", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    // Running again must not throw "duplicate column".
+    expect(() => (globalThis as any).__migrateSchema(db)).not.toThrow();
+    db.close();
+  });
+
+  it("backfills level for existing mistakes (one-time on upgrade)", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    // Note: migrateSchema auto-creates the "default" child (line 438),
+    // so we don't INSERT it again. We just need a session to attach
+    // mistakes to.
+    db.prepare("INSERT INTO sessions (id, child_id) VALUES (?, ?)").run("s1", "default");
+    db.prepare(`
+      INSERT INTO mistakes (session_id, problem, error_type, source, child_id)
+      VALUES (?, ?, ?, 'game', 'default')
+    `).run("s1", "4 × 4 × 4", "vision_pending");
+    db.prepare(`
+      INSERT INTO mistakes (session_id, problem, error_type, source, child_id)
+      VALUES (?, ?, ?, 'game', 'default')
+    `).run("s1", "5 + 7 = ?", "carry");
+    db.prepare(`
+      INSERT INTO mistakes (session_id, problem, error_type, source, child_id)
+      VALUES (?, ?, ?, 'game', 'default')
+    `).run("s1", "35 + 27 = ?", "carry");
+    db.prepare(`
+      INSERT INTO mistakes (session_id, problem, error_type, source, child_id)
+      VALUES (?, ?, ?, 'game', 'default')
+    `).run("s1", "3 个 5，一共多少？", null);
+    // Now reset level to NULL to simulate pre-migration state.
+    db.prepare("UPDATE mistakes SET level = NULL").run();
+    // Re-run the migration. The ALTER is a no-op (column exists), the
+    // CREATE TABLE IF NOT EXISTS is a no-op, and the backfill should
+    // populate level for the 4 NULL rows.
+    (globalThis as any).__migrateSchema(db);
+    const rows = db
+      .prepare("SELECT id, problem, error_type, level FROM mistakes ORDER BY id")
+      .all() as Array<{ id: number; problem: string; error_type: string | null; level: number | null }>;
+    // The "4 × 4 × 4" row should be L3 (multiply op).
+    expect(rows.find((r) => r.problem === "4 × 4 × 4")?.level).toBe(3);
+    // Small carry should be L1.
+    expect(rows.find((r) => r.problem === "5 + 7 = ?")?.level).toBe(1);
+    // Large carry should be L2.
+    expect(rows.find((r) => r.problem === "35 + 27 = ?")?.level).toBe(2);
+    // Counting problem "个" should be L3.
+    expect(rows.find((r) => r.problem === "3 个 5，一共多少？")?.level).toBe(3);
+    db.close();
+  });
+});
