@@ -8,7 +8,7 @@
 // below — see commit message for the regression test.
 
 import { config as loadDotenv } from "dotenv";
-import express, { type Request, type Response } from "express";
+import express, { type Request } from "express";
 import multer from "multer";
 import Database from "better-sqlite3";
 import { resolve } from "node:path";
@@ -76,20 +76,9 @@ export interface AppOptions {
   mistakePhotoWorkflow?: MistakePhotoWorkflow;
 }
 
-const OFFTOPIC_KEYWORDS = [
-  "奥特曼", "汪汪队", "冰雪奇缘", "艾莎", "公主", "巴啦啦",
-  "王者荣耀", "蛋仔", "原神", "我的世界", "游戏", "玩具",
-  "冰淇淋", "薯片", "巧克力", "奶茶", "零食",
-  "电视", "动画片", "漫画", "B站", "抖音", "小红书",
-  "小狗", "小猫",
-];
-
-const EMOTION_KEYWORDS = ["不想", "不要", "烦", "累", "哭", "生气", "怕"];
-
 export function createApp(opts: AppOptions): express.Express {
   const { db } = opts;
   const httpsPort = opts.httpsPort ?? HTTPS_PORT;
-  const visionClient = opts.visionClient === undefined ? null : opts.visionClient;
   const mistakesDir = opts.mistakesDir ?? resolve(process.cwd(), "data/mistakes");
   // Ensure the mistakes dir exists. No-op if it already does.
   try {

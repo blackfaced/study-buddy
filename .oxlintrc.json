@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "pedantic": "off",
+    "style": "off",
+    "restriction": "off",
+    "nursery": "off",
+    "perf": "off"
+  },
+  "rules": {
+    "no-underscore-dangle": [
+      "warn",
+      {
+        "allow": ["__migrateSchema", "__dirname", "__filename", "__esModule"]
+      }
+    ],
+    "no-async-endpoint-handlers": "off"
+  },
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/data/**",
+    "**/coverage/**",
+    "**/.worktrees/**"
+  ],
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "**/*.test.js", "**/*.test.mjs"],
+      "rules": {
+        "no-console": "off",
+        "typescript/no-non-null-assertion": "off",
+        "typescript/no-explicit-any": "off"
+      }
+    }
+  ]
+}

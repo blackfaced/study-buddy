@@ -23,7 +23,6 @@ import {
   sendToDingTalk,
   drainOutboxToWebhook,
   type WebhookState,
-  type SendResult,
 } from "./webhook-notify.js";
 
 // ---------------------------------------------------------------------------

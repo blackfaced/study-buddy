@@ -333,6 +333,7 @@ function isBoundedText(
     typeof value === "string" &&
     value.length <= maxLength &&
     (allowEmpty || value.length > 0) &&
+    // oxlint-disable-next-line no-control-regex -- intentional: reject control chars in user input
     !/[\u0000-\u001f\u007f]/.test(value)
   );
 }

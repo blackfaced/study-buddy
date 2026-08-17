@@ -4,7 +4,6 @@ import {
   memorySink,
   requestLogger,
   type LogLevel,
-  type LogSink,
 } from "./logger.js";
 
 const LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
@@ -17,7 +16,7 @@ function makeLogger(level: LogLevel = "debug") {
 
 describe("createLogger", () => {
   it("emits entries with timestamp, level, message, and meta", () => {
-    const { logger, entries } = makeLogger();
+    const { logger } = makeLogger();
     const fixed = new Date("2026-07-12T10:00:00Z");
     logger.info("hello", { childId: "default", n: 3 });
     // re-create with fixed clock
