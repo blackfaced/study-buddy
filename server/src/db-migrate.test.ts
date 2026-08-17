@@ -557,3 +557,86 @@ describe("migrateSchema — mistakes.level column", () => {
     db.close();
   });
 });
+
+// =====================================================================
+// v0.8.x (PR #149): mistakes.child_id FK constraint.
+//
+// The mistakes table has child_id TEXT NOT NULL DEFAULT 'default',
+// but no FOREIGN KEY constraint. Any string (including non-existent
+// child_ids) can be inserted. The picker filters by childId at
+// read time, but defense-in-depth says the schema itself should
+// reject garbage. SQLite can't ALTER TABLE ... ADD CONSTRAINT,
+// so we use the table-rebuild pattern (CREATE _new, INSERT SELECT,
+// DROP, RENAME) gated by `PRAGMA foreign_key_list(mistakes)` so
+// it runs exactly once on a fresh DB or an upgraded DB.
+// =====================================================================
+
+describe("migrateSchema — mistakes.child_id FK", () => {
+  it("adds the FK constraint on child_id → children(id)", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const fks = db
+      .prepare("PRAGMA foreign_key_list(mistakes)")
+      .all() as Array<{ from: string; table: string; to: string }>;
+    const childFk = fks.find((fk) => fk.from === "child_id");
+    expect(childFk).toBeDefined();
+    expect(childFk?.table).toBe("children");
+    expect(childFk?.to).toBe("id");
+    db.close();
+  });
+
+  it("FK is enforced: inserting a non-existent childId throws", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    db.prepare("INSERT INTO sessions (id, child_id) VALUES (?, ?)").run("s1", "default");
+    // Try to insert a mistake with a non-existent child_id. The FK
+    // must reject this — pre-migration, it would silently succeed.
+    expect(() => {
+      db.prepare(`
+        INSERT INTO mistakes (session_id, child_id, problem, source)
+        VALUES ('s1', 'does-not-exist', '5+5', 'game')
+      `).run();
+    }).toThrow(/FOREIGN KEY/i);
+    db.close();
+  });
+
+  it("preserves existing rows through the table rebuild", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    // Insert a mistake with the default child (migrateSchema auto-creates "default").
+    db.prepare("INSERT INTO sessions (id, child_id) VALUES (?, ?)").run("s1", "default");
+    db.prepare(`
+      INSERT INTO mistakes (session_id, child_id, problem, source, level)
+      VALUES ('s1', 'default', '5+5', 'game', 1)
+    `).run();
+    // Force a re-run of the migration (simulating upgrade).
+    expect(() => (globalThis as any).__migrateSchema(db)).not.toThrow();
+    // Row should still be there.
+    const row = db
+      .prepare("SELECT child_id, problem, level FROM mistakes WHERE problem = '5+5'")
+      .get() as { child_id: string; problem: string; level: number } | undefined;
+    expect(row).toBeDefined();
+    expect(row?.child_id).toBe("default");
+    expect(row?.level).toBe(1);
+    db.close();
+  });
+
+  it("FK rebuild is idempotent (second run does not duplicate or error)", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    // Second run should be a no-op (the rebuild function detects
+    // the FK is already present and skips).
+    expect(() => (globalThis as any).__migrateSchema(db)).not.toThrow();
+    // Verify only ONE row in sqlite_master for the mistakes table
+    // (the rebuild would have created a temp table, so we check that
+    // the final state has exactly the expected single table).
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'mistakes%'")
+      .all() as Array<{ name: string }>;
+    // After rebuild + rename, only `mistakes` should remain. The
+    // function uses an in-tx transaction so the temp table never
+    // escapes to sqlite_master.
+    expect(tables.map((t) => t.name)).toEqual(["mistakes"]);
+    db.close();
+  });
+});
