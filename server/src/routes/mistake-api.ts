@@ -40,6 +40,7 @@ import { randomUUID } from "node:crypto";
 import { GAME_ONLY_SESSION_SUBJECT } from "../session-kind.js";
 import { appendLearningAttemptSourceEvent } from "../source-events.js";
 import { ensureMistakeCompatibility } from "../db-migrate.js";
+import { inferMistakeLevel } from "../mistake-level.js";
 
 export interface MistakeRouteDeps {
   db: Database.Database;
@@ -245,10 +246,16 @@ export function insertMistake(
       return { id: existingBeforeInsert.id, created: false };
     }
     const occurredAt = Date.now();
+    // v0.8.x (#146/#148): infer the mistake's level at insert time.
+    // Stored on the row so the picker can compare m.level <= kidLevel
+    // directly instead of running a text-based heuristic on every
+    // draw. Helper lives in mistake-level.ts (shared with the
+    // backfill in db-migrate.ts).
+    const level = inferMistakeLevel(input.problem, input.errorType ?? null);
     const stmt = db.prepare(`
       INSERT OR IGNORE INTO mistakes (
-        session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source, level
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       sessionId,
@@ -259,6 +266,7 @@ export function insertMistake(
       input.correctAnswer,
       input.errorType,
       input.source,
+      level,
     );
     if (result.changes === 1) {
       const id = Number(result.lastInsertRowid);
