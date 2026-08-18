@@ -119,6 +119,8 @@ export interface SourceEvent {
   eventType: SourceEventType;
   eventSchemaVersion: number;
   occurredAt: string;
+  /** Opaque subject routing identity, including for content-free tombstones. */
+  subjectRef: string;
   sourceIdentity: SourceEventIdentity;
   payload: SourceEventPayload;
 }
@@ -377,6 +379,7 @@ function sourceEventFromRow(row: SourceEventRow): SourceEvent {
     eventType: row.event_type,
     eventSchemaVersion: row.event_schema_version,
     occurredAt: new Date(row.occurred_at).toISOString(),
+    subjectRef: row.subject_ref,
     sourceIdentity: {
       sourceProduct: "study_buddy",
       sourceInstallationId: row.source_installation_id,

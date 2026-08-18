@@ -103,6 +103,9 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
     expect(firstPage.body.events[0].payload.subjectRef).toMatch(
       /^[0-9a-f-]{36}$/,
     );
+    expect(firstPage.body.events[0].subjectRef).toBe(
+      firstPage.body.events[0].payload.subjectRef,
+    );
     expect(firstPage.body.page.nextCursor).toBe(1);
     const serialized = JSON.stringify(firstPage.body).toLowerCase();
     expect(serialized).not.toContain("memorynexus");
