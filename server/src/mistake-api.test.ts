@@ -229,11 +229,118 @@ describe("POST /api/game/mistake (issue #98: auto-record wrong answers)", () => 
 
     expect(first.status).toBe(201);
     expect(retryFromNamedApp.status).toBe(200);
-    expect(retryFromNamedApp.body).toEqual({ id: first.body.id, created: false });
+    expect(retryFromNamedApp.body).toMatchObject({ id: first.body.id, created: false });
+    expect(typeof retryFromNamedApp.body.caseId).toBe("string");
 
     const rows = db
       .prepare("SELECT id, source FROM mistakes WHERE child_id = ? AND problem = ?")
       .all("default", payload.problem) as Array<{ id: number; source: string }>;
     expect(rows).toEqual([{ id: first.body.id, source: "game" }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SB124-T01 PR-B: mistake_cases is the canonical source-of-truth for new
+// inserts. mistakes table becomes a thin compat mirror that still gives
+// the legacy mistake_id referenced by source_events + mistake_photo FKs.
+// The response now carries caseId so future closure-loop readers can
+// switch over without re-querying.
+// ---------------------------------------------------------------------------
+describe("POST /api/game/mistake (SB124-T01 PR-B: case row + mirror)", () => {
+  it("returns caseId alongside mistakeId for new inserts", async () => {
+    const res = await request(app)
+      .post("/api/game/mistake")
+      .send({
+        childId: "default",
+        problem: "10-3",
+        correctAnswer: "7",
+        userAnswer: "6",
+        errorType: "borrow",
+        source: "candy-math-island",
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.created).toBe(true);
+    expect(typeof res.body.id).toBe("number");
+    expect(typeof res.body.caseId).toBe("string");
+    expect(res.body.caseId).toMatch(/^case:/);
+
+    // mistake_cases has the row with full evidence
+    const caseRow = db
+      .prepare(
+        "SELECT problem, user_answer, correct_answer, error_type, level, source, " +
+          "child_id, original_mistake_id " +
+          "FROM mistake_cases WHERE case_id = ?",
+      )
+      .get(res.body.caseId) as Record<string, unknown>;
+    expect(caseRow).toMatchObject({
+      problem: "10-3",
+      user_answer: "6",
+      correct_answer: "7",
+      error_type: "borrow",
+      source: "game",
+      child_id: "default",
+      original_mistake_id: res.body.id,
+    });
+    expect(caseRow.level).toBeGreaterThanOrEqual(1);
+
+    // learning_attempts has the original attempt
+    const attempt = db
+      .prepare(
+        "SELECT attempt_kind, is_correct, problem FROM learning_attempts WHERE case_id = ?",
+      )
+      .get(res.body.caseId) as Record<string, unknown>;
+    expect(attempt).toEqual({
+      attempt_kind: "original",
+      is_correct: 0,
+      problem: "10-3",
+    });
+
+    // correction_obligations has the open obligation with reviewed_count=0
+    const obligation = db
+      .prepare(
+        "SELECT status, reviewed_count FROM correction_obligations WHERE case_id = ?",
+      )
+      .get(res.body.caseId) as Record<string, unknown>;
+    expect(obligation).toEqual({ status: "open", reviewed_count: 0 });
+  });
+
+  it("returns the same caseId on duplicate inserts (idempotent retry)", async () => {
+    const payload = {
+      childId: "default",
+      problem: "5+6",
+      correctAnswer: "11",
+      userAnswer: "10",
+      errorType: "compute",
+      source: "candy-math-island",
+    };
+    const res1 = await request(app).post("/api/game/mistake").send(payload);
+    expect(res1.status).toBe(201);
+    const firstCaseId = res1.body.caseId;
+    const firstId = res1.body.id;
+
+    const res2 = await request(app).post("/api/game/mistake").send(payload);
+    expect(res2.status).toBe(200);
+    expect(res2.body.created).toBe(false);
+    expect(res2.body.id).toBe(firstId);
+    expect(res2.body.caseId).toBe(firstCaseId);
+  });
+
+  it("two children answering the same problem get two distinct case rows", async () => {
+    const payload = {
+      problem: "12-7",
+      correctAnswer: "5",
+      userAnswer: "4",
+      errorType: "borrow",
+      source: "candy-math-island",
+    };
+    const alice = await request(app)
+      .post("/api/game/mistake")
+      .send({ ...payload, childId: "alice" });
+    const bob = await request(app)
+      .post("/api/game/mistake")
+      .send({ ...payload, childId: "bob" });
+    expect(alice.status).toBe(201);
+    expect(bob.status).toBe(201);
+    expect(alice.body.caseId).not.toBe(bob.body.caseId);
   });
 });

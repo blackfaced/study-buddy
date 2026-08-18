@@ -135,7 +135,8 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
     const replay = await recordAttempt("idempotent-problem");
     expect(first.status).toBe(201);
     expect(replay.status).toBe(200);
-    expect(replay.body).toEqual({ id: first.body.id, created: false });
+    expect(replay.body).toMatchObject({ id: first.body.id, created: false });
+    expect(typeof replay.body.caseId).toBe("string");
     expect((await feed()).body.events).toHaveLength(1);
   });
 
