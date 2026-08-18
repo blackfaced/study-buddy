@@ -11,6 +11,23 @@ import { seedTestDevice, testDeviceAuthenticator } from "./test-device.js";
 
 const TOKEN = "chat-source-test-token";
 
+// Build the JSON body for POST /api/integration/retrieve from a list of
+// source-feed events. Pulled out of the test body because it doesn't
+// capture any of the surrounding scope (pure function of its inputs) —
+// oxlint: consistent-function-scoping.
+function buildRetrievalBody(events: any[], selected = events) {
+  const occurredAt = Date.parse(events[0].occurredAt);
+  return {
+    schemaVersion: 1,
+    sessionRef: events[0].payload.sessionRef,
+    turnRefs: selected.map((event: any) => event.payload.turnRef),
+    window: {
+      from: new Date(occurredAt - 60_000).toISOString(),
+      to: new Date(occurredAt + 60_000).toISOString(),
+    },
+  };
+}
+
 describe("bounded chat references and retrieval (#107)", () => {
   let db: Database.Database;
   let dir: string;
@@ -68,19 +85,6 @@ describe("bounded chat references and retrieval (#107)", () => {
     return { response, events };
   }
 
-  function retrievalBody(events: any[], selected = events) {
-    const occurredAt = Date.parse(events[0].occurredAt);
-    return {
-      schemaVersion: 1,
-      sessionRef: events[0].payload.sessionRef,
-      turnRefs: selected.map((event: any) => event.payload.turnRef),
-      window: {
-        from: new Date(occurredAt - 60_000).toISOString(),
-        to: new Date(occurredAt + 60_000).toISOString(),
-      },
-    };
-  }
-
   it("publishes stable references without copying chat text into the Source feed", async () => {
     const { events } = await seedChat();
     expect(events).toHaveLength(2);
@@ -103,7 +107,7 @@ describe("bounded chat references and retrieval (#107)", () => {
 
   it("returns only explicitly requested turns inside the bounded window", async () => {
     const { events } = await seedChat("只取这一轮");
-    const result = await retrieve(retrievalBody(events, [events[0]]));
+    const result = await retrieve(buildRetrievalBody(events, [events[0]]));
     expect(result.status).toBe(200);
     expect(result.body.turns).toEqual([
       {
@@ -122,7 +126,7 @@ describe("bounded chat references and retrieval (#107)", () => {
 
   it("rejects unbounded, excessive, malformed, unsupported, and unknown requests", async () => {
     const { events } = await seedChat();
-    const valid = retrievalBody(events);
+    const valid = buildRetrievalBody(events);
     const invalidBodies = [
       { ...valid, window: undefined },
       { ...valid, schemaVersion: 2 },
@@ -148,13 +152,13 @@ describe("bounded chat references and retrieval (#107)", () => {
 
   it("rejects guessed chat rows that were never published in the Source feed", async () => {
     const { events } = await seedChat("published");
-    const sessionId = events[0].payload.sessionRef.slice("session:".length);
+    const publishedSessionId = events[0].payload.sessionRef.slice("session:".length);
     const ts = Date.parse(events[0].occurredAt);
     const unpublishedId = Number(db.prepare(
       `INSERT INTO chat_turns (session_id, ts, role, content, topic)
        VALUES (?, ?, 'child', 'legacy unpublished text', 'learning')`,
-    ).run(sessionId, ts).lastInsertRowid);
-    const body = retrievalBody(events);
+    ).run(publishedSessionId, ts).lastInsertRowid);
+    const body = buildRetrievalBody(events);
     body.turnRefs = [`chat_turn:${unpublishedId}`];
     expect((await retrieve(body)).status).toBe(404);
   });
@@ -187,7 +191,7 @@ describe("bounded chat references and retrieval (#107)", () => {
 
   it("requires the independent credential and loopback origin", async () => {
     const { events } = await seedChat();
-    const body = retrievalBody(events);
+    const body = buildRetrievalBody(events);
     expect((await request(app).post("/api/integration/chat-turns").send(body)).status)
       .toBe(401);
     expect(
@@ -213,7 +217,7 @@ describe("bounded chat references and retrieval (#107)", () => {
 
   it("keeps bounded reads stable while a new chat write is appended", async () => {
     const { events } = await seedChat("first");
-    const body = retrievalBody(events, [events[0]]);
+    const body = buildRetrievalBody(events, [events[0]]);
     const [read, write] = await Promise.all([
       retrieve(body),
       request(app).post("/api/chat").send({ sessionId, text: "second" }),

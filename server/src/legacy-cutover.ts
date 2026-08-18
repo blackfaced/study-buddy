@@ -137,9 +137,20 @@ async function acquireWorkerCutoverLocks(pidPaths: string[]): Promise<string[]> 
         await mkdir(lockPath);
       } catch (error: any) {
         if (error?.code === "EEXIST") {
-          throw new Error("legacy JSONL worker lease is already held");
+          // Benign race — another supervisor already holds this lock. Wrap
+          // with cause so callers can still inspect the EEXIST code.
+          // oxlint: preserve-caught-error
+          throw new Error("legacy JSONL worker lease is already held", {
+            cause: error,
+          });
         }
-        throw error;
+        // oxlint: preserve-caught-error — propagate the underlying error
+        // (e.g. EACCES, ENOSPC) so callers can distinguish the real cause
+        // from a benign EEXIST race.
+        throw new Error(
+          `failed to acquire worker cutover lock at ${lockPath}: ${error?.message ?? error}`,
+          { cause: error },
+        );
       }
       acquired.push(lockPath);
     }
@@ -151,7 +162,9 @@ async function acquireWorkerCutoverLocks(pidPaths: string[]): Promise<string[]> 
 }
 
 async function releaseWorkerCutoverLocks(lockPaths: string[]): Promise<void> {
-  for (const lockPath of [...lockPaths].reverse()) {
+  // Reverse to release in LIFO order. toReversed() is non-mutating.
+  // oxlint: unicorn(no-array-reverse)
+  for (const lockPath of lockPaths.toReversed()) {
     await rmdir(lockPath).catch((error: any) => {
       if (error?.code !== "ENOENT") throw error;
     });

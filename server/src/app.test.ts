@@ -301,25 +301,25 @@ describe("POST /api/buddy/unlock (issue #55: PIN gate)", () => {
   }
 
   it("200 on correct PIN", async () => {
-    const app = makeApp("8864");
-    const res = await request(app).post("/api/buddy/unlock").send({ pin: "8864" });
+    const appWithPin = makeApp("8864");
+    const res = await request(appWithPin).post("/api/buddy/unlock").send({ pin: "8864" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
   });
 
   it("401 on wrong PIN", async () => {
-    const app = makeApp("8864");
-    const res = await request(app).post("/api/buddy/unlock").send({ pin: "0000" });
+    const appWithPin = makeApp("8864");
+    const res = await request(appWithPin).post("/api/buddy/unlock").send({ pin: "0000" });
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ error: "wrong" });
   });
 
   it("429 with Retry-After after 5 wrong attempts from same IP", async () => {
-    const app = makeApp("8864");
+    const appWithPin = makeApp("8864");
     for (let i = 0; i < 5; i++) {
-      await request(app).post("/api/buddy/unlock").send({ pin: "0000" });
+      await request(appWithPin).post("/api/buddy/unlock").send({ pin: "0000" });
     }
-    const res = await request(app).post("/api/buddy/unlock").send({ pin: "8864" });
+    const res = await request(appWithPin).post("/api/buddy/unlock").send({ pin: "8864" });
     expect(res.status).toBe(429);
     expect(res.body.error).toBe("locked");
     expect(typeof res.body.retryAfterSec).toBe("number");
@@ -329,17 +329,17 @@ describe("POST /api/buddy/unlock (issue #55: PIN gate)", () => {
   });
 
   it("null PIN (BUDDY_PIN unset) → all requests return 200", async () => {
-    const app = makeApp(null);
+    const appWithPin = makeApp(null);
     for (let i = 0; i < 10; i++) {
-      const res = await request(app).post("/api/buddy/unlock").send({ pin: "0000" });
+      const res = await request(appWithPin).post("/api/buddy/unlock").send({ pin: "0000" });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ok: true });
     }
   });
 
   it("400 when pin is not a string", async () => {
-    const app = makeApp("8864");
-    const res = await request(app).post("/api/buddy/unlock").send({ pin: 1234 });
+    const appWithPin = makeApp("8864");
+    const res = await request(appWithPin).post("/api/buddy/unlock").send({ pin: 1234 });
     expect(res.status).toBe(400);
   });
 });
@@ -358,31 +358,31 @@ describe("GET /api/buddy/status (issue: dev-mode skip PIN gate)", () => {
   }
 
   it("returns { locked: false } when BUDDY_PIN is unset (dev mode)", async () => {
-    const app = makeApp(null);
-    const res = await request(app).get("/api/buddy/status");
+    const appWithPin = makeApp(null);
+    const res = await request(appWithPin).get("/api/buddy/status");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ locked: false });
   });
 
   it("returns { locked: true } when BUDDY_PIN is set (and never leaks the PIN)", async () => {
-    const app = makeApp("8864");
-    const res = await request(app).get("/api/buddy/status");
+    const appWithPin = makeApp("8864");
+    const res = await request(appWithPin).get("/api/buddy/status");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ locked: true });
     expect(JSON.stringify(res.body)).not.toContain("8864");
   });
 
   it("returns { locked: false } when BUDDY_PIN is empty string (treated as unset)", async () => {
-    const app = makeApp("");
-    const res = await request(app).get("/api/buddy/status");
+    const appWithPin = makeApp("");
+    const res = await request(appWithPin).get("/api/buddy/status");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ locked: false });
   });
 
   it("status endpoint is open to any IP (no rate limit, no unlock required)", async () => {
-    const app = makeApp("8864");
+    const appWithPin = makeApp("8864");
     for (let i = 0; i < 10; i++) {
-      const res = await request(app).get("/api/buddy/status");
+      const res = await request(appWithPin).get("/api/buddy/status");
       expect(res.status).toBe(200);
     }
   });
