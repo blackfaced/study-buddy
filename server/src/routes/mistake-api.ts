@@ -221,16 +221,33 @@ export function insertMistake(
     ensureChildRow(db, input.childId);
     const sessionId = ensureActiveSession(db, input.childId);
     const existingBeforeInsert = db.prepare(
-      `SELECT id, ts, problem, user_answer, correct_answer, source
+      `SELECT id, ts, session_id, problem, user_answer, correct_answer, error_type, hint, level,
+              image_path, vision_input, vision_reasoning, vision_model, vision_ts,
+              evidence_key, evidence_status, evidence_method, evidence_confirmed_at,
+              reviewed_count, source
          FROM mistakes
         WHERE child_id = ? AND problem = ? AND source = ?
         ORDER BY id LIMIT 1`,
     ).get(input.childId, input.problem, input.source) as {
       id: number;
       ts: number;
+      session_id: string;
       problem: string | null;
       user_answer: string | null;
       correct_answer: string | null;
+      error_type: string | null;
+      hint: string | null;
+      level: number | null;
+      image_path: string | null;
+      vision_input: string | null;
+      vision_reasoning: string | null;
+      vision_model: string | null;
+      vision_ts: number | null;
+      evidence_key: string | null;
+      evidence_status: string | null;
+      evidence_method: string | null;
+      evidence_confirmed_at: number | null;
+      reviewed_count: number;
       source: string;
     } | undefined;
     if (existingBeforeInsert) {
@@ -242,6 +259,20 @@ export function insertMistake(
         problem: existingBeforeInsert.problem,
         userAnswer: existingBeforeInsert.user_answer,
         correctAnswer: existingBeforeInsert.correct_answer,
+        sessionId: existingBeforeInsert.session_id,
+        errorType: existingBeforeInsert.error_type,
+        hint: existingBeforeInsert.hint,
+        level: existingBeforeInsert.level,
+        imagePath: existingBeforeInsert.image_path,
+        visionInput: existingBeforeInsert.vision_input,
+        visionReasoning: existingBeforeInsert.vision_reasoning,
+        visionModel: existingBeforeInsert.vision_model,
+        visionTs: existingBeforeInsert.vision_ts,
+        evidenceKey: existingBeforeInsert.evidence_key,
+        evidenceStatus: existingBeforeInsert.evidence_status,
+        evidenceMethod: existingBeforeInsert.evidence_method,
+        evidenceConfirmedAt: existingBeforeInsert.evidence_confirmed_at,
+        reviewedCount: existingBeforeInsert.reviewed_count,
       });
       return { id: existingBeforeInsert.id, created: false };
     }
@@ -278,6 +309,9 @@ export function insertMistake(
         problem: input.problem,
         userAnswer: input.userAnswer,
         correctAnswer: input.correctAnswer,
+        sessionId,
+        errorType: input.errorType ?? null,
+        level,
       });
       beforeSourceEventAppend?.("learning_attempt");
       appendLearningAttemptSourceEvent(db, {
@@ -293,16 +327,33 @@ export function insertMistake(
       return { id, created: true };
     }
     const existing = db.prepare(
-      `SELECT id, ts, problem, user_answer, correct_answer, source
+      `SELECT id, ts, session_id, problem, user_answer, correct_answer, error_type, hint, level,
+              image_path, vision_input, vision_reasoning, vision_model, vision_ts,
+              evidence_key, evidence_status, evidence_method, evidence_confirmed_at,
+              reviewed_count, source
          FROM mistakes
         WHERE child_id = ? AND problem = ? AND source = ?
         ORDER BY id LIMIT 1`,
     ).get(input.childId, input.problem, input.source) as {
       id: number;
       ts: number;
+      session_id: string;
       problem: string | null;
       user_answer: string | null;
       correct_answer: string | null;
+      error_type: string | null;
+      hint: string | null;
+      level: number | null;
+      image_path: string | null;
+      vision_input: string | null;
+      vision_reasoning: string | null;
+      vision_model: string | null;
+      vision_ts: number | null;
+      evidence_key: string | null;
+      evidence_status: string | null;
+      evidence_method: string | null;
+      evidence_confirmed_at: number | null;
+      reviewed_count: number;
       source: string;
     } | undefined;
     if (!existing) {
@@ -319,6 +370,20 @@ export function insertMistake(
       problem: existing.problem,
       userAnswer: existing.user_answer,
       correctAnswer: existing.correct_answer,
+      sessionId: existing.session_id,
+      errorType: existing.error_type,
+      hint: existing.hint,
+      level: existing.level,
+      imagePath: existing.image_path,
+      visionInput: existing.vision_input,
+      visionReasoning: existing.vision_reasoning,
+      visionModel: existing.vision_model,
+      visionTs: existing.vision_ts,
+      evidenceKey: existing.evidence_key,
+      evidenceStatus: existing.evidence_status,
+      evidenceMethod: existing.evidence_method,
+      evidenceConfirmedAt: existing.evidence_confirmed_at,
+      reviewedCount: existing.reviewed_count,
     });
     return { id: existing.id, created: false };
   })();

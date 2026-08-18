@@ -640,3 +640,108 @@ describe("migrateSchema — mistakes.child_id FK", () => {
     db.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #125 (SB124-T01): extend mistake_cases + correction_obligations to
+// be independent source-of-truth for the closure loop. mistake_cases now
+// carries the same evidence columns as mistakes; correction_obligations
+// tracks reviewed_count. legacy mistakes rows are back-filled into the new
+// columns so the compat bridge is data-equivalent.
+// ---------------------------------------------------------------------------
+describe("migrateSchema (SB124-T01 mistake case model)", () => {
+  it("mistake_cases carries all evidence columns on a fresh database", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const cols = (db.prepare("PRAGMA table_info(mistake_cases)").all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    expect(cols).toEqual(expect.arrayContaining([
+      "case_id", "original_mistake_id", "child_id", "source", "opened_at",
+      "session_id", "ts", "subject", "problem", "error_type", "hint", "level",
+      "image_path", "vision_input", "vision_reasoning", "vision_model", "vision_ts",
+      "user_answer", "correct_answer",
+      "evidence_key", "evidence_status", "evidence_method", "evidence_confirmed_at",
+    ]));
+    db.close();
+  });
+
+  it("correction_obligations carries reviewed_count on a fresh database", () => {
+    const db = freshDb();
+    (globalThis as any).__migrateSchema(db);
+    const cols = (db.prepare("PRAGMA table_info(correction_obligations)").all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    expect(cols).toEqual(expect.arrayContaining([
+      "case_id", "status", "opened_at", "verified_at", "reviewed_count",
+    ]));
+    db.close();
+  });
+
+  it("backfill copies evidence columns from mistakes into mistake_cases", () => {
+    const db = freshDb();
+    db.exec(`
+      CREATE TABLE children (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+      INSERT INTO children (id, name) VALUES ('default', '小宝');
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        child_id TEXT NOT NULL,
+        started_at INTEGER NOT NULL
+      );
+      INSERT INTO sessions (id, child_id, started_at) VALUES ('s1', 'default', 1000);
+      CREATE TABLE mistakes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        ts INTEGER NOT NULL DEFAULT 0,
+        subject TEXT,
+        problem TEXT,
+        error_type TEXT,
+        hint TEXT,
+        reviewed_count INTEGER DEFAULT 0,
+        source TEXT DEFAULT 'study-buddy',
+        user_answer TEXT,
+        correct_answer TEXT,
+        child_id TEXT NOT NULL DEFAULT 'default',
+        level INTEGER,
+        image_path TEXT,
+        vision_input TEXT,
+        vision_reasoning TEXT,
+        vision_model TEXT,
+        vision_ts INTEGER,
+        evidence_key TEXT,
+        evidence_status TEXT,
+        evidence_method TEXT,
+        evidence_confirmed_at INTEGER,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      INSERT INTO mistakes (
+        session_id, ts, subject, problem, error_type, hint, source,
+        user_answer, correct_answer, child_id, level, evidence_key
+      ) VALUES (
+        's1', 1234, 'math', '4 × 4 × 4', 'multiply', 'break into 2 steps', 'game',
+        '32', '64', 'default', 3, 'ev:test:1'
+      );
+    `);
+
+    (globalThis as any).__migrateSchema(db);
+
+    const row = db.prepare(
+      "SELECT problem, user_answer, correct_answer, level, error_type, hint, evidence_key, session_id, ts " +
+        "FROM mistake_cases WHERE case_id = 'mistake:1'"
+    ).get() as Record<string, unknown>;
+    expect(row).toEqual({
+      problem: "4 × 4 × 4",
+      user_answer: "32",
+      correct_answer: "64",
+      level: 3,
+      error_type: "multiply",
+      hint: "break into 2 steps",
+      evidence_key: "ev:test:1",
+      session_id: "s1",
+      ts: 1234,
+    });
+
+    const obligation = db.prepare(
+      "SELECT reviewed_count, status FROM correction_obligations WHERE case_id = 'mistake:1'"
+    ).get();
+    expect(obligation).toEqual({ reviewed_count: 0, status: "open" });
+    db.close();
+  });
+});
