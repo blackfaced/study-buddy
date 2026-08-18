@@ -168,7 +168,11 @@ describe("POST /api/game/mistake-review (issue #100: 3-correct cascade delete)",
     expect(res.body.reviews[0].reviewedCount).toBe(3);
   });
 
-  it("REV5: correct=false → no-op (no count change, no delete)", async () => {
+  it("REV5: correct=false → appends correction attempt but does NOT increment count or close", async () => {
+    // SB124-T02 (#126): "答错不是 no-op" — a wrong correction must leave
+    // an auditable learning_attempts row (kind='correction', is_correct=0)
+    // so the closure loop is observable. reviewed_count and the obligation
+    // status stay put so the picker keeps showing the case.
     const id = seedMistake("rev-5-7+5", CHILD, 1);
     const res = await request(app)
       .post("/api/game/mistake-review")
@@ -176,11 +180,27 @@ describe("POST /api/game/mistake-review (issue #100: 3-correct cascade delete)",
     expect(res.status).toBe(200);
     expect(res.body.reviews[0].reviewedCount).toBe(1); // unchanged
     expect(res.body.reviews[0].deleted).toBe(false);
-    // Row still exists
+    // mistakes mirror still exists, reviewed_count unchanged
     const row = db.prepare("SELECT reviewed_count FROM mistakes WHERE id = ?").get(id) as
       | { reviewed_count: number }
       | undefined;
     expect(row?.reviewed_count).toBe(1);
+    // correction_obligations.status stays 'open' — the picker keeps showing it
+    const caseRow = db
+      .prepare("SELECT case_id FROM mistake_cases WHERE original_mistake_id = ?")
+      .get(id) as { case_id: string };
+    expect(db.prepare(
+      "SELECT status FROM correction_obligations WHERE case_id = ?",
+    ).get(caseRow.case_id)).toEqual({ status: "open" });
+    // NEW: a correction learning_attempt row was appended (kind='correction',
+    // is_correct=0). Original was 'original' kind, so total is 2.
+    const attempts = db.prepare(
+      "SELECT attempt_kind, is_correct FROM learning_attempts WHERE case_id = ? ORDER BY occurred_at",
+    ).all(caseRow.case_id) as Array<{ attempt_kind: string; is_correct: number }>;
+    expect(attempts).toEqual([
+      { attempt_kind: "original", is_correct: 0 },
+      { attempt_kind: "correction", is_correct: 0 },
+    ]);
   });
 
   it("REV6: cross-child isolation — alice cannot increment bob's mistake", async () => {
@@ -244,5 +264,61 @@ describe("POST /api/game/mistake-review (issue #100: 3-correct cascade delete)",
       .send({ childId: CHILD, results: [] });
     expect(res.status).toBe(200);
     expect(res.body.reviews).toEqual([]);
+  });
+
+  it("REV11: correct=false from wrong child → no-op, no learning_attempt appended", async () => {
+    // Parallel to REV6 but for the correct=false path. Cross-child isolation
+    // must hold for both branches: alice's wrong review of bob's mistake
+    // must NOT leave a learning_attempt row in bob's case.
+    const id = seedMistake("rev-11-bob", CHILD, 0);
+    const caseBefore = db
+      .prepare("SELECT case_id FROM mistake_cases WHERE original_mistake_id = ?")
+      .get(id) as { case_id: string };
+    const attemptsBefore = (db
+      .prepare("SELECT COUNT(*) AS count FROM learning_attempts WHERE case_id = ?")
+      .get(caseBefore.case_id) as { count: number }).count;
+    const res = await request(app)
+      .post("/api/game/mistake-review")
+      .send({ childId: OTHER_CHILD, results: [{ mistakeId: id, correct: false }] });
+    expect(res.status).toBe(200);
+    expect(res.body.reviews[0].reviewedCount).toBe(0);
+    expect(res.body.reviews[0].deleted).toBe(false);
+    // No new learning_attempt row for alice's wrong review
+    const attemptsAfter = (db
+      .prepare("SELECT COUNT(*) AS count FROM learning_attempts WHERE case_id = ?")
+      .get(caseBefore.case_id) as { count: number }).count;
+    expect(attemptsAfter).toBe(attemptsBefore);
+  });
+
+  it("REV12: two wrong reviews of the same case → 2 correction attempts (idempotent within ms)", async () => {
+    // Different wrong reviews of the same case should leave 2 auditable
+    // learning_attempt rows (one per retry) so the closure loop can show
+    // "kid tried N times". Within the same Date.now() ms, INSERT OR IGNORE
+    // collapses to 1 row (defensive against fast duplicate retries).
+    const id = seedMistake("rev-12-retry", CHILD, 0);
+    const caseRow = db
+      .prepare("SELECT case_id FROM mistake_cases WHERE original_mistake_id = ?")
+      .get(id) as { case_id: string };
+    // First wrong review
+    await request(app)
+      .post("/api/game/mistake-review")
+      .send({ childId: CHILD, results: [{ mistakeId: id, correct: false }] });
+    // Tiny sleep to bump Date.now() ms for the second call
+    await new Promise((r) => setTimeout(r, 5));
+    await request(app)
+      .post("/api/game/mistake-review")
+      .send({ childId: CHILD, results: [{ mistakeId: id, correct: false }] });
+    const attempts = db.prepare(
+      "SELECT attempt_kind, is_correct FROM learning_attempts WHERE case_id = ? ORDER BY occurred_at",
+    ).all(caseRow.case_id) as Array<{ attempt_kind: string; is_correct: number }>;
+    expect(attempts).toEqual([
+      { attempt_kind: "original", is_correct: 0 },
+      { attempt_kind: "correction", is_correct: 0 },
+      { attempt_kind: "correction", is_correct: 0 },
+    ]);
+    // reviewed_count stayed at 0 across both wrong reviews
+    expect(db.prepare(
+      "SELECT reviewed_count, status FROM correction_obligations WHERE case_id = ?",
+    ).get(caseRow.case_id)).toEqual({ reviewed_count: 0, status: "open" });
   });
 });

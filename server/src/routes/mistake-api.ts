@@ -486,9 +486,18 @@ const MAX_CAS_RETRIES = 5;
  * correction_obligations (joined to mistake_cases by case_id). The
  * mistakes mirror is a thin compat layer kept for mistake_photo FKs.
  *
+ * v0.9 (SB124-T02 #126): correct=false is no longer a silent no-op.
+ * It still does NOT touch reviewed_count or close the obligation (so
+ * the picker keeps showing the case), but it DOES append a
+ * 'correction' learning_attempt (is_correct=0) so the closure loop
+ * is auditable. The kid's actual wrong answer text is not captured
+ * at this layer (the review API only takes { mistakeId, correct });
+ * user_answer is NULL.
+ *
  * Behavior:
- *   - correct=false  → no-op, return current reviewedCount (or 0 if
- *                      case not found)
+ *   - correct=false  → append a correction learning_attempt (is_correct=0);
+ *                      do NOT touch reviewed_count or status. Return
+ *                      current reviewedCount (or 0 if case not found).
  *   - correct=true   → CAS-increment correction_obligations.reviewed_count
  *                      and record a correction attempt; when the count
  *                      reaches `CASCADE_THRESHOLD` (3), mark the
@@ -511,16 +520,50 @@ export function reviewMistake(
 ): ReviewResult {
   const { childId, mistakeId, correct } = input;
 
-  // correct=false: report current state, no mutation.
+  // correct=false: SB124-T02 (#126) — wrong corrections are no longer a
+  // silent no-op. We still do NOT touch reviewed_count (so the picker
+  // keeps showing the case) and we do NOT change obligation status, but
+  // we DO append a 'correction' learning_attempt (is_correct=0) so the
+  // closure loop is auditable. The kid's actual wrong answer is not
+  // captured at this layer — the client only sends { mistakeId, correct }
+  // — so user_answer is NULL.
   if (!correct) {
     const row = db
       .prepare(
-        `SELECT co.reviewed_count
+        `SELECT co.reviewed_count, co.case_id, co.status,
+                mc.problem AS problem, mc.correct_answer AS correct_answer,
+                mc.source AS source
            FROM correction_obligations co
            JOIN mistake_cases mc ON mc.case_id = co.case_id
           WHERE mc.original_mistake_id = ? AND mc.child_id = ?`,
       )
-      .get(mistakeId, childId) as { reviewed_count: number } | undefined;
+      .get(mistakeId, childId) as {
+        reviewed_count: number;
+        case_id: string;
+        status: string;
+        problem: string | null;
+        correct_answer: string | null;
+        source: string;
+      } | undefined;
+    if (row) {
+      // Only append when the case exists for this child — wrong child /
+      // gone rows stay no-op so the queue can flush cleanly.
+      db.prepare(`
+        INSERT OR IGNORE INTO learning_attempts
+          (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
+           user_answer, correct_answer, is_correct, occurred_at, source)
+        VALUES (?, ?, 'correction', ?, ?, ?, NULL, ?, 0, ?, ?)
+      `).run(
+        `review-wrong:${row.case_id}:${Date.now()}`,
+        row.case_id,
+        mistakeId,
+        childId,
+        row.problem,
+        row.correct_answer,
+        Date.now(),
+        row.source,
+      );
+    }
     return {
       mistakeId,
       reviewedCount: row?.reviewed_count ?? 0,
