@@ -25,10 +25,15 @@ beforeAll(() => {
   (globalThis as any).Buddy = buddy;
 });
 
-describe("buddy state machine (nextState)", () => {
-  // Lazy accessor — beforeAll() 必须在测试运行前注入 Buddy
-  const nextState = () => (globalThis as any).Buddy.state.nextState;
+// Lazy accessors — beforeAll() must inject Buddy before these run.
+// Hoisted to module scope because they don't capture any outer
+// variables (just read from globalThis). oxlint: consistent-function-scoping.
+const nextState = () => (globalThis as any).Buddy.state.nextState;
+const restoredState = () => (globalThis as any).Buddy.state.restoredState;
+const shouldShowCamera = () => (globalThis as any).Buddy.state.shouldShowCamera;
+const buddyState = () => (globalThis as any).Buddy.state;
 
+describe("buddy state machine (nextState)", () => {
   it("idle + start → writing", () => {
     expect(nextState()("idle", "start")).toBe("writing");
   });
@@ -71,9 +76,6 @@ describe("buddy state machine (nextState)", () => {
 });
 
 describe("buddy session refresh state", () => {
-  const restoredState = () => (globalThis as any).Buddy.state.restoredState;
-  const shouldShowCamera = () => (globalThis as any).Buddy.state.shouldShowCamera;
-
   it("restores a homework session as writing", () => {
     expect(restoredState()("作业")).toBe("writing");
   });
@@ -89,26 +91,24 @@ describe("buddy session refresh state", () => {
 });
 
 describe("buddy state object initial values", () => {
-  const S = () => (globalThis as any).Buddy.state;
-
   it("starts in 'idle' state", () => {
-    expect(S().state).toBe("idle");
+    expect(buddyState().state).toBe("idle");
   });
 
   it("starts with videoMode = 'on'", () => {
-    expect(S().videoMode).toBe("on");
+    expect(buddyState().videoMode).toBe("on");
   });
 
   it("starts with currentFacing = 'environment' (后置，孩子用)", () => {
-    expect(S().currentFacing).toBe("environment");
-    expect(S().currentFacingMode).toBe("environment");
+    expect(buddyState().currentFacing).toBe("environment");
+    expect(buddyState().currentFacingMode).toBe("environment");
   });
 
   it("starts with no sessionId", () => {
-    expect(S().sessionId).toBeNull();
+    expect(buddyState().sessionId).toBeNull();
   });
 
   it("starts with synthUnlocked = false (iOS Safari TTS 未解锁)", () => {
-    expect(S().synthUnlocked).toBe(false);
+    expect(buddyState().synthUnlocked).toBe(false);
   });
 });

@@ -281,7 +281,9 @@ export function registerChatRoutes(app: Express, deps: ChatRouteDeps): void {
     const recentChildRows = db.prepare(
       "SELECT content FROM chat_turns WHERE session_id = ? AND role = 'child' ORDER BY id DESC LIMIT 5"
     ).all(session.id) as Array<{ content: string }>;
-    const recentChildTexts = recentChildRows.map((r) => r.content).reverse();
+    // ORDER BY id DESC then toReversed() → most-recent-last (chronological).
+    // oxlint: unicorn(no-array-reverse)
+    const recentChildTexts = recentChildRows.map((r) => r.content).toReversed();
     const isLoop = detectLoopFromTexts(recentChildTexts);
 
     const messages: any[] = [

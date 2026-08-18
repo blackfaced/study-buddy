@@ -90,7 +90,6 @@ describe("drainOutbox", () => {
     // when entityId varies. Override one of them.
     const bWithDifferentEntity = { ...b, entityId: "child:other" };
     // Rewrite the file so the middle row has a different tag.
-    const { writeFile } = await import("node:fs/promises");
     await writeFile(
       outboxPath,
       [JSON.stringify(a), JSON.stringify(bWithDifferentEntity), JSON.stringify(c)].join("\n") + "\n",
