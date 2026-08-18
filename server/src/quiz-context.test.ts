@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
+import { insertMistake } from "./routes/mistake-api.js";
 
 let db: Database.Database;
 let app: ReturnType<typeof createApp>;
@@ -44,22 +45,59 @@ function seedGameSessions(n: number, day: string = TODAY): void {
   }
 }
 
-/** Insert N mistakes for the child, with different problems so dedupe is irrelevant. */
+/** Insert N mistakes for the child, with different problems so dedupe is irrelevant.
+ *
+ * SB124-T01 PR-C: writes the canonical mistake_case + correction_obligation
+ * rows (the new source-of-truth). mistakes is a thin mirror for legacy
+ * FK references; the picker reads from the new tables.
+ *
+ * case_id includes Date.now() to stay unique across re-runs of seedMistakes
+ * within the same test file (mistake_cases.case_id is PRIMARY KEY).
+ */
 function seedMistakes(n: number): void {
+  const runId = Date.now();
   for (let i = 0; i < n; i++) {
-    db.prepare(
+    const now = runId + i;
+    const caseId = `case:test-${runId}-${i}`;
+    const mistakeResult = db.prepare(
       `INSERT INTO mistakes
-         (session_id, child_id, problem, user_answer, correct_answer, error_type, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source, reviewed_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     ).run(
       testSessionId,
       CHILD,
+      now,
       `prob-${i}`,
       String(i),
       String(i + 1),
       "compute",
       "candy-math-island",
     );
+    const mistakeId = Number(mistakeResult.lastInsertRowid);
+    db.prepare(`
+      INSERT INTO mistake_cases (
+        case_id, original_mistake_id, child_id, source, opened_at,
+        session_id, ts, problem, error_type, level,
+        user_answer, correct_answer
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      caseId, mistakeId, CHILD, "candy-math-island", now,
+      testSessionId, now, `prob-${i}`, "compute", 1,
+      String(i), String(i + 1),
+    );
+    db.prepare(`
+      INSERT INTO learning_attempts (
+        attempt_id, case_id, attempt_kind, mistake_id, child_id,
+        problem, user_answer, correct_answer, is_correct, occurred_at, source
+      ) VALUES (?, ?, 'original', ?, ?, ?, ?, ?, 0, ?, ?)
+    `).run(
+      `attempt:${caseId}`, caseId, mistakeId, CHILD,
+      `prob-${i}`, String(i), String(i + 1), now, "candy-math-island",
+    );
+    db.prepare(`
+      INSERT INTO correction_obligations (case_id, status, opened_at, reviewed_count)
+      VALUES (?, 'open', ?, 0)
+    `).run(caseId, now);
   }
 }
 
@@ -154,7 +192,11 @@ describe("POST /api/game/quiz-context (issue #99: 30% mistake-mix window)", () =
   });
 
   it("QC6: empty mistakes array → eligible:true but mistakes:[] (5th session day, no review load)", async () => {
+    // PR-C: clear the 3 closure-loop tables too (picker now reads from them).
     db.exec("DELETE FROM game_sessions");
+    db.exec("DELETE FROM learning_attempts");
+    db.exec("DELETE FROM correction_obligations");
+    db.exec("DELETE FROM mistake_cases");
     db.exec("DELETE FROM mistakes");
     seedGameSessions(2); // eligible
     const res = await request(app)
@@ -218,16 +260,23 @@ describe("POST /api/game/quiz-context (issue #99: 30% mistake-mix window)", () =
 
   it("QC10: only mistakes with reviewed_count < 3 are returned (3-correct cascade filter)", async () => {
     db.exec("DELETE FROM game_sessions");
+    db.exec("DELETE FROM learning_attempts");
+    db.exec("DELETE FROM correction_obligations");
+    db.exec("DELETE FROM mistake_cases");
     db.exec("DELETE FROM mistakes");
-    // Insert 2 fresh mistakes + 1 already-mastered (reviewed_count=3)
+    // Insert 2 fresh mistakes + 1 already-mastered (reviewed_count=3
+    // → status='verified' on the closure-loop row)
     seedMistakes(2);
-    db.prepare(
+    const masteredRunId = Date.now();
+    const masteredNow = masteredRunId + 100;
+    const masteredMistake = db.prepare(
       `INSERT INTO mistakes
-         (session_id, child_id, problem, user_answer, correct_answer, error_type, source, reviewed_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source, reviewed_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       testSessionId,
       CHILD,
+      masteredNow,
       "mastered",
       "99",
       "100",
@@ -235,6 +284,30 @@ describe("POST /api/game/quiz-context (issue #99: 30% mistake-mix window)", () =
       "candy-math-island",
       3,
     );
+    const masteredMistakeId = Number(masteredMistake.lastInsertRowid);
+    const masteredCaseId = `case:test-mastered-${masteredRunId}`;
+    db.prepare(`
+      INSERT INTO mistake_cases (
+        case_id, original_mistake_id, child_id, source, opened_at,
+        session_id, ts, problem, error_type, level, user_answer, correct_answer
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      masteredCaseId, masteredMistakeId, CHILD, "candy-math-island", masteredNow,
+      testSessionId, masteredNow, "mastered", "compute", 1, "99", "100",
+    );
+    db.prepare(`
+      INSERT INTO learning_attempts (
+        attempt_id, case_id, attempt_kind, mistake_id, child_id,
+        problem, user_answer, correct_answer, is_correct, occurred_at, source
+      ) VALUES (?, ?, 'original', ?, ?, ?, ?, ?, 0, ?, ?)
+    `).run(
+      `attempt:${masteredCaseId}`, masteredCaseId, masteredMistakeId, CHILD,
+      "mastered", "99", "100", masteredNow, "candy-math-island",
+    );
+    db.prepare(`
+      INSERT INTO correction_obligations (case_id, status, opened_at, reviewed_count)
+      VALUES (?, 'verified', ?, 3)
+    `).run(masteredCaseId, masteredNow);
     const res = await request(app)
       .post("/api/game/quiz-context")
       .send({ childId: CHILD, date: TODAY });
@@ -269,24 +342,38 @@ describe("POST /api/game/quiz-context (issue #99: 30% mistake-mix window)", () =
 
 describe("POST /api/game/quiz-context (namespace isolation)", () => {
   it("test-fixture mistakes under a non-default childId are NOT served to the production kid", async () => {
-    // The production kid (childId="default") has one real mistake.
-    db.prepare(`
-      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
-      VALUES (?, ?, '7+5', '11', '12', 'compute', 'game', 'default')
-    `).run(testSessionId, TODAY_START);
+    // SB124-T01 PR-C: picker reads from mistake_cases + correction_obligations,
+    // so we go through insertMistake (the canonical write path) instead of
+    // poking the mistakes mirror directly.
+    insertMistake(db, {
+      childId: "default",
+      problem: "7+5",
+      userAnswer: "11",
+      correctAnswer: "12",
+      errorType: "compute",
+      source: "candy-math-island",
+    });
     // The mistakes table has a FK on child_id → children(id), so
     // we need a real "test-runner" child row before we can insert
     // test-fixture mistakes under it.
     db.prepare("INSERT OR IGNORE INTO children (id, name) VALUES (?, ?)").run("test-runner", "test runner");
     // A test run (childId="test-runner") polluted the DB with garbage.
-    db.prepare(`
-      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
-      VALUES (?, ?, 'nexus-test-7+5', '11', '12', 'compute', 'game', 'test-runner')
-    `).run(testSessionId, TODAY_START);
-    db.prepare(`
-      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
-      VALUES (?, ?, 'live-nexus-3+4', '99', '0', 'compute', 'game', 'test-runner')
-    `).run(testSessionId, TODAY_START);
+    insertMistake(db, {
+      childId: "test-runner",
+      problem: "nexus-test-7+5",
+      userAnswer: "11",
+      correctAnswer: "12",
+      errorType: "compute",
+      source: "candy-math-island",
+    });
+    insertMistake(db, {
+      childId: "test-runner",
+      problem: "live-nexus-3+4",
+      userAnswer: "99",
+      correctAnswer: "0",
+      errorType: "compute",
+      source: "candy-math-island",
+    });
 
     // The production kid asks for their quiz-context.
     const res = await request(app)
@@ -309,18 +396,22 @@ describe("POST /api/game/quiz-context (namespace isolation)", () => {
   it("a different kid's mistakes are isolated from the production kid", async () => {
     // Two kids, two distinct namespaces — the cross-child test the
     // user reported in 2026-08-16. Picker must filter by child_id.
-    // The mistakes table has a FK on child_id → children(id), so we
-    // need to register alice / bob as real children first.
-    db.prepare("INSERT OR IGNORE INTO children (id, name) VALUES (?, ?)").run("alice", "Alice");
-    db.prepare("INSERT OR IGNORE INTO children (id, name) VALUES (?, ?)").run("bob", "Bob");
-    db.prepare(`
-      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
-      VALUES (?, ?, 'iso-4+3', '6', '7', 'compute', 'game', 'alice')
-    `).run(testSessionId, TODAY_START);
-    db.prepare(`
-      INSERT INTO mistakes (session_id, ts, problem, user_answer, correct_answer, error_type, source, child_id)
-      VALUES (?, ?, 'iso-5+2', '6', '7', 'compute', 'game', 'bob')
-    `).run(testSessionId, TODAY_START);
+    insertMistake(db, {
+      childId: "alice",
+      problem: "iso-4+3",
+      userAnswer: "6",
+      correctAnswer: "7",
+      errorType: "compute",
+      source: "candy-math-island",
+    });
+    insertMistake(db, {
+      childId: "bob",
+      problem: "iso-5+2",
+      userAnswer: "6",
+      correctAnswer: "7",
+      errorType: "compute",
+      source: "candy-math-island",
+    });
 
     const aliceRes = await request(app)
       .post("/api/game/quiz-context")
