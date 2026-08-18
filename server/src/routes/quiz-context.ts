@@ -27,6 +27,10 @@
 // the client calls after each mistake to bump `reviewed_count` (and
 // cascade-delete after 3 corrects). The `reviewed_count < 3` filter
 // here is what makes the cascade work end-to-end.
+//
+// SB124-T01 PR-C: due-mistake pool now reads from mistake_cases JOIN
+// correction_obligations (the canonical closure-loop tables). The
+// mistakes mirror is bypassed for this hot path.
 // =====================================================================
 
 import type { Express, Request, Response } from "express";
@@ -108,12 +112,12 @@ export interface QuizContextResult {
  * review of something they already failed.
  *
  * `mistakes` returns up to `MISTAKE_POOL_LIMIT` due mistakes (those
- * with reviewed_count < 3) for the child, in RANDOM() order. The
- * client draws from this pool with 30% probability per question. We
- * use RANDOM() instead of e.g. "oldest first" because the picker is
- * already drawing without replacement in spirit (the client tracks
- * which mistakes it has shown this session) — random sampling keeps
- * the pool fresh and avoids prioritizing one stale row.
+ * with reviewed_count < 3 AND status = 'open') for the child, in
+ * RANDOM() order. The client draws from this pool with 30% probability
+ * per question. We use RANDOM() instead of e.g. "oldest first" because
+ * the picker is already drawing without replacement in spirit (the
+ * client tracks which mistakes it has shown this session) — random
+ * sampling keeps the pool fresh and avoids prioritizing one stale row.
  *
  * When `eligible` is false, `mistakes` is an empty array (the client
  * should ignore it anyway, but returning [] avoids leaking a pool
@@ -135,13 +139,23 @@ export function getQuizContext(
     return { eligible: false, mistakes: [] };
   }
 
+  // v0.9 (SB124-T01 PR-C): read from the canonical mistake_cases
+  // JOIN correction_obligations (where reviewed_count + status live).
+  // The mistakes table is a thin mirror; this is the picker hot path
+  // and must reflect the live closure-loop state.
   const rows = db
     .prepare(
-      `SELECT id, problem, correct_answer as answer, error_type as errorType
-         FROM mistakes
-         WHERE child_id = ? AND reviewed_count < 3
-         ORDER BY RANDOM()
-         LIMIT ?`,
+      `SELECT mc.original_mistake_id AS id,
+              mc.problem,
+              mc.correct_answer AS answer,
+              mc.error_type AS errorType
+         FROM mistake_cases mc
+         JOIN correction_obligations co ON co.case_id = mc.case_id
+        WHERE mc.child_id = ?
+          AND co.status = 'open'
+          AND co.reviewed_count < 3
+        ORDER BY RANDOM()
+        LIMIT ?`,
     )
     .all(input.childId, MISTAKE_POOL_LIMIT) as MistakeForReview[];
 
