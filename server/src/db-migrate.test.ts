@@ -744,4 +744,117 @@ describe("migrateSchema (SB124-T01 mistake case model)", () => {
     expect(obligation).toEqual({ reviewed_count: 0, status: "open" });
     db.close();
   });
+
+  it("fills NULL evidence columns on legacy compat rows from mistakes", () => {
+    // Simulate a production DB that already has compat rows written by
+    // an older version of the helper (only 5 columns populated), then
+    // upgrade to the new schema. The migration must UPDATE the existing
+    // compat rows to pull evidence from mistakes — not just skip them
+    // (INSERT OR IGNORE would leave them NULL forever).
+    const db = freshDb();
+    db.exec(`
+      CREATE TABLE children (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+      INSERT INTO children (id, name) VALUES ('default', '小宝');
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        child_id TEXT NOT NULL,
+        started_at INTEGER NOT NULL
+      );
+      INSERT INTO sessions (id, child_id, started_at) VALUES ('s1', 'default', 1000);
+      CREATE TABLE mistakes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        ts INTEGER NOT NULL DEFAULT 0,
+        subject TEXT,
+        problem TEXT,
+        error_type TEXT,
+        hint TEXT,
+        reviewed_count INTEGER DEFAULT 0,
+        source TEXT DEFAULT 'study-buddy',
+        user_answer TEXT,
+        correct_answer TEXT,
+        child_id TEXT NOT NULL DEFAULT 'default',
+        level INTEGER,
+        image_path TEXT,
+        vision_input TEXT,
+        vision_reasoning TEXT,
+        vision_model TEXT,
+        vision_ts INTEGER,
+        evidence_key TEXT,
+        evidence_status TEXT,
+        evidence_method TEXT,
+        evidence_confirmed_at INTEGER,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      INSERT INTO mistakes (
+        session_id, ts, subject, problem, error_type, hint, source,
+        user_answer, correct_answer, child_id, level, evidence_key
+      ) VALUES (
+        's1', 1234, 'math', '4 × 4 × 4', 'multiply', 'break into 2 steps', 'game',
+        '32', '64', 'default', 3, 'ev:test:1'
+      );
+    `);
+    // Pre-create a compat row with ONLY the legacy 5 columns populated,
+    // matching what older ensureMistakeCompatibility versions wrote.
+    db.exec(`
+      CREATE TABLE mistake_cases (
+        case_id TEXT PRIMARY KEY,
+        original_mistake_id INTEGER NOT NULL UNIQUE,
+        child_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        opened_at INTEGER NOT NULL
+      );
+      CREATE TABLE learning_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        case_id TEXT NOT NULL,
+        attempt_kind TEXT NOT NULL,
+        mistake_id INTEGER,
+        child_id TEXT NOT NULL,
+        problem TEXT,
+        user_answer TEXT,
+        correct_answer TEXT,
+        is_correct INTEGER NOT NULL,
+        occurred_at INTEGER NOT NULL,
+        source TEXT NOT NULL
+      );
+      CREATE TABLE correction_obligations (
+        case_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'open',
+        opened_at INTEGER NOT NULL,
+        verified_at INTEGER
+      );
+      INSERT INTO mistake_cases (case_id, original_mistake_id, child_id, source, opened_at)
+        VALUES ('mistake:1', 1, 'default', 'game', 1234);
+      INSERT INTO learning_attempts
+        (attempt_id, case_id, attempt_kind, child_id, problem, is_correct, occurred_at, source)
+        VALUES ('original:mistake:1', 'mistake:1', 'original', 'default', NULL, 0, 1234, 'game');
+      INSERT INTO correction_obligations (case_id, status, opened_at)
+        VALUES ('mistake:1', 'open', 1234);
+    `);
+
+    (globalThis as any).__migrateSchema(db);
+
+    // The compat row now has the evidence columns populated.
+    const updated = db.prepare(
+      "SELECT problem, user_answer, correct_answer, level, error_type, hint, evidence_key " +
+        "FROM mistake_cases WHERE case_id = 'mistake:1'",
+    ).get() as Record<string, unknown>;
+    expect(updated).toEqual({
+      problem: "4 × 4 × 4",
+      user_answer: "32",
+      correct_answer: "64",
+      level: 3,
+      error_type: "multiply",
+      hint: "break into 2 steps",
+      evidence_key: "ev:test:1",
+    });
+
+    // And the learning_attempt row also got its evidence filled.
+    const attempt = db.prepare(
+      "SELECT problem, user_answer, correct_answer FROM learning_attempts " +
+        "WHERE attempt_id = 'original:mistake:1'",
+    ).get();
+    expect(attempt).toEqual({ problem: "4 × 4 × 4", user_answer: "32", correct_answer: "64" });
+    db.close();
+  });
 });
