@@ -22,15 +22,24 @@ let testSessionId: string;
 const CHILD = "default";
 const OTHER_CHILD = "alice";
 
-/** Insert a fresh mistake with reviewed_count = 0 and a specific child. */
+/** Insert a fresh mistake with reviewed_count = 0 and a specific child.
+ *
+ * SB124-T01 PR-D: writes the canonical mistake_case + correction_obligation
+ * (with the requested reviewed_count) so the T3 review endpoint can
+ * CAS UPDATE correction_obligations.reviewed_count. mistakes is a
+ * thin mirror kept for mistake_photo FKs.
+ */
 function seedMistake(problem: string, childId: string = CHILD, reviewedCount: number = 0): number {
-  const result = db.prepare(
+  const now = Date.now();
+  const caseId = `case:test-${problem}-${now}`;
+  const mistakeResult = db.prepare(
     `INSERT INTO mistakes
-       (session_id, child_id, problem, user_answer, correct_answer, error_type, source, reviewed_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source, reviewed_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     testSessionId,
     childId,
+    now,
     problem,
     "1",
     "2",
@@ -38,7 +47,30 @@ function seedMistake(problem: string, childId: string = CHILD, reviewedCount: nu
     "candy-math-island",
     reviewedCount,
   );
-  return Number(result.lastInsertRowid);
+  const mistakeId = Number(mistakeResult.lastInsertRowid);
+  db.prepare(`
+    INSERT INTO mistake_cases (
+      case_id, original_mistake_id, child_id, source, opened_at,
+      session_id, ts, problem, error_type, level, user_answer, correct_answer
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    caseId, mistakeId, childId, "candy-math-island", now,
+    testSessionId, now, problem, "compute", 1, "1", "2",
+  );
+  db.prepare(`
+    INSERT INTO learning_attempts (
+      attempt_id, case_id, attempt_kind, mistake_id, child_id,
+      problem, user_answer, correct_answer, is_correct, occurred_at, source
+    ) VALUES (?, ?, 'original', ?, ?, ?, ?, ?, 0, ?, ?)
+  `).run(
+    `attempt:${caseId}`, caseId, mistakeId, childId,
+    problem, "1", "2", now, "candy-math-island",
+  );
+  db.prepare(`
+    INSERT INTO correction_obligations (case_id, status, opened_at, reviewed_count)
+    VALUES (?, 'open', ?, ?)
+  `).run(caseId, now, reviewedCount);
+  return mistakeId;
 }
 
 beforeAll(() => {
@@ -98,29 +130,42 @@ describe("POST /api/game/mistake-review (issue #100: 3-correct cascade delete)",
     expect(res.status).toBe(200);
     expect(res.body.reviews[0].reviewedCount).toBe(3);
     expect(res.body.reviews[0].deleted).toBe(true);
-    // Row should be gone from DB
+    // PR-D: mistakes mirror is dropped; canonical case stays in
+    // mistake_cases + correction_obligations(status=verified).
     const row = db.prepare("SELECT id FROM mistakes WHERE id = ?").get(id);
     expect(row).toBeUndefined();
+    // Find the case_id for this mistake
+    const caseRow = db
+      .prepare("SELECT case_id FROM mistake_cases WHERE original_mistake_id = ?")
+      .get(id) as { case_id: string };
     expect(db.prepare(
       "SELECT status FROM correction_obligations WHERE case_id = ?",
-    ).get(`mistake:${id}`)).toEqual({ status: "verified" });
+    ).get(caseRow.case_id)).toEqual({ status: "verified" });
     expect(db.prepare(
       "SELECT COUNT(*) AS count FROM learning_attempts WHERE case_id = ?",
-    ).get(`mistake:${id}`)).toEqual({ count: 2 });
+    ).get(caseRow.case_id)).toEqual({ count: 2 });
   });
 
-  it("REV4: already-deleted mistake → idempotent no-op (no 5xx, no crash)", async () => {
-    const id = seedMistake("rev-4-7+5", CHILD, 3); // pre-set to 3 (post-delete state)
-    // Actually, if reviewed_count is 3, the row shouldn't exist post-cascade.
-    // Simulate: row already deleted by another concurrent request
-    db.prepare("DELETE FROM mistakes WHERE id = ?").run(id);
+  it("REV4: already-verified obligation → idempotent no-op (status filter)", async () => {
+    // PR-D: in the new world, the canonical case is in mistake_cases +
+    // correction_obligations. After 3 corrects, status becomes 'verified'
+    // and the picker filters it out. A 4th correct review is a no-op
+    // because the T3 code path requires status='open' for the CAS UPDATE.
+    const id = seedMistake("rev-4-7+5", CHILD, 3);
+    // Pre-mark verified (simulates post-cascade state)
+    const caseRow = db
+      .prepare("SELECT case_id FROM mistake_cases WHERE original_mistake_id = ?")
+      .get(id) as { case_id: string };
+    db.prepare(
+      "UPDATE correction_obligations SET status = 'verified', verified_at = ? WHERE case_id = ?",
+    ).run(Date.now(), caseRow.case_id);
     const res = await request(app)
       .post("/api/game/mistake-review")
       .send({ childId: CHILD, results: [{ mistakeId: id, correct: true }] });
     expect(res.status).toBe(200);
     expect(res.body.reviews[0].deleted).toBe(false);
-    // reviewedCount reported as 0 (row not found) — no crash
-    expect(res.body.reviews[0].reviewedCount).toBe(0);
+    // Reports the current reviewed_count (not 0 — the case is still there)
+    expect(res.body.reviews[0].reviewedCount).toBe(3);
   });
 
   it("REV5: correct=false → no-op (no count change, no delete)", async () => {

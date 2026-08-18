@@ -39,7 +39,8 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { GAME_ONLY_SESSION_SUBJECT } from "../session-kind.js";
 import { appendLearningAttemptSourceEvent } from "../source-events.js";
-import { ensureMistakeCompatibility } from "../db-migrate.js";
+// PR-D: ensureMistakeCompatibility removed (PR #153 made mistake_cases
+// the source of truth; the compat bridge is dead code).
 import { inferMistakeLevel } from "../mistake-level.js";
 
 export interface MistakeRouteDeps {
@@ -174,7 +175,6 @@ export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): voi
       reviews.push(result);
     }
 
-    console.log("[DEBUG reviews array]", JSON.stringify(reviews));
     res.json({ reviews });
   });
 }
@@ -480,16 +480,23 @@ const CASCADE_THRESHOLD = 3;
 const MAX_CAS_RETRIES = 5;
 
 /**
- * Apply one review result to the mistakes table.
+ * Apply one review result to the closure-loop tables.
+ *
+ * v0.9 (SB124-T01 PR-D): reviewed_count and status now live on
+ * correction_obligations (joined to mistake_cases by case_id). The
+ * mistakes mirror is a thin compat layer kept for mistake_photo FKs.
  *
  * Behavior:
- *   - correct=false  → no-op, return current reviewedCount (or 0 if row gone)
- *   - correct=true   → CAS-increment reviewed_count and record a correction
- *                      attempt; when the count reaches `CASCADE_THRESHOLD`
- *                      (3), close the explicit obligation and delete the
- *                      legacy queue row
- *   - row not found  → no-op, return reviewedCount:0
+ *   - correct=false  → no-op, return current reviewedCount (or 0 if
+ *                      case not found)
+ *   - correct=true   → CAS-increment correction_obligations.reviewed_count
+ *                      and record a correction attempt; when the count
+ *                      reaches `CASCADE_THRESHOLD` (3), mark the
+ *                      obligation status='verified' and delete the
+ *                      legacy mistakes mirror row
+ *   - case not found → no-op, return reviewedCount:0
  *   - wrong child    → no-op, return reviewedCount:0 (cross-child isolation)
+ *   - already verified → no-op (closeObligation path; status filter)
  *
  * The CAS loop handles the rare lost-race case: two devices submit
  * reviews for the same mistakeId concurrently, the first to commit
@@ -497,12 +504,6 @@ const MAX_CAS_RETRIES = 5;
  * value. We bound the retry count at MAX_CAS_RETRIES (5) — past that
  * we let the exception bubble (the express error handler returns 500
  * and the client retries on next session).
- *
- * Why a loop instead of a single UPDATE with optimistic retry: the
- * alternative is "blindly UPDATE SET reviewed_count = reviewed_count + 1
- * without a CAS predicate" which works but doesn't surface races. The
- * CAS loop is more defensive and surfaces weird interleavings as
- * observable retries rather than silently-incorrect counts.
  */
 export function reviewMistake(
   db: Database.Database,
@@ -514,7 +515,10 @@ export function reviewMistake(
   if (!correct) {
     const row = db
       .prepare(
-        "SELECT reviewed_count FROM mistakes WHERE id = ? AND child_id = ?",
+        `SELECT co.reviewed_count
+           FROM correction_obligations co
+           JOIN mistake_cases mc ON mc.case_id = co.case_id
+          WHERE mc.original_mistake_id = ? AND mc.child_id = ?`,
       )
       .get(mistakeId, childId) as { reviewed_count: number } | undefined;
     return {
@@ -527,34 +531,54 @@ export function reviewMistake(
   // correct=true: read current, then CAS-increment with retry on race.
   let current = db
     .prepare(
-      `SELECT reviewed_count, ts, problem, correct_answer, source
-         FROM mistakes WHERE id = ? AND child_id = ?`,
+      `SELECT co.reviewed_count, co.case_id, co.status,
+              mc.opened_at AS ts, mc.problem, mc.correct_answer, mc.source
+         FROM correction_obligations co
+         JOIN mistake_cases mc ON mc.case_id = co.case_id
+        WHERE mc.original_mistake_id = ? AND mc.child_id = ?`,
     )
     .get(mistakeId, childId) as {
       reviewed_count: number;
+      case_id: string;
+      status: string;
       ts: number;
       problem: string | null;
       correct_answer: string | null;
       source: string;
     } | undefined;
 
-  // Row not found (or wrong child) — collapse to no-op so the queue
+  // Case not found (or wrong child) — collapse to no-op so the queue
   // can flush cleanly across devices.
   if (!current) {
     return { mistakeId, reviewedCount: 0, deleted: false };
   }
 
+  // Already verified — no-op (the 3-correct cascade has already fired).
+  // The mistake_cases + correction_obligations rows are durable
+  // evidence; the picker filters status='open' so the kid doesn't see
+  // them again. Returning reviewedCount: 0 here would be misleading
+  // (the case IS at the threshold), so we report the actual count.
+  if (current.status !== "open") {
+    return {
+      mistakeId,
+      reviewedCount: current.reviewed_count,
+      deleted: false,
+    };
+  }
+
   for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
     const update = db
       .prepare(
-        "UPDATE mistakes SET reviewed_count = reviewed_count + 1 " +
-          "WHERE id = ? AND child_id = ? AND reviewed_count = ?",
+        `UPDATE correction_obligations
+            SET reviewed_count = reviewed_count + 1
+          WHERE case_id = ? AND reviewed_count = ? AND status = 'open'`,
       )
-      .run(mistakeId, childId, current.reviewed_count);
+      .run(current.case_id, current.reviewed_count);
 
     if (update.changes === 1) {
       const newCount = current.reviewed_count + 1;
       const deleted = recordReviewCompatibility(db, {
+        caseId: current.case_id,
         mistakeId,
         childId,
         source: current.source,
@@ -570,20 +594,29 @@ export function reviewMistake(
     // Lost the race. Re-read and retry.
     current = db
       .prepare(
-        `SELECT reviewed_count, ts, problem, correct_answer, source
-           FROM mistakes WHERE id = ? AND child_id = ?`,
+        `SELECT co.reviewed_count, co.case_id, co.status,
+                mc.opened_at AS ts, mc.problem, mc.correct_answer, mc.source
+           FROM correction_obligations co
+           JOIN mistake_cases mc ON mc.case_id = co.case_id
+          WHERE mc.original_mistake_id = ? AND mc.child_id = ?`,
       )
       .get(mistakeId, childId) as {
         reviewed_count: number;
+        case_id: string;
+        status: string;
         ts: number;
         problem: string | null;
         correct_answer: string | null;
         source: string;
       } | undefined;
-    if (!current) {
-      // Row was deleted by another concurrent review (the other device
+    if (!current || current.status !== "open") {
+      // Case was closed by another concurrent review (the other device
       // hit 3 first). Report it as a no-op.
-      return { mistakeId, reviewedCount: 0, deleted: false };
+      return {
+        mistakeId,
+        reviewedCount: current?.reviewed_count ?? 0,
+        deleted: false,
+      };
     }
   }
 
@@ -594,6 +627,7 @@ export function reviewMistake(
 }
 
 interface ReviewCompatibilityInput {
+  caseId: string;
   mistakeId: number;
   childId: string;
   source: string;
@@ -609,22 +643,17 @@ function recordReviewCompatibility(
   input: ReviewCompatibilityInput,
 ): boolean {
   return db.transaction(() => {
-    ensureMistakeCompatibility(db, {
-      mistakeId: input.mistakeId,
-      childId: input.childId,
-      source: input.source,
-      occurredAt: input.occurredAt,
-      problem: input.problem,
-      correctAnswer: input.correctAnswer,
-    });
+    // v0.9 (SB124-T01 PR-D): no compat bridge needed — the case row
+    // already exists (it was the lookup target in reviewMistake). Just
+    // record the correction attempt.
     db.prepare(`
       INSERT OR IGNORE INTO learning_attempts
         (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
          user_answer, correct_answer, is_correct, occurred_at, source)
       VALUES (?, ?, 'correction', ?, ?, ?, NULL, ?, 1, ?, ?)
     `).run(
-      `review:${input.mistakeId}:${input.reviewCount}`,
-      `mistake:${input.mistakeId}`,
+      `review:${input.caseId}:${input.reviewCount}`,
+      input.caseId,
       input.mistakeId,
       input.childId,
       input.problem,
@@ -639,12 +668,14 @@ function recordReviewCompatibility(
       UPDATE correction_obligations
          SET status = 'verified', verified_at = ?
        WHERE case_id = ?
-    `).run(verifiedAt, `mistake:${input.mistakeId}`);
-    // Keep the explicit case and attempts as durable evidence while retaining
-    // the legacy queue's historical cascade-delete response.
+    `).run(verifiedAt, input.caseId);
+    // Keep the explicit case and attempts as durable evidence while
+    // dropping the legacy mistakes mirror. The mistake_id FK on
+    // mistake_photo_confirmations is preserved (no change to that
+    // table in this PR — PR-D v2 would migrate it to case_id).
     db.prepare(
-      "DELETE FROM mistakes WHERE id = ? AND child_id = ? AND reviewed_count >= ?",
-    ).run(input.mistakeId, input.childId, CASCADE_THRESHOLD);
+      "DELETE FROM mistakes WHERE id = ? AND child_id = ?",
+    ).run(input.mistakeId, input.childId);
     return true;
   })();
 }
