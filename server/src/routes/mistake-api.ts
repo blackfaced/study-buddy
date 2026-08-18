@@ -124,7 +124,7 @@ export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): voi
 
     res
       .status(result.created ? 201 : 200)
-      .json({ id: result.id, created: result.created });
+      .json({ id: result.id, caseId: result.caseId, created: result.created });
   });
 
   // ============== T3: cascade review ==============
@@ -190,24 +190,29 @@ export interface InsertMistakeInput {
 
 export interface InsertMistakeResult {
   id: number;
+  caseId: string;
   created: boolean;
 }
 
 /**
- * Insert a wrong-answer row into `mistakes` deduped by
- * (child_id, problem, source). The pre-insert lookup also preserves this
- * contract when a migrated legacy database has retained duplicate evidence
- * and therefore cannot carry the old unique index.
+ * Insert a wrong-answer row, writing the canonical mistake_cases row
+ * first and then mirroring a thin mistakes-table row for the legacy
+ * mistake_id used by source_events + mistake_photo FKs.
+ *
+ * Deduped by (child_id, problem, source) via mistake_cases — that
+ * table is the new source-of-truth. The mistakes mirror is created
+ * AFTER, never queried for dedupe.
  *
  * Behavior:
- *   - New (child_id, problem, source) tuple → INSERT, return {id, created: true}
- *   - Existing tuple → return the earliest existing id with
- *     {id, created: false} (idempotent retry)
+ *   - New tuple → INSERT mistake_cases + mistakes mirror + learning_attempt
+ *     (original, is_correct=0) + correction_obligation (open, reviewed_count=0).
+ *     Return {id, caseId, created: true}.
+ *   - Existing tuple → return the earliest existing mistake_id + its
+ *     caseId with {id, caseId, created: false} (idempotent retry).
  *
  * On collision we DO NOT update user_answer / correct_answer / error_type
- * — the first wrong answer is the "authoritative" record. The 30% mix
- * picker (T2) reads reviewed_count for staleness; reviewed_count is only
- * mutated by T3's CAS path.
+ * — the first wrong answer is the "authoritative" record. reviewed_count
+ * is only mutated by T3's CAS path.
  *
  * Throws if the UNIQUE collision is reported but SELECT cannot find the
  * row (impossible state, surfacing it makes the bug loud in logs).
@@ -220,18 +225,23 @@ export function insertMistake(
   return db.transaction(() => {
     ensureChildRow(db, input.childId);
     const sessionId = ensureActiveSession(db, input.childId);
-    const existingBeforeInsert = db.prepare(
-      `SELECT id, ts, session_id, problem, user_answer, correct_answer, error_type, hint, level,
+
+    // v0.9 (SB124-T01 PR-B): dedupe against mistake_cases — the
+    // canonical source-of-truth. The mistakes mirror is created AFTER,
+    // never queried for dedupe.
+    const existingCase = db.prepare(
+      `SELECT case_id, original_mistake_id, opened_at, session_id,
+              problem, user_answer, correct_answer, error_type, hint, level,
               image_path, vision_input, vision_reasoning, vision_model, vision_ts,
-              evidence_key, evidence_status, evidence_method, evidence_confirmed_at,
-              reviewed_count, source
-         FROM mistakes
+              evidence_key, evidence_status, evidence_method, evidence_confirmed_at, source
+         FROM mistake_cases
         WHERE child_id = ? AND problem = ? AND source = ?
-        ORDER BY id LIMIT 1`,
+        ORDER BY opened_at, case_id LIMIT 1`,
     ).get(input.childId, input.problem, input.source) as {
-      id: number;
-      ts: number;
-      session_id: string;
+      case_id: string;
+      original_mistake_id: number | null;
+      opened_at: number;
+      session_id: string | null;
       problem: string | null;
       user_answer: string | null;
       correct_answer: string | null;
@@ -247,35 +257,44 @@ export function insertMistake(
       evidence_status: string | null;
       evidence_method: string | null;
       evidence_confirmed_at: number | null;
-      reviewed_count: number;
       source: string;
     } | undefined;
-    if (existingBeforeInsert) {
-      ensureMistakeCompatibility(db, {
-        mistakeId: existingBeforeInsert.id,
-        childId: input.childId,
-        source: existingBeforeInsert.source,
-        occurredAt: existingBeforeInsert.ts,
-        problem: existingBeforeInsert.problem,
-        userAnswer: existingBeforeInsert.user_answer,
-        correctAnswer: existingBeforeInsert.correct_answer,
-        sessionId: existingBeforeInsert.session_id,
-        errorType: existingBeforeInsert.error_type,
-        hint: existingBeforeInsert.hint,
-        level: existingBeforeInsert.level,
-        imagePath: existingBeforeInsert.image_path,
-        visionInput: existingBeforeInsert.vision_input,
-        visionReasoning: existingBeforeInsert.vision_reasoning,
-        visionModel: existingBeforeInsert.vision_model,
-        visionTs: existingBeforeInsert.vision_ts,
-        evidenceKey: existingBeforeInsert.evidence_key,
-        evidenceStatus: existingBeforeInsert.evidence_status,
-        evidenceMethod: existingBeforeInsert.evidence_method,
-        evidenceConfirmedAt: existingBeforeInsert.evidence_confirmed_at,
-        reviewedCount: existingBeforeInsert.reviewed_count,
-      });
-      return { id: existingBeforeInsert.id, created: false };
+    if (existingCase) {
+      // Defensive: legacy compat rows may have NULL original_mistake_id
+      // (PR-A backfill pre-dates the original mistakes row). Create
+      // a mirror mistake now so callers can use the case's mistake_id.
+      let mistakeId = existingCase.original_mistake_id;
+      if (mistakeId == null) {
+        // reviewed_count lives on correction_obligations; for the
+        // mirror we need to read it from there if it exists.
+        const reviewedCount = (db
+          .prepare("SELECT reviewed_count FROM correction_obligations WHERE case_id = ?")
+          .get(existingCase.case_id) as { reviewed_count: number } | undefined)?.reviewed_count ?? 0;
+        const mirror = db.prepare(`
+          INSERT INTO mistakes (
+            session_id, child_id, ts, problem, user_answer, correct_answer,
+            error_type, hint, reviewed_count, source, level,
+            image_path, vision_input, vision_reasoning, vision_model, vision_ts,
+            evidence_key, evidence_status, evidence_method, evidence_confirmed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          existingCase.session_id, input.childId, existingCase.opened_at,
+          existingCase.problem, existingCase.user_answer, existingCase.correct_answer,
+          existingCase.error_type, existingCase.hint, reviewedCount,
+          existingCase.source, existingCase.level,
+          existingCase.image_path, existingCase.vision_input, existingCase.vision_reasoning,
+          existingCase.vision_model, existingCase.vision_ts,
+          existingCase.evidence_key, existingCase.evidence_status,
+          existingCase.evidence_method, existingCase.evidence_confirmed_at,
+        );
+        mistakeId = Number(mirror.lastInsertRowid);
+        db.prepare(
+          "UPDATE mistake_cases SET original_mistake_id = ? WHERE case_id = ?",
+        ).run(mistakeId, existingCase.case_id);
+      }
+      return { id: mistakeId, caseId: existingCase.case_id, created: false };
     }
+
     const occurredAt = Date.now();
     // v0.8.x (#146/#148): infer the mistake's level at insert time.
     // Stored on the row so the picker can compare m.level <= kidLevel
@@ -283,109 +302,90 @@ export function insertMistake(
     // draw. Helper lives in mistake-level.ts (shared with the
     // backfill in db-migrate.ts).
     const level = inferMistakeLevel(input.problem, input.errorType ?? null);
-    const stmt = db.prepare(`
-      INSERT OR IGNORE INTO mistakes (
-        session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source, level
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const result = stmt.run(
-      sessionId,
+    const caseId = `case:${randomUUID()}`;
+
+    // 1. Mirror to mistakes table FIRST — gives the legacy mistake_id
+    // that mistake_cases.original_mistake_id (NOT NULL UNIQUE) and
+    // source_events / mistake_photo FKs reference. Mistakes remains
+    // a thin mirror; the canonical row lives in mistake_cases.
+    const mirror = db.prepare(`
+      INSERT INTO mistakes (
+        session_id, child_id, ts, problem, user_answer, correct_answer,
+        error_type, hint, reviewed_count, source, level
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    `).run(
+      sessionId, input.childId, occurredAt, input.problem,
+      input.userAnswer, input.correctAnswer, input.errorType, null,
+      input.source, level,
+    );
+    const mistakeId = Number(mirror.lastInsertRowid);
+
+    // 2. Write the canonical case row. original_mistake_id satisfies
+    // the NOT NULL UNIQUE constraint (1 case ↔ 1 mistake).
+    const caseResult = db.prepare(`
+      INSERT INTO mistake_cases (
+        case_id, original_mistake_id, child_id, source, opened_at,
+        session_id, ts, problem, error_type, hint, level,
+        image_path, vision_input, vision_reasoning, vision_model, vision_ts,
+        user_answer, correct_answer,
+        evidence_key, evidence_status, evidence_method, evidence_confirmed_at
+      ) VALUES (
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
+        NULL, NULL, NULL, NULL, NULL,
+        ?, ?,
+        NULL, NULL, NULL, NULL
+      )
+    `).run(
+      caseId, mistakeId, input.childId, input.source, occurredAt,
+      sessionId, occurredAt, input.problem, input.errorType, null, level,
+      input.userAnswer, input.correctAnswer,
+    );
+    if (caseResult.changes !== 1) {
+      // Should not happen — caseId is UUID-unique, original_mistake_id
+      // was just freshly inserted in step 1.
+      throw new Error(
+        `insertMistake: case INSERT failed for case_id=${caseId}, ` +
+          `mistake_id=${mistakeId} — investigate schema/constraint drift`,
+      );
+    }
+
+    // 3. The original learning attempt — wrong, no note.
+    db.prepare(`
+      INSERT INTO learning_attempts (
+        attempt_id, case_id, attempt_kind, mistake_id, child_id,
+        problem, user_answer, correct_answer, is_correct, occurred_at, source
+      ) VALUES (?, ?, 'original', ?, ?, ?, ?, ?, 0, ?, ?)
+    `).run(
+      `attempt:${caseId}`,
+      caseId,
+      mistakeId,
       input.childId,
-      occurredAt,
       input.problem,
       input.userAnswer,
       input.correctAnswer,
-      input.errorType,
+      occurredAt,
       input.source,
-      level,
     );
-    if (result.changes === 1) {
-      const id = Number(result.lastInsertRowid);
-      ensureMistakeCompatibility(db, {
-        mistakeId: id,
-        childId: input.childId,
-        source: input.source,
-        occurredAt,
-        problem: input.problem,
-        userAnswer: input.userAnswer,
-        correctAnswer: input.correctAnswer,
-        sessionId,
-        errorType: input.errorType ?? null,
-        level,
-      });
-      beforeSourceEventAppend?.("learning_attempt");
-      appendLearningAttemptSourceEvent(db, {
-        mistakeId: id,
-        childId: input.childId,
-        occurredAt,
-        problem: input.problem,
-        submittedAnswer: input.userAnswer,
-        expectedAnswer: input.correctAnswer,
-        mistakeType: input.errorType,
-        source: input.source,
-      });
-      return { id, created: true };
-    }
-    const existing = db.prepare(
-      `SELECT id, ts, session_id, problem, user_answer, correct_answer, error_type, hint, level,
-              image_path, vision_input, vision_reasoning, vision_model, vision_ts,
-              evidence_key, evidence_status, evidence_method, evidence_confirmed_at,
-              reviewed_count, source
-         FROM mistakes
-        WHERE child_id = ? AND problem = ? AND source = ?
-        ORDER BY id LIMIT 1`,
-    ).get(input.childId, input.problem, input.source) as {
-      id: number;
-      ts: number;
-      session_id: string;
-      problem: string | null;
-      user_answer: string | null;
-      correct_answer: string | null;
-      error_type: string | null;
-      hint: string | null;
-      level: number | null;
-      image_path: string | null;
-      vision_input: string | null;
-      vision_reasoning: string | null;
-      vision_model: string | null;
-      vision_ts: number | null;
-      evidence_key: string | null;
-      evidence_status: string | null;
-      evidence_method: string | null;
-      evidence_confirmed_at: number | null;
-      reviewed_count: number;
-      source: string;
-    } | undefined;
-    if (!existing) {
-      throw new Error(
-        `insertMistake: UNIQUE collision but row not found ` +
-          `(child_id=${input.childId}, problem=${input.problem})`,
-      );
-    }
-    ensureMistakeCompatibility(db, {
-      mistakeId: existing.id,
+
+    // 4. Open correction obligation with reviewed_count=0.
+    db.prepare(`
+      INSERT INTO correction_obligations (case_id, status, opened_at, reviewed_count)
+      VALUES (?, 'open', ?, 0)
+    `).run(caseId, occurredAt);
+
+    beforeSourceEventAppend?.("learning_attempt");
+    appendLearningAttemptSourceEvent(db, {
+      mistakeId,
       childId: input.childId,
-      source: existing.source,
-      occurredAt: existing.ts,
-      problem: existing.problem,
-      userAnswer: existing.user_answer,
-      correctAnswer: existing.correct_answer,
-      sessionId: existing.session_id,
-      errorType: existing.error_type,
-      hint: existing.hint,
-      level: existing.level,
-      imagePath: existing.image_path,
-      visionInput: existing.vision_input,
-      visionReasoning: existing.vision_reasoning,
-      visionModel: existing.vision_model,
-      visionTs: existing.vision_ts,
-      evidenceKey: existing.evidence_key,
-      evidenceStatus: existing.evidence_status,
-      evidenceMethod: existing.evidence_method,
-      evidenceConfirmedAt: existing.evidence_confirmed_at,
-      reviewedCount: existing.reviewed_count,
+      occurredAt,
+      problem: input.problem,
+      submittedAnswer: input.userAnswer,
+      expectedAnswer: input.correctAnswer,
+      mistakeType: input.errorType,
+      source: input.source,
     });
-    return { id: existing.id, created: false };
+    return { id: mistakeId, caseId, created: true };
   })();
 }
 

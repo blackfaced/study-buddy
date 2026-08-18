@@ -620,6 +620,12 @@ export function ensureMistakeCompatibility(
 
 function backfillMistakeCompatibility(db: Database.Database): void {
   db.transaction(() => {
+    // v0.9 (SB124-T01 PR-B): use a stable "mistake:<id>" case_id for the
+    // legacy compat mirror, but respect any pre-existing case row that
+    // already has a UUID case_id (written by the new insertMistake).
+    // INSERT OR IGNORE keeps the existing row; the subsequent joins
+    // read the actual case_id back from mistake_cases so we don't
+    // trip the learning_attempts.case_id FK on a missing parent.
     db.exec(`
       INSERT OR IGNORE INTO mistake_cases (
         case_id, original_mistake_id, child_id, source, opened_at,
@@ -659,22 +665,25 @@ function backfillMistakeCompatibility(db: Database.Database): void {
         problem, user_answer, correct_answer, is_correct, occurred_at, source
       )
       SELECT
-        'original:mistake:' || id,
-        'mistake:' || id,
+        'original:' || mc.case_id,
+        mc.case_id,
         'original',
-        id,
-        child_id,
-        problem,
-        user_answer,
-        correct_answer,
+        m.id,
+        m.child_id,
+        m.problem,
+        m.user_answer,
+        m.correct_answer,
         0,
-        ts,
-        COALESCE(NULLIF(source, ''), 'study-buddy')
-      FROM mistakes;
+        m.ts,
+        COALESCE(NULLIF(m.source, ''), 'study-buddy')
+      FROM mistakes m
+      JOIN mistake_cases mc ON mc.original_mistake_id = m.id;
 
       INSERT OR IGNORE INTO correction_obligations
         (case_id, status, opened_at, reviewed_count)
-      SELECT 'mistake:' || id, 'open', ts, COALESCE(reviewed_count, 0) FROM mistakes;
+      SELECT mc.case_id, 'open', m.ts, COALESCE(m.reviewed_count, 0)
+      FROM mistakes m
+      JOIN mistake_cases mc ON mc.original_mistake_id = m.id;
     `);
   })();
 }

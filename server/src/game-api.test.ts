@@ -25,14 +25,23 @@ afterAll(() => {
 
 beforeEach(() => {
   // Clear game-related tables so tests don't see each other's rows.
+  // SB124-T01 PR-B: mistake_cases is now the source-of-truth for dedupe
+  // so we must clear it (and the related closure-loop tables) too —
+  // otherwise the next test's POST gets an idempotent-retry 200.
   db.exec("DELETE FROM game_sessions");
+  db.exec("DELETE FROM learning_attempts");
+  db.exec("DELETE FROM correction_obligations");
+  db.exec("DELETE FROM mistake_cases");
   db.exec("DELETE FROM mistakes");
 });
 
 beforeEach(() => {
   // Reset between tests so aggregates are deterministic.
   db.prepare("UPDATE sessions SET ended_at = strftime('%s','now')*1000 WHERE ended_at IS NULL").run();
-  db.prepare("DELETE FROM mistakes").run();
+  db.exec("DELETE FROM learning_attempts");
+  db.exec("DELETE FROM correction_obligations");
+  db.exec("DELETE FROM mistake_cases");
+  db.exec("DELETE FROM mistakes");
 });
 
 describe("GET /api/apps (platform registry)", () => {
