@@ -476,6 +476,7 @@ export function migrateSchema(db: Database.Database): void {
   addMistakesChildIdForeignKey(db);
   ensureMistakeCompatibilityIndexes(db);
   backfillMistakeCompatibility(db);
+  fillMissingCompatEvidence(db);
   backfillMistakeLevel(db);
 
   db.prepare(
@@ -676,6 +677,43 @@ function backfillMistakeCompatibility(db: Database.Database): void {
       SELECT 'mistake:' || id, 'open', ts, COALESCE(reviewed_count, 0) FROM mistakes;
     `);
   })();
+}
+
+// Production DBs that were upgraded through PR #151 had compat rows
+// already (INSERT OR IGNORE skipped them) with NULL evidence columns.
+// Re-run backfill on those existing rows so the new columns get
+// populated from mistakes. Idempotent: a row whose evidence is
+// already populated is left untouched (the WHERE problem IS NULL
+// guard skips the no-op rewrite).
+function fillMissingCompatEvidence(db: Database.Database): void {
+  db.exec(`
+    UPDATE mistake_cases SET
+      session_id = (SELECT session_id FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      ts = COALESCE(mistake_cases.ts, (SELECT ts FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id)),
+      subject = (SELECT subject FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      problem = (SELECT problem FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      error_type = (SELECT error_type FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      hint = (SELECT hint FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      level = (SELECT level FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      image_path = (SELECT image_path FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      vision_input = (SELECT vision_input FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      vision_reasoning = (SELECT vision_reasoning FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      vision_model = (SELECT vision_model FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      vision_ts = (SELECT vision_ts FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      user_answer = (SELECT user_answer FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      correct_answer = (SELECT correct_answer FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      evidence_key = (SELECT evidence_key FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      evidence_status = (SELECT evidence_status FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      evidence_method = (SELECT evidence_method FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id),
+      evidence_confirmed_at = (SELECT evidence_confirmed_at FROM mistakes WHERE mistakes.id = mistake_cases.original_mistake_id)
+    WHERE problem IS NULL;
+
+    UPDATE learning_attempts SET
+      problem = (SELECT m.problem FROM mistake_cases mc JOIN mistakes m ON m.id = mc.original_mistake_id WHERE mc.case_id = learning_attempts.case_id),
+      user_answer = (SELECT m.user_answer FROM mistake_cases mc JOIN mistakes m ON m.id = mc.original_mistake_id WHERE mc.case_id = learning_attempts.case_id),
+      correct_answer = (SELECT m.correct_answer FROM mistake_cases mc JOIN mistakes m ON m.id = mc.original_mistake_id WHERE mc.case_id = learning_attempts.case_id)
+    WHERE problem IS NULL;
+  `);
 }
 
 function widenSourceEventVocabulary(db: Database.Database): void {
