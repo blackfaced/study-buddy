@@ -97,6 +97,30 @@ export function migrateSchema(db: Database.Database): void {
 
   widenSourceEventVocabulary(db);
 
+  // v0.9 (SB124-T01, issue #125): widen mistake_cases and
+  // correction_obligations to carry the full evidence record.
+  // Idempotent ALTER (try/catch) so re-running the migration is a
+  // no-op once the columns exist.
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN session_id TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN ts INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN subject TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN problem TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN error_type TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN hint TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN level INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN image_path TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN vision_input TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN vision_reasoning TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN vision_model TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN vision_ts INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN user_answer TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN correct_answer TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN evidence_key TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN evidence_status TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN evidence_method TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN evidence_confirmed_at INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE correction_obligations ADD COLUMN reviewed_count INTEGER NOT NULL DEFAULT 0`); } catch {}
+
   // 初始化 schema
   db.exec(`
     CREATE TABLE IF NOT EXISTS children (
@@ -211,12 +235,36 @@ export function migrateSchema(db: Database.Database): void {
     -- Compatibility model for the mistake-closure rollout. Legacy mistakes
     -- remain the evidence source; these tables add explicit cases, attempts,
     -- and correction obligations without changing old readers.
+    --
+    -- v0.9 (SB124-T01, issue #125): mistake_cases now carries the same
+    -- evidence columns as mistakes so the case row is the source-of-truth
+    -- for closure-loop reads. correction_obligations tracks reviewed_count
+    -- (the v0.8.x "mastery" trigger). Old readers still go through
+    -- mistakes; new readers go through these three tables.
     CREATE TABLE IF NOT EXISTS mistake_cases (
       case_id TEXT PRIMARY KEY,
       original_mistake_id INTEGER NOT NULL UNIQUE,
       child_id TEXT NOT NULL,
       source TEXT NOT NULL,
-      opened_at INTEGER NOT NULL
+      opened_at INTEGER NOT NULL,
+      session_id TEXT,
+      ts INTEGER,
+      subject TEXT,
+      problem TEXT,
+      error_type TEXT,
+      hint TEXT,
+      level INTEGER,
+      image_path TEXT,
+      vision_input TEXT,
+      vision_reasoning TEXT,
+      vision_model TEXT,
+      vision_ts INTEGER,
+      user_answer TEXT,
+      correct_answer TEXT,
+      evidence_key TEXT,
+      evidence_status TEXT,
+      evidence_method TEXT,
+      evidence_confirmed_at INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS learning_attempts (
@@ -239,7 +287,7 @@ export function migrateSchema(db: Database.Database): void {
       status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'verified')),
       opened_at INTEGER NOT NULL,
       verified_at INTEGER,
-      FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE
+      reviewed_count INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS mistake_photo_confirmations (
@@ -493,6 +541,25 @@ export interface MistakeCompatibilityRecord {
   problem: string | null;
   userAnswer?: string | null;
   correctAnswer?: string | null;
+  // v0.9 (SB124-T01, issue #125): the full evidence record. Mistake_case
+  // becomes the source-of-truth, so new compatibility writes must
+  // carry the same fields as mistakes. Older callers may still
+  // pass a minimal record; the helper tolerates that.
+  sessionId?: string | null;
+  subject?: string | null;
+  errorType?: string | null;
+  hint?: string | null;
+  level?: number | null;
+  imagePath?: string | null;
+  visionInput?: string | null;
+  visionReasoning?: string | null;
+  visionModel?: string | null;
+  visionTs?: number | null;
+  evidenceKey?: string | null;
+  evidenceStatus?: string | null;
+  evidenceMethod?: string | null;
+  evidenceConfirmedAt?: number | null;
+  reviewedCount?: number | null;
 }
 
 /** Keep newly written legacy rows visible in the explicit mistake model. */
@@ -502,10 +569,31 @@ export function ensureMistakeCompatibility(
 ): void {
   const caseId = `mistake:${record.mistakeId}`;
   db.prepare(`
-    INSERT OR IGNORE INTO mistake_cases
-      (case_id, original_mistake_id, child_id, source, opened_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(caseId, record.mistakeId, record.childId, record.source, record.occurredAt);
+    INSERT OR IGNORE INTO mistake_cases (
+      case_id, original_mistake_id, child_id, source, opened_at,
+      session_id, ts, subject, problem, error_type, hint, level,
+      image_path, vision_input, vision_reasoning, vision_model, vision_ts,
+      user_answer, correct_answer,
+      evidence_key, evidence_status, evidence_method, evidence_confirmed_at
+    ) VALUES (
+      ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, ?,
+      ?, ?, ?, ?
+    )
+  `).run(
+    caseId, record.mistakeId, record.childId, record.source, record.occurredAt,
+    record.sessionId ?? null, record.occurredAt, record.subject ?? null,
+    record.problem, record.errorType ?? null, record.hint ?? null,
+    record.level ?? null,
+    record.imagePath ?? null, record.visionInput ?? null,
+    record.visionReasoning ?? null, record.visionModel ?? null,
+    record.visionTs ?? null,
+    record.userAnswer ?? null, record.correctAnswer ?? null,
+    record.evidenceKey ?? null, record.evidenceStatus ?? null,
+    record.evidenceMethod ?? null, record.evidenceConfirmedAt ?? null,
+  );
   db.prepare(`
     INSERT OR IGNORE INTO learning_attempts
       (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
@@ -523,23 +611,46 @@ export function ensureMistakeCompatibility(
     record.source,
   );
   db.prepare(`
-    INSERT OR IGNORE INTO correction_obligations (case_id, status, opened_at)
-    VALUES (?, 'open', ?)
-  `).run(caseId, record.occurredAt);
+    INSERT OR IGNORE INTO correction_obligations
+      (case_id, status, opened_at, reviewed_count)
+    VALUES (?, 'open', ?, ?)
+  `).run(caseId, record.occurredAt, record.reviewedCount ?? 0);
 }
 
 function backfillMistakeCompatibility(db: Database.Database): void {
   db.transaction(() => {
     db.exec(`
       INSERT OR IGNORE INTO mistake_cases (
-        case_id, original_mistake_id, child_id, source, opened_at
+        case_id, original_mistake_id, child_id, source, opened_at,
+        session_id, ts, subject, problem, error_type, hint, level,
+        image_path, vision_input, vision_reasoning, vision_model, vision_ts,
+        user_answer, correct_answer,
+        evidence_key, evidence_status, evidence_method, evidence_confirmed_at
       )
       SELECT
         'mistake:' || id,
         id,
         child_id,
         COALESCE(NULLIF(source, ''), 'study-buddy'),
-        ts
+        ts,
+        session_id,
+        ts,
+        subject,
+        problem,
+        error_type,
+        hint,
+        level,
+        image_path,
+        vision_input,
+        vision_reasoning,
+        vision_model,
+        vision_ts,
+        user_answer,
+        correct_answer,
+        evidence_key,
+        evidence_status,
+        evidence_method,
+        evidence_confirmed_at
       FROM mistakes;
 
       INSERT OR IGNORE INTO learning_attempts (
@@ -560,8 +671,9 @@ function backfillMistakeCompatibility(db: Database.Database): void {
         COALESCE(NULLIF(source, ''), 'study-buddy')
       FROM mistakes;
 
-      INSERT OR IGNORE INTO correction_obligations (case_id, status, opened_at)
-      SELECT 'mistake:' || id, 'open', ts FROM mistakes;
+      INSERT OR IGNORE INTO correction_obligations
+        (case_id, status, opened_at, reviewed_count)
+      SELECT 'mistake:' || id, 'open', ts, COALESCE(reviewed_count, 0) FROM mistakes;
     `);
   })();
 }
