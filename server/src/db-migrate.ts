@@ -306,6 +306,35 @@ export function migrateSchema(db: Database.Database): void {
       FOREIGN KEY (device_id) REFERENCES paired_devices(device_id)
     );
 
+    -- SB124-T04 #128: page-photo multi-candidate capture. One row per
+    -- page photo. State machine: 'analyzing' (layout running) →
+    -- 'review' (layout done, candidates ready) → 'completed' (all
+    -- candidates confirmed or discarded) / 'cancelled' (whole page
+    -- dropped) / 'expired' (TTL hit). Source distinguishes "整页照片"
+    -- from the existing single-photo path (which stays in
+    -- mistake_photo_confirmations).
+    CREATE TABLE IF NOT EXISTS mistake_photo_page_drafts (
+      id TEXT PRIMARY KEY,
+      child_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('analyzing', 'review', 'completed', 'cancelled', 'expired')),
+      layout_model TEXT NOT NULL,
+      layout_regions_json TEXT NOT NULL,         -- JSON array of { index, bbox, subject }
+      layout_confidence TEXT NOT NULL CHECK (layout_confidence IN ('ok', 'low')),
+      image_bytes BLOB NOT NULL,                 -- original photo, kept for per-region OCR (T04-B)
+      image_extension TEXT NOT NULL,             -- e.g. "jpg", "png", "webp"
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (child_id) REFERENCES children(id),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (device_id) REFERENCES paired_devices(device_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS mistake_photo_page_drafts_child_state
+      ON mistake_photo_page_drafts (child_id, state, expires_at);
+
     CREATE TABLE IF NOT EXISTS settings (
       child_id TEXT PRIMARY KEY,
       topic_whitelist TEXT,
