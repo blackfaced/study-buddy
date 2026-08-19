@@ -44,11 +44,31 @@
     .status[data-tone="success"] { color: var(--color-success, #1e8a4c); }
     .inbox-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
     .inbox-entry {
-      padding: var(--space-3);
+      padding: 0;
       border-radius: var(--radius-input);
       background: var(--surface-input);
-      display: grid; gap: var(--space-1);
+      display: grid; gap: 0;
     }
+    .inbox-link {
+      display: grid; gap: var(--space-1);
+      padding: var(--space-3);
+      color: inherit;
+      text-decoration: none;
+      position: relative;
+    }
+    .inbox-link:hover { background: var(--surface-elevated, #fff); }
+    .open-hint {
+      position: absolute;
+      right: var(--space-3);
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 12px;
+      color: var(--accent);
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .inbox-link:hover .open-hint,
+    .inbox-link:focus .open-hint { opacity: 1; }
     .inbox-entry .meta { display: flex; gap: var(--space-2); font-size: 12px; color: var(--text-secondary); }
     .pill {
       display: inline-block;
