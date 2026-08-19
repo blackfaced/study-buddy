@@ -37,6 +37,8 @@ import { registerMnObservationRoutes } from "./routes/mn-observation.js";
 import { DeviceAuth, type DeviceRequestAuthenticator } from "./device-auth.js";
 import { registerPairingRoutes } from "./routes/pairing.js";
 import { MistakePhotoWorkflow } from "./mistake-photo-workflow.js";
+import { MistakePagePhotoWorkflow } from "./mistake-page-photo-workflow.js";
+import { registerMistakePagePhotoRoutes } from "./routes/mistake-page-photo.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
@@ -75,6 +77,8 @@ export interface AppOptions {
   beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
   /** Test seam for mistake-photo expiry and startup cleanup. */
   mistakePhotoWorkflow?: MistakePhotoWorkflow;
+  /** Page-photo multi-candidate workflow. Defaults to a fresh in-DB instance. */
+  pagePhotoWorkflow?: MistakePagePhotoWorkflow;
 }
 
 export function createApp(opts: AppOptions): express.Express {
@@ -159,6 +163,15 @@ export function createApp(opts: AppOptions): express.Express {
   registerCaptureRoutes(app, {
     db,
     beforeSourceEventAppend: opts.beforeSourceEventAppend,
+  });
+  const pagePhotoWorkflow = opts.pagePhotoWorkflow ?? new MistakePagePhotoWorkflow({ db });
+  registerMistakePagePhotoRoutes(app, {
+    db,
+    logger,
+    visionClient: opts.visionClient === undefined ? null : opts.visionClient,
+    upload,
+    auth: deviceAuthenticator,
+    workflow: pagePhotoWorkflow,
   });
   registerQuizContextRoutes(app, { db });
   const integrationToken =
