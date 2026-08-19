@@ -30,6 +30,7 @@ import { registerGameRoutes } from "./routes/game.js";
 import { registerWriteRoutes } from "./routes/write.js";
 import { registerWhoamiRoutes } from "./routes/whoami.js";
 import { registerMistakeRoutes } from "./routes/mistake-api.js";
+import { registerCaptureRoutes } from "./routes/capture.js";
 import { registerQuizContextRoutes } from "./routes/quiz-context.js";
 import { registerIntegrationRoutes } from "./routes/integration.js";
 import { registerMnObservationRoutes } from "./routes/mn-observation.js";
@@ -152,6 +153,10 @@ export function createApp(opts: AppOptions): express.Express {
   });
   registerWhoamiRoutes(app, { db, version: "0.1.0", auth: deviceAuthenticator });
   registerMistakeRoutes(app, {
+    db,
+    beforeSourceEventAppend: opts.beforeSourceEventAppend,
+  });
+  registerCaptureRoutes(app, {
     db,
     beforeSourceEventAppend: opts.beforeSourceEventAppend,
   });

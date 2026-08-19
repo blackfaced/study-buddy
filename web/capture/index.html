@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#fff8e7">
+  <title>错题录入与小书童收件箱</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <link rel="stylesheet" href="/shared/theme.css">
+  <style>
+    body { display: grid; place-items: start center; padding: var(--space-5); }
+    main { width: min(100%, 560px); display: grid; gap: var(--space-5); }
+    h1 { margin: 0 0 var(--space-2); font-size: var(--text-display); }
+    h2 { margin: 0 0 var(--space-3); font-size: var(--text-h2); }
+    .card {
+      padding: var(--space-4);
+      border-radius: var(--radius-card);
+      background: var(--surface-elevated);
+      box-shadow: var(--shadow-soft);
+    }
+    .form { display: grid; gap: var(--space-3); }
+    label { display: grid; gap: var(--space-1); font-size: var(--text-caption); color: var(--text-secondary); }
+    input, select, textarea {
+      width: 100%;
+      padding: var(--space-2) var(--space-3);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius-input);
+      font: inherit;
+      background: var(--surface-input);
+    }
+    textarea { min-height: 4.5em; resize: vertical; }
+    .actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
+    .btn {
+      padding: var(--space-2) var(--space-4);
+      border-radius: var(--radius-pill);
+      border: 0;
+      font: inherit;
+      cursor: pointer;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-secondary { background: var(--surface-input); color: var(--text-primary); }
+    .status { font-size: var(--text-caption); color: var(--text-secondary); min-height: 1.2em; }
+    .status[data-tone="error"] { color: var(--color-error, #c0392b); }
+    .status[data-tone="success"] { color: var(--color-success, #1e8a4c); }
+    .inbox-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+    .inbox-entry {
+      padding: var(--space-3);
+      border-radius: var(--radius-input);
+      background: var(--surface-input);
+      display: grid; gap: var(--space-1);
+    }
+    .inbox-entry .meta { display: flex; gap: var(--space-2); font-size: 12px; color: var(--text-secondary); }
+    .pill {
+      display: inline-block;
+      padding: 1px var(--space-2);
+      border-radius: var(--radius-pill);
+      background: rgba(255, 107, 157, 0.15);
+      color: var(--accent);
+      font-size: 11px;
+    }
+    .pill[data-source="manual"] { background: rgba(74, 144, 226, 0.15); color: #2a6cb0; }
+    .pill[data-source="vision"] { background: rgba(155, 89, 182, 0.15); color: #6c3483; }
+    .inbox-empty { color: var(--text-secondary); font-size: var(--text-caption); }
+    .back-link { display: inline-block; margin-bottom: var(--space-3); color: var(--text-secondary); }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="/">‹ 返回学习空间</a>
+    <h1>错题录入 & 收件箱</h1>
+
+    <section class="card" aria-label="手动录入新错题">
+      <h2>录入新错题</h2>
+      <form class="form" id="manual-form" novalidate>
+        <label>
+          题目
+          <textarea name="problem" id="problem" required maxlength="200" placeholder="例如: 8 + 5 = ?"></textarea>
+        </label>
+        <label>
+          你写的答案
+          <input name="userAnswer" id="userAnswer" required maxlength="100" placeholder="例如: 12">
+        </label>
+        <label>
+          正确答案
+          <input name="correctAnswer" id="correctAnswer" required maxlength="100" placeholder="例如: 13">
+        </label>
+        <label>
+          学科
+          <select name="subject" id="subject" required>
+            <option value="math">数学</option>
+            <option value="chinese">语文</option>
+            <option value="english">英语</option>
+          </select>
+        </label>
+        <label>
+          错因 (可选)
+          <input name="errorType" id="errorType" maxlength="64" placeholder="例如: 计算错误">
+        </label>
+        <div class="actions">
+          <button class="btn btn-secondary" type="reset" id="cancel-btn">取消</button>
+          <button class="btn btn-primary" type="submit" id="submit-btn">确认录入</button>
+        </div>
+        <div class="status" id="form-status" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section class="card" aria-label="今日待订正">
+      <h2>今日待订正 <span id="inbox-count" class="pill">0</span></h2>
+      <ul class="inbox-list" id="inbox-list">
+        <li class="inbox-empty">正在加载…</li>
+      </ul>
+    </section>
+  </main>
+  <script type="module" src="./capture.js"></script>
+</body>
+</html>

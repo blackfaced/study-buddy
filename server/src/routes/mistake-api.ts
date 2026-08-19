@@ -186,6 +186,14 @@ export interface InsertMistakeInput {
   correctAnswer: string | null;
   errorType: string | null;
   source: string;
+  /**
+   * SB124-T03 (#127): subject label (e.g. "math", "chinese", "english").
+   * The schema column was added in db-migrate.ts; this input is optional
+   * (older callers like /api/game/mistake don't set it). The picker does
+   * not currently filter by subject — this is just a label the parent
+   * portal can group on.
+   */
+  subject?: string | null;
 }
 
 export interface InsertMistakeResult {
@@ -325,20 +333,20 @@ export function insertMistake(
     const caseResult = db.prepare(`
       INSERT INTO mistake_cases (
         case_id, original_mistake_id, child_id, source, opened_at,
-        session_id, ts, problem, error_type, hint, level,
+        session_id, ts, problem, error_type, hint, level, subject,
         image_path, vision_input, vision_reasoning, vision_model, vision_ts,
         user_answer, correct_answer,
         evidence_key, evidence_status, evidence_method, evidence_confirmed_at
       ) VALUES (
         ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?,
         NULL, NULL, NULL, NULL, NULL,
         ?, ?,
         NULL, NULL, NULL, NULL
       )
     `).run(
       caseId, mistakeId, input.childId, input.source, occurredAt,
-      sessionId, occurredAt, input.problem, input.errorType, null, level,
+      sessionId, occurredAt, input.problem, input.errorType, null, level, input.subject ?? null,
       input.userAnswer, input.correctAnswer,
     );
     if (caseResult.changes !== 1) {
