@@ -146,3 +146,41 @@ test("provider failure returns to preview and keeps the image retakeable", async
   assert.equal(flow.state.error, "分析失败，请重试");
   assert.equal(calls.revoke, 0);
 });
+
+test("analyze result with confidence 'ok' lands the review state as confidence 'ok'", async () => {
+  const { flow } = setup({
+    upload: async () => ({
+      draftId: "draft_frontend_1", problemText: "1 + 1 = ?", expiresAt: 10, confidence: "ok",
+    }),
+  });
+  flow.preview({}, "blob:preview");
+  assert.equal(await flow.analyze("session-1"), true);
+  assert.equal(flow.state.phase, "review");
+  assert.equal(flow.state.confidence, "ok");
+  assert.equal(flow.state.problemText, "1 + 1 = ?");
+});
+
+test("analyze result with confidence 'low' (无法识别) lands the review state as confidence 'low'", async () => {
+  const { flow } = setup({
+    upload: async () => ({
+      draftId: "draft_frontend_1", problemText: "无法识别", expiresAt: 10, confidence: "low",
+    }),
+  });
+  flow.preview({}, "blob:preview");
+  assert.equal(await flow.analyze("session-1"), true);
+  assert.equal(flow.state.phase, "review");
+  assert.equal(flow.state.confidence, "low");
+  assert.equal(flow.state.problemText, "无法识别");
+});
+
+test("analyze result without confidence field defaults to 'ok' (backward compat)", async () => {
+  const { flow } = setup({
+    upload: async () => ({
+      draftId: "draft_frontend_1", problemText: "1 + 1 = ?", expiresAt: 10,
+      // no `confidence` field
+    }),
+  });
+  flow.preview({}, "blob:preview");
+  assert.equal(await flow.analyze("session-1"), true);
+  assert.equal(flow.state.confidence, "ok");
+});

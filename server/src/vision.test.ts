@@ -3,6 +3,7 @@ import {
   buildMistakePrompt,
   parseVisionResponse,
   analyzeMistakeImage,
+  evaluateVisionConfidence,
   type VisionClient,
 } from "./vision.js";
 
@@ -128,5 +129,73 @@ describe("analyzeMistakeImage", () => {
     };
     const result = await analyzeMistakeImage(client, "BASE64", { model: "MiniMax-M3" });
     expect(result.model).toBe("MiniMax-M3");
+  });
+
+  it("marks confidence 'ok' for a well-formed problem text", async () => {
+    const client: VisionClient = {
+      async chat() {
+        return { content: "题目：1 + 1 = ?\n思路：加法", raw: {} };
+      },
+    };
+    const result = await analyzeMistakeImage(client, "BASE64");
+    expect(result.confidence).toBe("ok");
+  });
+
+  it("marks confidence 'low' when the model returns '无法识别'", async () => {
+    const client: VisionClient = {
+      async chat() {
+        return { content: "无法识别", raw: {} };
+      },
+    };
+    const result = await analyzeMistakeImage(client, "BASE64");
+    expect(result.problemText).toBe("无法识别");
+    expect(result.confidence).toBe("low");
+  });
+
+  it("marks confidence 'low' when the problemText is empty", async () => {
+    const client: VisionClient = {
+      async chat() {
+        return { content: "", raw: {} };
+      },
+    };
+    const result = await analyzeMistakeImage(client, "BASE64");
+    expect(result.problemText).toBe("");
+    expect(result.confidence).toBe("low");
+  });
+
+  it("marks confidence 'low' when the problemText is too short (< 2 codepoints)", async () => {
+    const client: VisionClient = {
+      async chat() {
+        return { content: "题目：1\n思路：? ", raw: {} };
+      },
+    };
+    const result = await analyzeMistakeImage(client, "BASE64");
+    expect(result.problemText).toBe("1");
+    expect(result.confidence).toBe("low");
+  });
+});
+
+describe("evaluateVisionConfidence", () => {
+  it("returns 'low' for empty text", () => {
+    expect(evaluateVisionConfidence("")).toBe("low");
+  });
+
+  it("returns 'low' for the '无法识别' surrender token", () => {
+    expect(evaluateVisionConfidence("无法识别")).toBe("low");
+  });
+
+  it("returns 'low' for text containing only whitespace", () => {
+    expect(evaluateVisionConfidence("   ")).toBe("low");
+  });
+
+  it("returns 'low' for very short text (< 2 codepoints after trim)", () => {
+    expect(evaluateVisionConfidence("1")).toBe("low");
+    // "ab" is 2 codepoints, accepted as a real (if unlikely) problem
+    expect(evaluateVisionConfidence("ab")).toBe("ok");
+  });
+
+  it("returns 'ok' for normal-length problem text", () => {
+    expect(evaluateVisionConfidence("1 + 1 = ?")).toBe("ok");
+    expect(evaluateVisionConfidence("汉字")).toBe("ok");
   });
 });

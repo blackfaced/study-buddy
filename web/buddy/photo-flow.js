@@ -73,6 +73,7 @@
             phase: "review",
             draftId: result.draftId,
             problemText: result.problemText,
+            confidence: result.confidence ?? "ok",
             expiresAt: result.expiresAt,
             error: "",
           });
@@ -116,6 +117,7 @@
             phase: "review",
             draftId: result.draftId,
             problemText: result.problemText,
+            confidence: result.confidence ?? "ok",
             expiresAt: result.expiresAt,
           });
           return true;
@@ -139,6 +141,7 @@
       previewUrl: "",
       draftId: "",
       problemText: "",
+      confidence: "ok",
       expiresAt: 0,
       error: "",
       result: null,

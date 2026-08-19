@@ -13,6 +13,14 @@ export interface MistakePhotoDraft {
   deviceId: string;
   proposedProblem: string;
   model: string;
+  /**
+   * Heuristic confidence signal from the vision analysis ("ok" | "low").
+   * "low" means the parent portal should surface a "重拍或手改"
+   * affordance. Exposed via the draft response so the client can
+   * decide what to render. Defaults to "ok" if the analyzer didn't
+   * provide one (backward compat with custom test fakes).
+   */
+  confidence: "ok" | "low";
   createdAt: number;
   expiresAt: number;
   state: "analyzing" | "review";
@@ -34,7 +42,7 @@ interface AnalyzeInput {
   deviceId: string;
   bytes: Buffer;
   extension: string;
-  analyze: (signal: AbortSignal) => Promise<{ problemText: string; model: string }>;
+  analyze: (signal: AbortSignal) => Promise<{ problemText: string; model: string; confidence?: "ok" | "low" }>;
 }
 
 export class MistakePhotoWorkflow {
@@ -72,6 +80,10 @@ export class MistakePhotoWorkflow {
       deviceId: input.deviceId,
       proposedProblem: "",
       model: "",
+      // Default to "ok"; the analyze() result will overwrite if the
+      // provider returned a confidence signal. This keeps existing
+      // test fakes (which return only { problemText, model }) working.
+      confidence: "ok",
       createdAt,
       expiresAt: createdAt + this.#ttlMs,
       state: "analyzing",
@@ -98,6 +110,7 @@ export class MistakePhotoWorkflow {
         ]);
         draft.proposedProblem = normalizeProblemText(analysis.problemText);
         draft.model = analysis.model;
+        if (analysis.confidence) draft.confidence = analysis.confidence;
         draft.state = "review";
         delete draft.pending;
         delete draft.abort;

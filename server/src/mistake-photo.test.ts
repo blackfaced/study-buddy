@@ -102,6 +102,8 @@ describe("confirmed mistake-photo workflow", () => {
       draftId: "draft_12345678",
       state: "review",
       problemText: "1 + 1",
+      // Vision client returns normal problem → confidence "ok"
+      confidence: "ok",
     });
     expect(response.body).not.toHaveProperty("reasoning");
     expect(response.body).not.toHaveProperty("imagePath");
@@ -151,6 +153,22 @@ describe("confirmed mistake-photo workflow", () => {
     });
     const row = db.prepare("SELECT problem, evidence_method FROM mistakes").get();
     expect(row).toEqual({ problem: "1 + 2\n= ?", evidence_method: "explicit_correction" });
+  });
+
+  it("exposes confidence 'low' on the draft response when VLM returns 无法识别", async () => {
+    const app = makeApp({
+      visionClient: fakeVisionClient("无法识别"),
+    });
+    const sessionId = await startSession(app);
+    const draftId = "draft_low_conf";
+    const response = await analyze(app, sessionId, draftId);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      draftId,
+      state: "review",
+      problemText: "无法识别",
+      confidence: "low",
+    });
   });
 
   it("cancels a reviewed draft without creating learning evidence", async () => {
