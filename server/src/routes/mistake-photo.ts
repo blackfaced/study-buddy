@@ -291,11 +291,18 @@ function safePhotoUpload(upload: any) {
   };
 }
 
-function publicDraft(draft: { id: string; proposedProblem: string; expiresAt: number; state: string }) {
+function publicDraft(draft: {
+  id: string;
+  proposedProblem: string;
+  expiresAt: number;
+  state: string;
+  confidence: "ok" | "low";
+}) {
   return {
     draftId: draft.id,
     state: draft.state,
     problemText: draft.proposedProblem,
+    confidence: draft.confidence,
     expiresAt: draft.expiresAt,
   };
 }

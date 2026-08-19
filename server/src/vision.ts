@@ -27,11 +27,23 @@ export interface VisionClient {
   }): Promise<{ content: string; raw: unknown }>;
 }
 
+export type VisionConfidence = "ok" | "low";
+
 export interface MistakeAnalysis {
   problemText: string;
   reasoning: string;
   model: string;
   raw: unknown;
+  /**
+   * Heuristic confidence signal for the client. "low" means the model
+   * either returned "无法识别", an empty/very-short problem, or other
+   * failure markers — the parent portal should surface a "重拍或手改"
+   * affordance. "ok" means a normal problem text was parsed.
+   *
+   * The threshold is intentionally conservative: better to nudge the
+   * parent to double-check than to silently accept garbage.
+   */
+  confidence: VisionConfidence;
 }
 
 const MISTAKE_SYSTEM_PROMPT = `你是一个陪伴小学二年级孩子写作业的学习助手"小书童"。
@@ -114,7 +126,34 @@ export async function analyzeMistakeImage(
     reasoning,
     model: options.model ?? "MiniMax-M3",
     raw,
+    confidence: evaluateVisionConfidence(problemText),
   };
+}
+
+/**
+ * Heuristic: classify a vision-parsed problem text as "ok" (parent can
+ * accept with reasonable confidence) or "low" (parent should retake the
+ * photo or type manually). Pure function, unit-tested separately.
+ *
+ *   empty / whitespace / "无法识别" / shorter than 3 chars after trim
+ *   → "low"
+ *   anything else
+ *   → "ok"
+ *
+ * Note: this is intentionally permissive on the upper bound — a long
+ * "题目: ..." field with surrounding commentary is still "ok" because
+ * the parent will see the whole text and can edit. The check is about
+ * catching obvious failure modes, not validating accuracy.
+ */
+export function evaluateVisionConfidence(problemText: string): VisionConfidence {
+  const trimmed = (problemText ?? "").trim();
+  if (!trimmed) return "low";
+  if (trimmed === "无法识别") return "low";
+  // Codepoint count (not UTF-16 code-unit count) so a 2-char CJK phrase
+  // like "汉字" doesn't trip the "too short" rule. 1-codepoint results
+  // are almost always a model error (e.g. "1" from a garbled read).
+  if ([...trimmed].length < 2) return "low";
+  return "ok";
 }
 
 // v0.7 (issue #57 v0.2): extract individual CJK characters from a photo
