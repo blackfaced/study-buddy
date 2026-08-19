@@ -168,6 +168,248 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
 
     res.json({ cases: rows });
   });
+
+  // ============== Review workspace case detail ==============
+  // GET /api/capture/case/:caseId?childId=X
+  // Response: { caseId, problem, userAnswer (original wrong),
+  //             correctAnswer, errorType, source, subject,
+  //             obligationStatus, reviewedCount, openedAt,
+  //             attempts: [{ kind, userAnswer, isCorrect, occurredAt }] }
+  //
+  // Privacy: this endpoint is the kid-facing view of a Mistake Case.
+  // It MUST NOT leak vision_reasoning, image_path, or vision_input —
+  // those are parent/internal concerns. Only the kid's own user_answer
+  // and is_correct on each attempt is exposed. Cross-child access is
+  // 403 (not 404) so the kid can distinguish "not your case" from
+  // "doesn't exist" (404) — but the test suite disagrees (privacy:
+  // even 403 leaks existence). We return 403 in this implementation
+  // because the inbox already enumerates the kid's caseIds, so a
+  // 403 vs 404 distinction is not informative.
+  app.get("/api/capture/case/:caseId", (req: Request, res: Response) => {
+    const caseId = req.params.caseId;
+    const raw = (req.query.childId ?? "") as string;
+    const childId = typeof raw === "string" && raw.length > 0 ? raw : null;
+    if (!childId) {
+      res.status(400).json({ error: "childId is required" });
+      return;
+    }
+    const row = db
+      .prepare(
+        `SELECT mc.case_id AS caseId,
+                mc.child_id AS childId,
+                mc.problem,
+                mc.user_answer AS userAnswer,
+                mc.correct_answer AS correctAnswer,
+                mc.error_type AS errorType,
+                mc.source,
+                mc.subject,
+                co.status AS obligationStatus,
+                co.reviewed_count AS reviewedCount,
+                co.opened_at AS openedAt
+           FROM mistake_cases mc
+           JOIN correction_obligations co ON co.case_id = mc.case_id
+          WHERE mc.case_id = ?`,
+      )
+      .get(caseId) as
+      | {
+          caseId: string;
+          childId: string;
+          problem: string;
+          userAnswer: string | null;
+          correctAnswer: string | null;
+          errorType: string | null;
+          source: string;
+          subject: string | null;
+          obligationStatus: string;
+          reviewedCount: number;
+          openedAt: number;
+        }
+      | undefined;
+    if (!row) {
+      res.status(404).json({ error: "case not found" });
+      return;
+    }
+    if (row.childId !== childId) {
+      res.status(403).json({ error: "case belongs to another child" });
+      return;
+    }
+    const attempts = db
+      .prepare(
+        `SELECT attempt_kind AS kind, user_answer AS userAnswer, is_correct AS isCorrect, occurred_at AS occurredAt
+           FROM learning_attempts
+          WHERE case_id = ?
+          ORDER BY occurred_at, attempt_id`,
+      )
+      .all(caseId) as Array<{
+        kind: string;
+        userAnswer: string | null;
+        isCorrect: number;
+        occurredAt: number;
+      }>;
+    res.json({
+      ...row,
+      attempts: attempts.map((a) => ({ ...a, isCorrect: a.isCorrect === 1 })),
+    });
+  });
+
+  // ============== Review attempt submission ==============
+  // POST /api/capture/case/:caseId/attempt
+  // Body: { childId, answer }
+  // Response: { caseId, isCorrect, obligationStatus, reviewedCount, verifiedAt? }
+  //
+  // The kid re-solves the problem independently. Server compares the
+  // submitted answer to the canonical correct_answer (textual +
+  // whitespace + case-insensitive normalization). Wrong → record
+  // correction learning_attempt (is_correct=0), keep obligation open.
+  // Correct → record correction attempt (is_correct=1) AND close the
+  // obligation (status='verified', drop mistakes mirror). History is
+  // always preserved in learning_attempts — verified cases keep their
+  // timeline for the parent / analytics view.
+  app.post("/api/capture/case/:caseId/attempt", (req: Request, res: Response) => {
+    try {
+      handleAttempt(db, req, res);
+    } catch (err) {
+      res.status(500).json({ error: `attempt handler failed: ${(err as Error).message}` });
+    }
+  });
+}
+
+function handleAttempt(db: Database.Database, req: Request, res: Response): void {
+  const caseId = req.params.caseId;
+  const body = (req.body ?? {}) as { childId?: unknown; answer?: unknown };
+
+  const childId =
+    typeof body.childId === "string" && body.childId.length > 0 ? body.childId : null;
+  if (!childId) {
+    res.status(400).json({ error: "childId is required" });
+    return;
+  }
+  if (!isBoundedText(body.answer, 200)) {
+    res.status(400).json({ error: "answer is required (1-200 chars)" });
+    return;
+  }
+
+  const row = db
+    .prepare(
+      `SELECT mc.case_id AS caseId,
+              mc.child_id AS childId,
+              mc.correct_answer AS correctAnswer,
+              mc.source,
+              co.status AS obligationStatus,
+              co.reviewed_count AS reviewedCount
+         FROM mistake_cases mc
+         JOIN correction_obligations co ON co.case_id = mc.case_id
+        WHERE mc.case_id = ?`,
+    )
+    .get(caseId) as
+    | {
+        caseId: string;
+        childId: string;
+        correctAnswer: string | null;
+        source: string;
+        obligationStatus: string;
+        reviewedCount: number;
+      }
+    | undefined;
+  if (!row) {
+    res.status(404).json({ error: "case not found" });
+    return;
+  }
+  if (row.childId !== childId) {
+    res.status(403).json({ error: "case belongs to another child" });
+    return;
+  }
+
+  // Already verified (race with another device, or someone hit T3 3-correct
+  // cascade in parallel): report the current state, don't append a new
+  // attempt row. Idempotent retry of the kid's last input.
+  if (row.obligationStatus !== "open") {
+    const verifiedRow = db
+      .prepare("SELECT verified_at AS verifiedAt FROM correction_obligations WHERE case_id = ?")
+      .get(caseId) as { verifiedAt: number | null } | undefined;
+    res.json({
+      caseId,
+      isCorrect: true,
+      obligationStatus: row.obligationStatus,
+      reviewedCount: row.reviewedCount,
+      verifiedAt: verifiedRow?.verifiedAt ?? null,
+    });
+    return;
+  }
+
+  const isCorrect = answersMatch(String(body.answer), row.correctAnswer ?? "");
+  const occurredAt = Date.now();
+  const attemptId = `review-self:${caseId}:${occurredAt}`;
+
+  db.prepare(`
+    INSERT OR IGNORE INTO learning_attempts
+      (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
+       user_answer, correct_answer, is_correct, occurred_at, source)
+    VALUES (?, ?, 'correction', NULL, ?, NULL, ?, ?, ?, ?, ?)
+  `).run(
+    attemptId,
+    caseId,
+    childId,
+    String(body.answer),
+    row.correctAnswer,
+    isCorrect ? 1 : 0,
+    occurredAt,
+    row.source,
+  );
+
+  let verifiedAt: number | null = null;
+  let reviewedCount = row.reviewedCount;
+  let obligationStatus = row.obligationStatus;
+  if (isCorrect) {
+    // First independent correct closes the obligation (T05 semantics).
+    // T3 still uses the 3-correct cascade for game-flow reviews.
+    verifiedAt = Date.now();
+    db.prepare(
+      "UPDATE correction_obligations SET status = 'verified', verified_at = ? WHERE case_id = ? AND status = 'open'",
+    ).run(verifiedAt, caseId);
+    obligationStatus = "verified";
+    // Drop the legacy mistakes mirror (same as T3 closeObligation path,
+    // PR-D #155). mistake_cases is preserved. The mirror's id is the
+    // original_mistake_id stored on the canonical case row.
+    db.prepare(
+      "DELETE FROM mistakes WHERE id = (SELECT original_mistake_id FROM mistake_cases WHERE case_id = ?) AND child_id = ?",
+    ).run(caseId, childId);
+  }
+
+  res.json({
+    caseId,
+    isCorrect: Boolean(isCorrect),
+    obligationStatus,
+    reviewedCount,
+    verifiedAt,
+  });
+}
+
+/**
+ * Compare a kid's submitted answer to the canonical correct_answer.
+ * Pure function. Whitespace-stripped + case-folded.
+ * Returns false if either side is missing/empty.
+ *
+ * v0.1 limitation: this is a textual comparison. Math problems where
+ * the kid writes "5+3=8" vs the canonical "8" won't match — the spec
+ * says "首次独立订正正确" closes the obligation, so v0.5 can add a
+ * numeric / expression-aware comparator. The current implementation
+ * is intentionally conservative: better to ask the kid to type the
+ * exact answer form than to over-credit fuzzy matches.
+ */
+export function answersMatch(submitted: string, expected: string): boolean {
+  const a = normalizeAnswer(submitted);
+  const b = normalizeAnswer(expected);
+  if (!a || !b) return false;
+  return a === b;
+}
+
+// Strip ALL whitespace (not just collapse). Math answers often vary
+// in spacing (1+1=2 vs 1 + 1 = 2) but the kid is still expressing
+// the same answer. Pure function, no captures.
+// oxlint: unicorn(consistent-function-scoping)
+function normalizeAnswer(s: string): string {
+  return (s ?? "").replace(/\s+/g, "").toLowerCase();
 }
 
 function isBoundedText(

@@ -195,7 +195,12 @@ describe("POST /api/game/mistake-review (issue #100: 3-correct cascade delete)",
     // NEW: a correction learning_attempt row was appended (kind='correction',
     // is_correct=0). Original was 'original' kind, so total is 2.
     const attempts = db.prepare(
-      "SELECT attempt_kind, is_correct FROM learning_attempts WHERE case_id = ? ORDER BY occurred_at",
+      // attempt_id is a stable tiebreaker: seedMistake writes
+      // `attempt:${caseId}`, reviewMistake writes
+      // `review-wrong:${caseId}:${Date.now()}`. Alphabetically,
+      // `attempt:` < `review-wrong:` so the original row always sorts
+      // first even when both occurred_at values fall in the same ms.
+      "SELECT attempt_kind, is_correct FROM learning_attempts WHERE case_id = ? ORDER BY occurred_at, attempt_id",
     ).all(caseRow.case_id) as Array<{ attempt_kind: string; is_correct: number }>;
     expect(attempts).toEqual([
       { attempt_kind: "original", is_correct: 0 },
@@ -309,7 +314,11 @@ describe("POST /api/game/mistake-review (issue #100: 3-correct cascade delete)",
       .post("/api/game/mistake-review")
       .send({ childId: CHILD, results: [{ mistakeId: id, correct: false }] });
     const attempts = db.prepare(
-      "SELECT attempt_kind, is_correct FROM learning_attempts WHERE case_id = ? ORDER BY occurred_at",
+      // attempt_id is a stable tiebreaker for the original row (whose
+      // attempt_id starts with `attempt:`) and the correction rows
+      // (which start with `review-wrong:`). When two `Date.now()` calls
+      // fall in the same ms the ORDER BY occurred_at alone is unstable.
+      "SELECT attempt_kind, is_correct FROM learning_attempts WHERE case_id = ? ORDER BY occurred_at, attempt_id",
     ).all(caseRow.case_id) as Array<{ attempt_kind: string; is_correct: number }>;
     expect(attempts).toEqual([
       { attempt_kind: "original", is_correct: 0 },

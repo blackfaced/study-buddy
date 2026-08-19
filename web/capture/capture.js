@@ -94,15 +94,24 @@ function renderInboxEntry(c) {
   const subject = c.subject ? SUBJECT_LABELS[c.subject] || c.subject : "未分科";
   const source = c.source || "game";
   const errorType = c.errorType ? ` · ${escapeHtml(c.errorType)}` : "";
+  // The whole entry is a link to the review workspace (SB124-T05 #129).
+  // childId is hardcoded to "default" for now — v0.1 has no multi-child
+  // picker on the inbox page (the /buddy/ PIN gate already scoped
+  // the request to one kid). The review workspace reads childId from
+  // the URL and falls back to "default" if missing.
+  const reviewUrl = `/review/?caseId=${encodeURIComponent(c.caseId)}&childId=default`;
   return `
     <li class="inbox-entry">
-      <div>${escapeHtml(c.problem || "(无题目)")}</div>
-      <div class="meta">
-        <span class="pill" data-source="${escapeAttr(source)}">${escapeHtml(source)}</span>
-        <span>${escapeHtml(subject)}</span>
-        <span>订正 ${c.reviewedCount}/3</span>
-        ${errorType}
-      </div>
+      <a class="inbox-link" href="${reviewUrl}">
+        <div>${escapeHtml(c.problem || "(无题目)")}</div>
+        <div class="meta">
+          <span class="pill" data-source="${escapeAttr(source)}">${escapeHtml(source)}</span>
+          <span>${escapeHtml(subject)}</span>
+          <span>订正 ${c.reviewedCount}/3</span>
+          ${errorType}
+        </div>
+        <span class="open-hint" aria-hidden="true">订正 ›</span>
+      </a>
     </li>
   `;
 }
