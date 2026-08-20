@@ -535,8 +535,33 @@ async function beginBuddyGate() {
 }
 
 async function ensurePairedDevice() {
+  // v0.5+ (no-pairing): the kid browser no longer needs a 6-digit
+  // code. requireDevice is a no-op on the server, so any cached
+  // credential (or none at all) is fine. The PIN gate is the only
+  // thing the kid still has to enter, and that gates the LLM call.
+  //
+  // The pairing overlay is preserved as dead code so the original
+  // back-compat flow still works for parents with a cached
+  // `Authorization: Bearer sb_…` header — but no UI surfaces it.
   if (!window.StudyBuddy.auth.getCredential()) {
-    showPairing();
+    // No credential cached. Skip the pairing prompt entirely and
+    // head straight to the PIN gate (or to the app if PIN is unset).
+    try {
+      const active = await window.StudyBuddy.fetch('/api/session/active');
+      if (active.session) {
+        window.Buddy.state.sessionId = active.session.sessionId;
+        window.Buddy.state.state = window.Buddy.state.restoredState(active.session.subject);
+        statusEl.textContent = window.Buddy.state.state === 'done'
+          ? '可以继续跟小书童聊天'
+          : '可以继续上次的作业';
+      }
+    } catch (err) {
+      statusEl.textContent = '服务器连不上';
+      document.getElementById('server-config').style.display = 'flex';
+      return;
+    }
+    pairOverlay.style.display = 'none';
+    await beginBuddyGate();
     return;
   }
   try {
@@ -552,9 +577,12 @@ async function ensurePairedDevice() {
     await beginBuddyGate();
   } catch (err) {
     if (err && err.status === 401) {
+      // v0.5+: 401 should not happen (requireDevice is no-op). Keep
+      // the back-compat path for any old proxy / future regression
+      // where the server actually rejects the request.
       window.StudyBuddy.auth.clearCredential();
-      showPairing();
-      return;
+      // Recurse — the no-credential branch above will run.
+      return ensurePairedDevice();
     }
     statusEl.textContent = '服务器连不上';
     document.getElementById('server-config').style.display = 'flex';

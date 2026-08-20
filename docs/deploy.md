@@ -24,7 +24,9 @@ npm install --prefix server
 bin/study-buddy-server.sh start
 bin/study-buddy-server.sh status
 bin/study-buddy-server.sh logs
-bin/study-buddy-pair.sh          # issue a 6-digit code for one browser
+# v0.5+ (no-pairing): the kid browser can hit any /api/* route
+# without redemption. `bin/study-buddy-pair.sh` is deprecated and
+# kept only for parents with existing scripts.
 ```
 
 ## Commands
@@ -41,31 +43,33 @@ bin/study-buddy-pair.sh          # issue a 6-digit code for one browser
 
 ## Pairing a child browser
 
-The child browser must be paired before it can start, resume, write to, or end
-a learning session. Generate a one-time code on the Mac mini, then enter it in
-the `/buddy/` pairing screen:
+**v0.5+: no pairing required.** The kid browser can hit any `/api/*` route
+without redemption. `requireDevice` is a no-op that auto-issues a virtual
+"default" device (childId="default", deviceId="default"). The migration
+seeds a `paired_devices` row with `device_id="default"` so the FK on
+`sessions.device_id` keeps working for sessions that record a device
+attribution.
+
+The 4-digit `BUDDY_PIN` is unchanged — it still gates `/api/buddy/unlock`
+and the LLM call, which is the actual safety concern. Network-level
+access is still constrained: `requireDevice` enforces HTTPS-or-loopback,
+so requests must come from the home network, not a neighbour.
+
+**Back-compat for parents with existing scripts.** The `bin/study-buddy-pair.sh`
+script and the `/api/pair/*` routes still work — `DeviceAuth.issuePairingCode`
+and `redeemPairingCode` are unchanged. The credential they issue is silently
+ignored by the new no-op `requireDevice`. If you have an existing
+`Authorization: Bearer sb_…` header in your `curl` commands, it will
+continue to be accepted (just unused).
+
+To migrate an old setup forward:
 
 ```bash
-bin/study-buddy-pair.sh
+# (No-op for v0.5+ — kid browser no longer needs a code.)
+# bin/study-buddy-pair.sh          # deprecated; kept for back-compat
+# bin/study-buddy-pair.sh --reset  # deprecated; the 'default' device
+#                                  # is never revoked by this script
 ```
-
-The code expires after about five minutes and can be redeemed once. The browser
-stores one opaque device credential in local storage; the server stores only
-its SHA-256 digest. Ten failed guesses from one client trigger a five-minute
-lockout. Pairing redemption and authenticated device requests require HTTPS on
-the LAN; plaintext HTTP is accepted only from loopback for local development.
-The browser also refuses to attach its credential to an insecure or cross-origin
-request, and the write app vendors Hanzi Writer locally so remotely served code
-cannot read the origin-wide credential. To revoke every browser for the default
-child and generate a replacement code:
-
-```bash
-bin/study-buddy-pair.sh --reset
-```
-
-Starting a new session supersedes only the same device's active session for the
-same child. Refreshing `/buddy/` resumes that device's active session; it never
-attaches to another device's session.
 
 ## Log format
 
