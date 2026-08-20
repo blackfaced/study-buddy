@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# DEPRECATED as of v0.5 (no-pairing). Kid browsers no longer need a
+# 6-digit code to hit /api/* — the requireDevice middleware is a
+# no-op. This script is kept for parents with existing shell
+# workflows that still call it; the issued code (and any
+# Authorization: Bearer sb_... header) is silently accepted but
+# unused by the server. To migrate forward, just stop running this
+# script and let the kid open the URL directly.
+
 # Generate a one-time browser pairing code from the Mac mini itself.
 
 set -euo pipefail

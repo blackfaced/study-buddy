@@ -94,22 +94,36 @@ export class DeviceAuth {
     })();
   }
 
+  /**
+   * No-op device auth (v0.5: removed pairing friction).
+   *
+   * study-buddy v0.1 required every kid device to redeem a 6-digit
+   * pairing code before any /api/* route would talk to it. The
+   * credential lived in localStorage and was lost on cache clear,
+   * forcing the kid (or parent) to re-pair. For a single-child home
+   * product this friction blocked actual use.
+   *
+   * The middleware now:
+   *   - enforces HTTPS-or-loopback (so requests come from the
+   *     home network, not a neighbour)
+   *   - assigns a virtual "default" device so downstream code that
+   *     reads `devicePrincipal(res)` keeps working
+   *   - accepts any old `Authorization: Bearer sb_…` credential
+   *     and silently ignores it (back-compat for parents with
+   *     existing paired devices)
+   *
+   * `issuePairingCode` / `redeemPairingCode` are kept so the
+   * `bin/study-buddy-pair.sh` script still works for parents who
+   * already use it — but no UI surfaces a pairing prompt anymore.
+   * The `paired_devices` table stays in the schema for back-compat.
+   */
   readonly requireDevice: RequestHandler = (req, res, next) => {
     if (!this.#isSecureRequest(req)) return secureTransportRequired(res);
-    const credential = bearerCredential(req);
-    if (!credential) return unauthorized(res);
-    const now = this.#now();
-    const device = this.#db.prepare(
-      `SELECT device_id AS deviceId, child_id AS childId, last_seen_at AS lastSeenAt
-         FROM paired_devices
-        WHERE credential_hash = ? AND revoked_at IS NULL`,
-    ).get(digest(credential)) as (DevicePrincipal & { lastSeenAt: number }) | undefined;
-    if (!device) return unauthorized(res);
-    if (now - device.lastSeenAt >= 60_000) {
-      this.#db.prepare("UPDATE paired_devices SET last_seen_at = ? WHERE device_id = ?")
-        .run(now, device.deviceId);
-    }
-    res.locals.device = { deviceId: device.deviceId, childId: device.childId };
+    // Read (and ignore) any bearer credential for back-compat with
+    // parents who have an old `Authorization: Bearer sb_…` header in
+    // their curl commands / scripts. We do NOT enforce it.
+    bearerCredential(req);
+    res.locals.device = { deviceId: "default", childId: "default" };
     next();
   };
 }
@@ -133,10 +147,6 @@ function bearerCredential(req: Request): string | null {
 
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function unauthorized(res: Response): void {
-  res.status(401).json({ error: "device authentication required" });
 }
 
 function secureTransportRequired(res: Response): void {

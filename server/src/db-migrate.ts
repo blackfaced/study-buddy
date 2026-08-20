@@ -500,6 +500,18 @@ export function migrateSchema(db: Database.Database): void {
       JSON.stringify(["作业", "老师", "课本", "同学", "数学", "语文", "英语", "拼音", "生字"])
     );
   }
+
+  // v0.5 (no-pairing): seed a virtual "default" device so sessions /
+  // mistake-photo routes that still write device_id can satisfy the
+  // FK without requiring every kid device to redeem a pairing code.
+  // The credential hash is the literal "noop" marker — no real
+  // device will ever match it, and requireDevice no longer reads
+  // paired_devices anyway.
+  db.prepare(
+    `INSERT OR IGNORE INTO paired_devices
+       (device_id, child_id, credential_hash, device_name, created_at, last_seen_at)
+     VALUES ('default', 'default', 'noop', 'default (no pairing)', 0, 0)`,
+  ).run();
 }
 
 function ensureMistakeCompatibilityIndexes(db: Database.Database): void {
