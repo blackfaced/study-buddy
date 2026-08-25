@@ -93,7 +93,11 @@ cmd_start() {
   STUDY_DB="$DB_PATH" \
   MISTAKES_DIR="$MISTAKES_DIR" \
   LOG_FILE="$LOGFILE" \
-  nohup npx tsx server/src/index.ts \
+  # Why not "npx tsx": on macOS the npx-spawned tsx child exits a few
+  # seconds after listen() succeeds (npm exec passes through differently
+  # than direct invocation), so the test server looks "up" via the npm
+  # exec pid but lsof shows nothing on the port. Direct path is stable.
+  nohup ./server/node_modules/.bin/tsx server/src/index.ts \
     >"$STDOUT_LOG" 2>&1 &
   local pid=$!
   echo "$pid" > "$PIDFILE"
