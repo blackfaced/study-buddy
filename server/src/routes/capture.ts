@@ -44,6 +44,7 @@ import {
   ReviewAlreadyCompletedError,
   ReviewNotFoundError,
 } from "../review-workflow.js";
+import { aggregateParentSummary } from "../parent-summary.js";
 
 /**
  * Helper used by the confirm / reject / modify endpoints above.
@@ -831,6 +832,9 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
       }
     },
   );
+
+  // T09: parent summary route
+  registerParentSummaryRoute(app, { db });
 }
 
 function handleAttempt(db: Database.Database, req: Request, res: Response): void {
@@ -983,4 +987,29 @@ function isBoundedText(
     // oxlint-disable-next-line no-control-regex -- intentional: reject control chars in user input
     !/[\u0000-\u001f\u007f]/.test(value)
   );
+}
+
+// ============== T09 PR-C: parent summary ==============
+// GET /api/capture/parent-summary?childId=...
+//   200: { childId, generatedAt, stats, recurringErrorObservations }
+//   400: childId is required
+//
+// Safety: the response shape is the only thing on the wire. We
+// never include vision_input, image_path, raw chat text, OCR
+// text, or credential fields. The pure aggregator enforces this
+// structurally (it never selects those columns).
+export function registerParentSummaryRoute(
+  app: Express,
+  deps: { db: Database.Database },
+): void {
+  app.get("/api/capture/parent-summary", (req: Request, res: Response) => {
+    const raw = (req.query.childId ?? "") as string;
+    const childId = typeof raw === "string" && raw.length > 0 ? raw : null;
+    if (!childId) {
+      res.status(400).json({ error: "childId is required" });
+      return;
+    }
+    const summary = aggregateParentSummary(deps.db, childId);
+    res.json(summary);
+  });
 }
