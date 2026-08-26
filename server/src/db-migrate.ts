@@ -80,6 +80,39 @@ export function migrateSchema(db: Database.Database): void {
     `CREATE INDEX IF NOT EXISTS case_hypotheses_case_status
        ON case_hypotheses (case_id, status)`,
   );
+
+  // v0.5 (SB124-T07 #131): reinforcement attempts + state for
+  // similar-problems巩固 loop. Apply idempotently.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reinforcement_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      case_id TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      attempt_index INTEGER NOT NULL,
+      problem TEXT NOT NULL,
+      correct_answer TEXT NOT NULL,
+      user_answer TEXT,
+      is_correct INTEGER,
+      started_at INTEGER NOT NULL,
+      submitted_at INTEGER,
+      FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE,
+      FOREIGN KEY (child_id) REFERENCES children(id),
+      UNIQUE (case_id, attempt_index)
+    )
+  `);
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS reinforcement_attempts_case
+       ON reinforcement_attempts (case_id, attempt_index)`,
+  );
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_reinforcement_state (
+      case_id TEXT PRIMARY KEY,
+      reinforcement_attempts_made INTEGER NOT NULL DEFAULT 0,
+      last_reinforcement_correct_at INTEGER,
+      max_attempts INTEGER NOT NULL DEFAULT 3,
+      FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE
+    )
+  `);
   try { db.exec(`ALTER TABLE game_sessions ADD COLUMN source_record_id TEXT`); } catch {}
   // v0.5: vision-mistake columns
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN image_path TEXT`); } catch {}
