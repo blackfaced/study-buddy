@@ -52,6 +52,34 @@ export function migrateSchema(db: Database.Database): void {
   // to legacy DBs (fresh DBs got the columns via CREATE TABLE above).
   try { db.exec(`ALTER TABLE mistake_photo_candidates ADD COLUMN status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'discarded'))`); } catch {}
   try { db.exec(`ALTER TABLE mistake_photo_candidates ADD COLUMN confirmed_case_id TEXT`); } catch {}
+
+  // v0.5 (SB124-T06 #130): case_hypotheses table for the review
+  // workspace's error-cause state machine. Apply idempotently:
+  // CREATE TABLE IF NOT EXISTS handles fresh DBs; for legacy DBs
+  // we use the same IF NOT EXISTS guard because v0.5 is the first
+  // release that ships this table.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_hypotheses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      case_id TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      hypothesis TEXT NOT NULL,
+      label TEXT,
+      source TEXT NOT NULL CHECK (source IN ('system', 'parent', 'kid')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'rejected', 'modified')),
+      parent_hypothesis_id INTEGER,
+      sensitive INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      confirmed_at INTEGER,
+      FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE,
+      FOREIGN KEY (child_id) REFERENCES children(id),
+      FOREIGN KEY (parent_hypothesis_id) REFERENCES case_hypotheses(id)
+    )
+  `);
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS case_hypotheses_case_status
+       ON case_hypotheses (case_id, status)`,
+  );
   try { db.exec(`ALTER TABLE game_sessions ADD COLUMN source_record_id TEXT`); } catch {}
   // v0.5: vision-mistake columns
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN image_path TEXT`); } catch {}
