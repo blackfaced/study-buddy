@@ -52,6 +52,14 @@ export const APPS: AppDescriptor[] = [
     status: "ready",
   },
   {
+    id: "balance-blocks",
+    name: "平衡积木",
+    url: "/games/balance-blocks/",
+    emoji: "🧱",
+    description: "物理消除小游戏：抽积木让小六边形安全下塔。完成学习游戏可兑换游戏时长（每局 +5 分钟，每日最多 +10 分钟）。",
+    status: "ready",
+  },
+  {
     id: "write",
     name: "写字练字",
     url: "/write/",
