@@ -335,6 +335,42 @@ export function migrateSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS mistake_photo_page_drafts_child_state
       ON mistake_photo_page_drafts (child_id, state, expires_at);
 
+    -- v0.5 (SB124-T04 PR-B, issue #128): per-region OCR candidates
+    -- produced by runRegionOcr. Each row = one region from the page
+    -- draft, with the vision prompt + parsed answer. The closure loop
+    -- (T04-C) reads these to populate mistake_cases; the user
+    -- confirms/discards each one in the review workspace.
+    --
+    -- T04-B first slice: schema only. Idempotency (UNIQUE
+    -- draft_id+region_index), auth paths, and the candidates →
+    -- mistake_cases promotion land in T04-C.
+    CREATE TABLE IF NOT EXISTS mistake_photo_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      draft_id TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      region_index INTEGER NOT NULL,
+      subject TEXT,
+      problem TEXT,
+      user_answer TEXT,
+      correct_answer TEXT,
+      error_type TEXT,
+      confidence TEXT NOT NULL CHECK (confidence IN ('ok', 'low')),
+      vision_model TEXT,
+      vision_reasoning TEXT,
+      vision_input TEXT,
+      vision_ts INTEGER,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (draft_id) REFERENCES mistake_photo_page_drafts(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_id) REFERENCES children(id),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (device_id) REFERENCES paired_devices(device_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS mistake_photo_candidates_draft
+      ON mistake_photo_candidates (draft_id, region_index);
+
     CREATE TABLE IF NOT EXISTS settings (
       child_id TEXT PRIMARY KEY,
       topic_whitelist TEXT,

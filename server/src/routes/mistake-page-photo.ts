@@ -26,6 +26,7 @@ import {
   type MistakePagePhotoWorkflow,
   pageAnalyzeAdapter,
 } from "../mistake-page-photo-workflow.js";
+import { loadPageDraft, runRegionOcr } from "../region-ocr-workflow.js";
 
 export interface MistakePagePhotoRouteDeps {
   db: Database.Database;
@@ -146,6 +147,64 @@ export function registerMistakePagePhotoRoutes(
         return res.status(403).json({ error: "page draft does not belong to this device" });
       }
       return res.json(publicDraft(draft));
+    },
+  );
+
+  // ============== T04-B PR-B: per-region OCR trigger ==============
+  // POST /api/mistake-photo/page/:draftId/regions
+  // Body: none. Reads the draft's persisted image bytes + layout
+  // regions, runs analyzeMistakeImage on each crop, writes one row
+  // per region to mistake_photo_candidates. Returns the candidate
+  // list (regionIndex + problem + confidence) so the review UI
+  // (T04-D) can render it.
+  //
+  // Auth: same as the layout endpoint above — requireDevice +
+  // requireOwnedActiveSession, plus childId/sessionId/deviceId
+  // checks on the draft.
+  app.post(
+    "/api/mistake-photo/page/:draftId/regions",
+    auth.requireDevice,
+    async (req: Request, res: Response) => {
+      const session = requireOwnedActiveSession(req, res, db);
+      if (!session) return;
+      const draftId = req.params.draftId;
+      if (!validPageDraftId(draftId)) {
+        return res.status(400).json({ error: "invalid draftId" });
+      }
+      if (!visionClient) return res.status(503).json({ error: "vision not configured" });
+
+      const draft = loadPageDraft(db, draftId);
+      if (!draft) return res.status(404).json({ error: "page draft not found" });
+      if (draft.childId !== session.child_id) {
+        return res.status(404).json({ error: "page draft not found" });
+      }
+      if (draft.sessionId !== session.id) {
+        return res.status(403).json({ error: "page draft does not belong to this session" });
+      }
+      const principal = devicePrincipal(res);
+      if (draft.deviceId !== principal.deviceId) {
+        return res.status(403).json({ error: "page draft does not belong to this device" });
+      }
+
+      try {
+        const candidates = await runRegionOcr(draft, { db, visionClient });
+        return res.json({
+          draftId,
+          candidates: candidates.map((c) => ({
+            regionIndex: c.regionIndex,
+            subject: c.subject,
+            problem: c.problem,
+            confidence: c.confidence,
+            visionModel: c.visionModel,
+            errorMessage: c.errorMessage,
+          })),
+        });
+      } catch (err) {
+        logger.error("per-region OCR failed unexpectedly", {
+          errorType: err instanceof Error ? err.name : "Error",
+        });
+        return res.status(502).json({ error: "per-region OCR failed" });
+      }
     },
   );
 }
