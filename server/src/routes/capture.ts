@@ -38,6 +38,12 @@ import {
   MaxAttemptsReachedError,
 } from "../reinforcement-workflow.js";
 import { generateSimilarProblems } from "../similar-problems.js";
+import {
+  createReviewSchedule,
+  completeReviewAttempt,
+  ReviewAlreadyCompletedError,
+  ReviewNotFoundError,
+} from "../review-workflow.js";
 
 /**
  * Helper used by the confirm / reject / modify endpoints above.
@@ -689,6 +695,136 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
         }
         if (err instanceof AttemptAlreadySubmittedError) {
           res.status(409).json({ error: "attempt already submitted" });
+          return;
+        }
+        res.status(500).json({ error: (err as Error).message });
+      }
+    },
+  );
+
+  // ============== T08 PR-C: delayed review schedule ==============
+  // GET /api/capture/case/:caseId/reviews?childId=...&includeCompleted=...
+  //   200: { caseId, reviews: [{ id, scheduledAt, completedAt, isCorrect, reopenedCount }] }
+  //   403: case belongs to another child
+  app.get(
+    "/api/capture/case/:caseId/reviews",
+    (req: Request, res: Response) => {
+      const caseId = String(req.params.caseId);
+      const rawChild = (req.query.childId ?? "") as string;
+      const childId = typeof rawChild === "string" && rawChild.length > 0 ? rawChild : null;
+      if (!childId) {
+        res.status(400).json({ error: "childId is required" });
+        return;
+      }
+      const caseRow = db
+        .prepare(`SELECT child_id FROM mistake_cases WHERE case_id = ?`)
+        .get(caseId) as { child_id: string } | undefined;
+      if (!caseRow || caseRow.child_id !== childId) {
+        res.status(403).json({ error: "case belongs to another child" });
+        return;
+      }
+      const includeCompleted = req.query.includeCompleted === "true";
+      const where = includeCompleted
+        ? `WHERE case_id = ?`
+        : `WHERE case_id = ? AND completed_at IS NULL`;
+      const rows = db
+        .prepare(
+          `SELECT id, scheduled_at AS scheduledAt, completed_at AS completedAt,
+                  completed_is_correct AS completedIsCorrect,
+                  reopened_count AS reopenedCount
+             FROM review_schedules
+             ${where}
+            ORDER BY scheduled_at ASC`,
+        )
+        .all(caseId) as Array<{
+          id: number; scheduledAt: number; completedAt: number | null;
+          completedIsCorrect: number | null; reopenedCount: number;
+        }>;
+      res.json({
+        caseId,
+        reviews: rows.map((r) => ({
+          id: r.id,
+          scheduledAt: r.scheduledAt,
+          completedAt: r.completedAt,
+          isCorrect: r.completedIsCorrect === 1,
+          reopenedCount: r.reopenedCount,
+        })),
+      });
+    },
+  );
+
+  // POST /api/capture/case/:caseId/reviews
+  //   body: { childId, completedAt? } — when omitted, completedAt =
+  //     now (server clock). Schedules 3 review waves (+1/+3/+7d).
+  //   201: { reviews: [{ id, scheduledAt, daysAfter }] }
+  //   403: case belongs to another child
+  app.post(
+    "/api/capture/case/:caseId/reviews",
+    (req: Request, res: Response) => {
+      const caseId = String(req.params.caseId);
+      const body = (req.body ?? {}) as { childId?: unknown; completedAt?: unknown };
+      const childId =
+        typeof body.childId === "string" && body.childId.length > 0
+          ? body.childId
+          : null;
+      if (!childId) {
+        res.status(400).json({ error: "childId is required" });
+        return;
+      }
+      const completedAt =
+        typeof body.completedAt === "number" ? body.completedAt : Date.now();
+
+      const caseRow = db
+        .prepare(`SELECT child_id FROM mistake_cases WHERE case_id = ?`)
+        .get(caseId) as { child_id: string } | undefined;
+      if (!caseRow || caseRow.child_id !== childId) {
+        res.status(403).json({ error: "case belongs to another child" });
+        return;
+      }
+
+      const rows = createReviewSchedule(db, caseId, childId, completedAt);
+      res.status(201).json({
+        caseId,
+        reviews: rows.map((r) => ({
+          id: r.id,
+          scheduledAt: r.scheduledAt,
+        })),
+      });
+    },
+  );
+
+  // POST /api/capture/review/:reviewId/complete
+  //   body: { isCorrect }
+  //   200: { reviewId, isCorrect, reopenedCount }
+  //   404: review not found
+  //   409: already completed
+  app.post(
+    "/api/capture/review/:reviewId/complete",
+    (req: Request, res: Response) => {
+      const reviewId = Number(req.params.reviewId);
+      if (!Number.isInteger(reviewId) || reviewId <= 0) {
+        res.status(400).json({ error: "invalid reviewId" });
+        return;
+      }
+      const body = (req.body ?? {}) as { isCorrect?: unknown };
+      if (typeof body.isCorrect !== "boolean") {
+        res.status(400).json({ error: "isCorrect (boolean) is required" });
+        return;
+      }
+      try {
+        const after = completeReviewAttempt(db, reviewId, body.isCorrect);
+        res.json({
+          reviewId: after.id,
+          isCorrect: after.completedIsCorrect === 1,
+          reopenedCount: after.reopenedCount,
+        });
+      } catch (err) {
+        if (err instanceof ReviewNotFoundError) {
+          res.status(404).json({ error: "review not found" });
+          return;
+        }
+        if (err instanceof ReviewAlreadyCompletedError) {
+          res.status(409).json({ error: "review already completed" });
           return;
         }
         res.status(500).json({ error: (err as Error).message });

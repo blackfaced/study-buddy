@@ -113,6 +113,31 @@ export function migrateSchema(db: Database.Database): void {
       FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE
     )
   `);
+
+  // v0.5 (SB124-T08 #132): delayed review schedule. Apply idempotently.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS review_schedules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      case_id TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      scheduled_at INTEGER NOT NULL,
+      notified_at INTEGER,
+      completed_at INTEGER,
+      completed_is_correct INTEGER,
+      reopened_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE,
+      FOREIGN KEY (child_id) REFERENCES children(id)
+    )
+  `);
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS review_schedules_case_scheduled
+       ON review_schedules (case_id, scheduled_at)`,
+  );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS review_schedules_child_pending
+       ON review_schedules (child_id, completed_at, scheduled_at)`,
+  );
   try { db.exec(`ALTER TABLE game_sessions ADD COLUMN source_record_id TEXT`); } catch {}
   // v0.5: vision-mistake columns
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN image_path TEXT`); } catch {}
