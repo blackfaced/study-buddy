@@ -27,6 +27,12 @@ import {
   pageAnalyzeAdapter,
 } from "../mistake-page-photo-workflow.js";
 import { loadPageDraft, runRegionOcr } from "../region-ocr-workflow.js";
+import {
+  confirmCandidate,
+  discardCandidate,
+  CandidateConflictError,
+  CandidateNotFoundError,
+} from "../candidate-workflow.js";
 
 export interface MistakePagePhotoRouteDeps {
   db: Database.Database;
@@ -204,6 +210,132 @@ export function registerMistakePagePhotoRoutes(
           errorType: err instanceof Error ? err.name : "Error",
         });
         return res.status(502).json({ error: "per-region OCR failed" });
+      }
+    },
+  );
+
+  // ============== T04-C PR-C: confirm / discard candidates ==============
+  // POST /api/mistake-photo/candidate/:candidateId/confirm
+  //   body: { sessionId, userAnswer, correctAnswer, errorType? }
+  //   200: { caseId, mistakeId, idempotent }
+  //   404: candidate not found / cross-child
+  //   409: candidate was discarded (re-confirm blocked)
+  //   400: empty problem (cannot promote an empty OCR result)
+  app.post(
+    "/api/mistake-photo/candidate/:candidateId/confirm",
+    auth.requireDevice,
+    async (req: Request, res: Response) => {
+      const session = requireOwnedActiveSession(req, res, db);
+      if (!session) return;
+      const rawId = req.params.candidateId;
+      const candidateId = Number(rawId);
+      if (!Number.isInteger(candidateId) || candidateId <= 0) {
+        return res.status(400).json({ error: "invalid candidateId" });
+      }
+      const { userAnswer, correctAnswer, errorType } = (req.body ?? {}) as {
+        userAnswer?: unknown;
+        correctAnswer?: unknown;
+        errorType?: unknown;
+      };
+      if (typeof userAnswer !== "string" || userAnswer.length === 0) {
+        return res.status(400).json({ error: "userAnswer is required" });
+      }
+      if (typeof correctAnswer !== "string" || correctAnswer.length === 0) {
+        return res.status(400).json({ error: "correctAnswer is required" });
+      }
+      if (errorType !== undefined && errorType !== null && typeof errorType !== "string") {
+        return res.status(400).json({ error: "errorType must be a string" });
+      }
+
+      const candidateRow = db
+        .prepare(
+          `SELECT child_id FROM mistake_photo_candidates WHERE id = ?`,
+        )
+        .get(candidateId) as { child_id: string } | undefined;
+      if (!candidateRow || candidateRow.child_id !== session.child_id) {
+        // Don't leak existence — 404 covers both "doesn't exist" and
+        // "belongs to another child".
+        return res.status(404).json({ error: "candidate not found" });
+      }
+
+      try {
+        const result = confirmCandidate(db, candidateId, {
+          userAnswer,
+          correctAnswer,
+          errorType: typeof errorType === "string" ? errorType : null,
+        });
+        return res.json({
+          candidateId,
+          caseId: result.caseId,
+          mistakeId: result.mistakeId,
+          idempotent: result.idempotent,
+        });
+      } catch (err) {
+        if (err instanceof CandidateNotFoundError) {
+          return res.status(404).json({ error: "candidate not found" });
+        }
+        if (err instanceof CandidateConflictError) {
+          // empty-problem or status='discarded' both surface as 409
+          // so the client knows it's a state issue, not a not-found.
+          return res.status(409).json({
+            error:
+              err.message.includes("empty-problem")
+                ? "candidate has no problem text"
+                : `candidate is in status '${err.currentStatus}'`,
+          });
+        }
+        logger.error("candidate confirm failed", {
+          candidateId,
+          errorType: err instanceof Error ? err.name : "Error",
+        });
+        return res.status(500).json({ error: "confirm failed" });
+      }
+    },
+  );
+
+  // POST /api/mistake-photo/candidate/:candidateId/discard
+  //   body: { sessionId }
+  //   200: { discarded: true, idempotent: boolean }
+  //   404: candidate not found / cross-child
+  //   409: candidate was already confirmed (use mark-correct, not discard)
+  app.post(
+    "/api/mistake-photo/candidate/:candidateId/discard",
+    auth.requireDevice,
+    async (req: Request, res: Response) => {
+      const session = requireOwnedActiveSession(req, res, db);
+      if (!session) return;
+      const rawId = req.params.candidateId;
+      const candidateId = Number(rawId);
+      if (!Number.isInteger(candidateId) || candidateId <= 0) {
+        return res.status(400).json({ error: "invalid candidateId" });
+      }
+
+      const candidateRow = db
+        .prepare(
+          `SELECT child_id FROM mistake_photo_candidates WHERE id = ?`,
+        )
+        .get(candidateId) as { child_id: string } | undefined;
+      if (!candidateRow || candidateRow.child_id !== session.child_id) {
+        return res.status(404).json({ error: "candidate not found" });
+      }
+
+      try {
+        const result = discardCandidate(db, candidateId);
+        return res.json({ candidateId, ...result });
+      } catch (err) {
+        if (err instanceof CandidateNotFoundError) {
+          return res.status(404).json({ error: "candidate not found" });
+        }
+        if (err instanceof CandidateConflictError) {
+          return res.status(409).json({
+            error: `candidate is in status '${err.currentStatus}'`,
+          });
+        }
+        logger.error("candidate discard failed", {
+          candidateId,
+          errorType: err instanceof Error ? err.name : "Error",
+        });
+        return res.status(500).json({ error: "discard failed" });
       }
     },
   );
