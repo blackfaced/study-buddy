@@ -46,6 +46,12 @@ export function migrateSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE sessions ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 0`); } catch {}
   try { db.exec(`ALTER TABLE sessions ADD COLUMN source_withdrawn_at INTEGER`); } catch {}
   try { db.exec(`ALTER TABLE sessions ADD COLUMN device_id TEXT`); } catch {}
+
+  // v0.5 (SB124-T04 PR-C, issue #128): mistake_photo_candidates
+  // gained a status column + confirmed_case_id FK. Apply idempotently
+  // to legacy DBs (fresh DBs got the columns via CREATE TABLE above).
+  try { db.exec(`ALTER TABLE mistake_photo_candidates ADD COLUMN status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'discarded'))`); } catch {}
+  try { db.exec(`ALTER TABLE mistake_photo_candidates ADD COLUMN confirmed_case_id TEXT`); } catch {}
   try { db.exec(`ALTER TABLE game_sessions ADD COLUMN source_record_id TEXT`); } catch {}
   // v0.5: vision-mistake columns
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN image_path TEXT`); } catch {}
@@ -362,14 +368,26 @@ export function migrateSchema(db: Database.Database): void {
       vision_input TEXT,
       vision_ts INTEGER,
       created_at INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'discarded')),
+      confirmed_case_id TEXT,
       FOREIGN KEY (draft_id) REFERENCES mistake_photo_page_drafts(id) ON DELETE CASCADE,
       FOREIGN KEY (child_id) REFERENCES children(id),
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-      FOREIGN KEY (device_id) REFERENCES paired_devices(device_id)
+      FOREIGN KEY (device_id) REFERENCES paired_devices(device_id),
+      FOREIGN KEY (confirmed_case_id) REFERENCES mistake_cases(case_id)
     );
 
-    CREATE INDEX IF NOT EXISTS mistake_photo_candidates_draft
+    -- v0.5 (SB124-T04 PR-C, issue #128): idempotency anchor — one
+    -- candidate per (draft, region). Re-running OCR or re-confirming
+    -- the same region produces the same row, not a duplicate.
+    CREATE UNIQUE INDEX IF NOT EXISTS mistake_photo_candidates_draft_region
       ON mistake_photo_candidates (draft_id, region_index);
+
+    -- Drop the old non-unique index (left over from PR-B first slice)
+    -- if it exists. CREATE INDEX IF NOT EXISTS is idempotent for
+    -- matching definitions; dropping then re-creating as UNIQUE
+    -- happens once per fresh DB.
+    DROP INDEX IF EXISTS mistake_photo_candidates_draft;
 
     CREATE TABLE IF NOT EXISTS settings (
       child_id TEXT PRIMARY KEY,
