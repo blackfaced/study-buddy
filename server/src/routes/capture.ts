@@ -30,6 +30,14 @@ import {
   HypothesisNotFoundError,
   type HypothesisRow,
 } from "../hypothesis-workflow.js";
+import {
+  startReinforcementAttempt,
+  submitReinforcementAnswer,
+  AttemptAlreadySubmittedError,
+  AttemptNotFoundError,
+  MaxAttemptsReachedError,
+} from "../reinforcement-workflow.js";
+import { generateSimilarProblems } from "../similar-problems.js";
 
 /**
  * Helper used by the confirm / reject / modify endpoints above.
@@ -550,6 +558,143 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
       })),
     });
   });
+
+  // ============== T07 PR-C: reinforcement similar problems ==============
+  // POST /api/capture/case/:caseId/reinforcement
+  //   body: { childId, problem?, correctAnswer? } — when omitted,
+  //     server generates a similar problem via generateSimilarProblems
+  //     using the case's problem + errorType.
+  //   201: { attemptIndex, problem, correctAnswer, attemptsRemaining }
+  //   404: case not found / cross-child
+  //   409: max attempts reached (MaxAttemptsReached)
+
+  app.post(
+    "/api/capture/case/:caseId/reinforcement",
+    (req: Request, res: Response) => {
+      const caseId = String(req.params.caseId);
+      const body = (req.body ?? {}) as {
+        childId?: unknown;
+        problem?: unknown;
+        correctAnswer?: unknown;
+      };
+      const childId =
+        typeof body.childId === "string" && body.childId.length > 0
+          ? body.childId
+          : null;
+      if (!childId) {
+        res.status(400).json({ error: "childId is required" });
+        return;
+      }
+
+      const caseRow = db
+        .prepare(
+          `SELECT child_id, problem, error_type FROM mistake_cases WHERE case_id = ?`,
+        )
+        .get(caseId) as
+        | { child_id: string; problem: string | null; error_type: string | null }
+        | undefined;
+      if (!caseRow || caseRow.child_id !== childId) {
+        res.status(404).json({ error: "case not found" });
+        return;
+      }
+
+      let problemText: string;
+      let correctAnswerText: string;
+      if (typeof body.problem === "string" && typeof body.correctAnswer === "string") {
+        // Caller-supplied (e.g. parent typed a custom巩固 problem)
+        problemText = body.problem;
+        correctAnswerText = body.correctAnswer;
+      } else {
+        // Auto-generate from the original problem
+        const variants = generateSimilarProblems(caseRow.problem ?? "", caseRow.error_type, 1);
+        if (variants.length === 0) {
+          res.status(422).json({
+            error: "similar problems not available for this problem type",
+          });
+          return;
+        }
+        problemText = variants[0].problem;
+        correctAnswerText = variants[0].correctAnswer;
+      }
+
+      try {
+        const attempt = startReinforcementAttempt(
+          db,
+          caseId,
+          childId,
+          problemText,
+          correctAnswerText,
+        );
+        const state = db
+          .prepare(
+            `SELECT max_attempts AS maxAttempts, reinforcement_attempts_made AS made
+               FROM case_reinforcement_state WHERE case_id = ?`,
+          )
+          .get(caseId) as { maxAttempts: number; made: number };
+        res.status(201).json({
+          attemptId: attempt.id,
+          attemptIndex: attempt.attemptIndex,
+          problem: attempt.problem,
+          attemptsRemaining: state.maxAttempts - state.made,
+        });
+      } catch (err) {
+        if (err instanceof MaxAttemptsReachedError) {
+          res.status(409).json({ error: err.message, attemptsRemaining: 0 });
+          return;
+        }
+        res.status(500).json({ error: (err as Error).message });
+      }
+    },
+  );
+
+  // POST /api/capture/reinforcement/:attemptId/answer
+  //   body: { userAnswer }
+  //   200: { attemptId, isCorrect, attemptsRemaining }
+  //   404: attempt not found
+  //   409: already submitted (idempotency guard)
+  app.post(
+    "/api/capture/reinforcement/:attemptId/answer",
+    (req: Request, res: Response) => {
+      const attemptId = Number(req.params.attemptId);
+      if (!Number.isInteger(attemptId) || attemptId <= 0) {
+        res.status(400).json({ error: "invalid attemptId" });
+        return;
+      }
+      const body = (req.body ?? {}) as { userAnswer?: unknown };
+      if (!isBoundedText(body.userAnswer, 200)) {
+        res.status(400).json({ error: "userAnswer is required" });
+        return;
+      }
+      try {
+        const after = submitReinforcementAnswer(
+          db,
+          attemptId,
+          body.userAnswer,
+        );
+        const state = db
+          .prepare(
+            `SELECT max_attempts AS maxAttempts, reinforcement_attempts_made AS made
+               FROM case_reinforcement_state WHERE case_id = ?`,
+          )
+          .get(after.caseId) as { maxAttempts: number; made: number };
+        res.json({
+          attemptId: after.id,
+          isCorrect: after.isCorrect === 1,
+          attemptsRemaining: state.maxAttempts - state.made,
+        });
+      } catch (err) {
+        if (err instanceof AttemptNotFoundError) {
+          res.status(404).json({ error: "attempt not found" });
+          return;
+        }
+        if (err instanceof AttemptAlreadySubmittedError) {
+          res.status(409).json({ error: "attempt already submitted" });
+          return;
+        }
+        res.status(500).json({ error: (err as Error).message });
+      }
+    },
+  );
 }
 
 function handleAttempt(db: Database.Database, req: Request, res: Response): void {
