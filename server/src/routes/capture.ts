@@ -21,6 +21,82 @@
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import { insertMistake } from "./mistake-api.js";
+import {
+  addHypothesis,
+  confirmHypothesis,
+  modifyHypothesis,
+  rejectHypothesis,
+  HypothesisConflictError,
+  HypothesisNotFoundError,
+  type HypothesisRow,
+} from "../hypothesis-workflow.js";
+
+/**
+ * Helper used by the confirm / reject / modify endpoints above.
+ * Verifies childId matches the hypothesis, then dispatches to the
+ * matching workflow function. Returns the updated row.
+ */
+function transitionHypothesis(
+  db: Database.Database,
+  transition: "confirm" | "reject" | "modify",
+  childId: string,
+  hypothesisId: number,
+  text?: string,
+  label?: string | null,
+): HypothesisRow {
+  const row = db
+    .prepare(
+      `SELECT child_id, status FROM case_hypotheses WHERE id = ?`,
+    )
+    .get(hypothesisId) as { child_id: string; status: string } | undefined;
+  if (!row) throw new HypothesisNotFoundError(hypothesisId);
+  if (row.child_id !== childId) {
+    throw new HypothesisConflictError(hypothesisId, row.status, transition);
+  }
+  switch (transition) {
+    case "confirm":
+      return confirmHypothesis(db, hypothesisId);
+    case "reject":
+      return rejectHypothesis(db, hypothesisId);
+    case "modify":
+      if (typeof text !== "string") {
+        throw new Error("modify: text is required");
+      }
+      return modifyHypothesis(db, hypothesisId, text, label);
+  }
+}
+
+function transitionStatus(err: unknown): number {
+  if (err instanceof HypothesisNotFoundError) return 404;
+  if (err instanceof HypothesisConflictError) return 409;
+  return 500;
+}
+
+function publicHypothesis(h: HypothesisRow): {
+  id: number;
+  caseId: string;
+  hypothesis: string;
+  label: string | null;
+  source: string;
+  status: string;
+  parentHypothesisId: number | null;
+  sensitive: boolean;
+  createdAt: number;
+  confirmedAt: number | null;
+} {
+  return {
+    id: h.id,
+    caseId: h.caseId,
+    hypothesis: h.hypothesis,
+    label: h.label,
+    source: h.source,
+    status: h.status,
+    parentHypothesisId: h.parentHypothesisId,
+    sensitive: h.sensitive === 1,
+    createdAt: h.createdAt,
+    confirmedAt: h.confirmedAt,
+  };
+}
 
 export interface CaptureRouteDeps {
   db: Database.Database;
@@ -271,6 +347,208 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
     } catch (err) {
       res.status(500).json({ error: `attempt handler failed: ${(err as Error).message}` });
     }
+  });
+
+  // ============== T06 PR-C: case hypothesis state machine ==============
+  // 5 endpoints: add / confirm / reject / modify + a kid-facing list
+  // that drops sensitive=true rows. Cross-child verification reuses
+  // the same pattern as the case detail endpoint above: caller
+  // provides childId (query or body), server rejects mismatches.
+  // ============== POST add ==============
+  app.post(
+    "/api/capture/case/:caseId/hypothesis",
+    (req: Request, res: Response) => {
+      const caseId = String(req.params.caseId);
+      const body = (req.body ?? {}) as {
+        childId?: unknown;
+        source?: unknown;
+        text?: unknown;
+        label?: unknown;
+      };
+      const childId =
+        typeof body.childId === "string" && body.childId.length > 0
+          ? body.childId
+          : null;
+      if (!childId) {
+        res.status(400).json({ error: "childId is required" });
+        return;
+      }
+      if (
+        body.source !== "system" &&
+        body.source !== "parent" &&
+        body.source !== "kid"
+      ) {
+        res.status(400).json({ error: "source must be 'system' | 'parent' | 'kid'" });
+        return;
+      }
+      if (!isBoundedText(body.text, 200)) {
+        res.status(400).json({ error: "text is required (1-200 chars)" });
+        return;
+      }
+      if (body.label !== undefined && body.label !== null && typeof body.label !== "string") {
+        res.status(400).json({ error: "label must be a string" });
+        return;
+      }
+      // Cross-child: case must belong to the caller's child.
+      const caseRow = db
+        .prepare(`SELECT child_id FROM mistake_cases WHERE case_id = ?`)
+        .get(caseId) as { child_id: string } | undefined;
+      if (!caseRow || caseRow.child_id !== childId) {
+        res.status(403).json({ error: "case belongs to another child" });
+        return;
+      }
+      try {
+        const h = addHypothesis(db, {
+          caseId,
+          childId,
+          source: body.source,
+          text: body.text,
+          label: typeof body.label === "string" ? body.label : null,
+        });
+        res.status(201).json(publicHypothesis(h));
+      } catch (err) {
+        res.status(400).json({
+          error: `addHypothesis failed: ${(err as Error).message}`,
+        });
+      }
+    },
+  );
+
+  // ============== POST confirm / reject / modify ==============
+  // All three share the same auth + 403 pattern (see
+  // transitionHypothesis() helper below).
+  app.post(
+    "/api/capture/case/:caseId/hypothesis/:hypothesisId/confirm",
+    (req: Request, res: Response) => {
+      const childId = (typeof req.body?.childId === "string" && req.body.childId.length > 0)
+        ? req.body.childId : null;
+      if (!childId) {
+        res.status(400).json({ error: "childId is required" });
+        return;
+      }
+      const id = Number(req.params.hypothesisId);
+      if (!Number.isInteger(id) || id <= 0) {
+        res.status(400).json({ error: "invalid hypothesisId" });
+        return;
+      }
+      try {
+        const h = transitionHypothesis(db, "confirm", childId, id);
+        res.json(publicHypothesis(h));
+      } catch (err) {
+        res.status(transitionStatus(err)).json({ error: (err as Error).message });
+      }
+    },
+  );
+
+  app.post(
+    "/api/capture/case/:caseId/hypothesis/:hypothesisId/reject",
+    (req: Request, res: Response) => {
+      const childId = (typeof req.body?.childId === "string" && req.body.childId.length > 0)
+        ? req.body.childId : null;
+      if (!childId) {
+        res.status(400).json({ error: "childId is required" });
+        return;
+      }
+      const id = Number(req.params.hypothesisId);
+      if (!Number.isInteger(id) || id <= 0) {
+        res.status(400).json({ error: "invalid hypothesisId" });
+        return;
+      }
+      try {
+        const h = transitionHypothesis(db, "reject", childId, id);
+        res.json(publicHypothesis(h));
+      } catch (err) {
+        res.status(transitionStatus(err)).json({ error: (err as Error).message });
+      }
+    },
+  );
+
+  app.post(
+    "/api/capture/case/:caseId/hypothesis/:hypothesisId/modify",
+    (req: Request, res: Response) => {
+      const childId = (typeof req.body?.childId === "string" && req.body.childId.length > 0)
+        ? req.body.childId : null;
+      if (!childId) {
+        res.status(400).json({ error: "childId is required" });
+        return;
+      }
+      const id = Number(req.params.hypothesisId);
+      if (!Number.isInteger(id) || id <= 0) {
+        res.status(400).json({ error: "invalid hypothesisId" });
+        return;
+      }
+      const body = (req.body ?? {}) as { text?: unknown; label?: unknown };
+      if (!isBoundedText(body.text, 200)) {
+        res.status(400).json({ error: "text is required (1-200 chars)" });
+        return;
+      }
+      if (body.label !== undefined && body.label !== null && typeof body.label !== "string") {
+        res.status(400).json({ error: "label must be a string" });
+        return;
+      }
+      try {
+        const h = transitionHypothesis(
+          db,
+          "modify",
+          childId,
+          id,
+          body.text,
+          typeof body.label === "string" ? body.label : null,
+        );
+        res.json(publicHypothesis(h));
+      } catch (err) {
+        res.status(transitionStatus(err)).json({ error: (err as Error).message });
+      }
+    },
+  );
+
+  // ============== GET list (kid view filters sensitive) ==============
+  app.get("/api/capture/case/:caseId/hypotheses", (req: Request, res: Response) => {
+    const caseId = req.params.caseId;
+    const raw = (req.query.childId ?? "") as string;
+    const childId = typeof raw === "string" && raw.length > 0 ? raw : null;
+    if (!childId) {
+      res.status(400).json({ error: "childId is required" });
+      return;
+    }
+    // Cross-child
+    const caseRow = db
+      .prepare(`SELECT child_id FROM mistake_cases WHERE case_id = ?`)
+      .get(caseId) as { child_id: string } | undefined;
+    if (!caseRow || caseRow.child_id !== childId) {
+      res.status(403).json({ error: "case belongs to another child" });
+      return;
+    }
+    // view: 'kid' drops sensitive rows; 'parent' returns everything
+    // (with the sensitive flag so the parent UI can decide).
+    const view = (req.query.view ?? "parent") as string;
+    const includeSensitive = view !== "kid";
+    const rows = db
+      .prepare(
+        includeSensitive
+          ? `SELECT id, case_id AS caseId, child_id AS childId, hypothesis, label,
+                    source, status, parent_hypothesis_id AS parentHypothesisId,
+                    sensitive, created_at AS createdAt, confirmed_at AS confirmedAt
+               FROM case_hypotheses WHERE case_id = ? ORDER BY id`
+          : `SELECT id, case_id AS caseId, child_id AS childId, hypothesis, label,
+                    source, status, parent_hypothesis_id AS parentHypothesisId,
+                    sensitive, created_at AS createdAt, confirmed_at AS confirmedAt
+               FROM case_hypotheses WHERE case_id = ? AND sensitive = 0 ORDER BY id`,
+      )
+      .all(caseId) as Array<{
+        id: number; caseId: string; childId: string; hypothesis: string;
+        label: string | null; source: string; status: string;
+        parentHypothesisId: number | null; sensitive: number;
+        createdAt: number; confirmedAt: number | null;
+      }>;
+    res.json({
+      caseId,
+      view,
+      hypotheses: rows.map((r) => ({
+        ...r,
+        sensitive: r.sensitive === 1,
+      })),
+    });
   });
 }
 
