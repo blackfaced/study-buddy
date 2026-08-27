@@ -138,6 +138,15 @@ export function migrateSchema(db: Database.Database): void {
     `CREATE INDEX IF NOT EXISTS review_schedules_child_pending
        ON review_schedules (child_id, completed_at, scheduled_at)`,
   );
+
+  // v0.5 (SB124-T10 #134): mistakes table deprecation. closure loop
+  // (mistake_cases + correction_obligations + learning_attempts) is
+  // the source of truth; mistakes is a read-only mirror for old
+  // clients and historical audit. Add is_archived so we can
+  // distinguish rows written by the closure loop (active=0)
+  // from rows left over from the pre-T1 lifecycle (archived=1).
+  // Apply idempotently to legacy DBs.
+  try { db.exec(`ALTER TABLE mistakes ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0`); } catch {}
   try { db.exec(`ALTER TABLE game_sessions ADD COLUMN source_record_id TEXT`); } catch {}
   // v0.5: vision-mistake columns
   try { db.exec(`ALTER TABLE mistakes ADD COLUMN image_path TEXT`); } catch {}
@@ -321,6 +330,7 @@ export function migrateSchema(db: Database.Database): void {
       evidence_confirmed_at INTEGER,
       child_id TEXT NOT NULL DEFAULT 'default',
       level INTEGER,
+      is_archived INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
@@ -713,6 +723,18 @@ function ensureMistakeCompatibilityIndexes(db: Database.Database): void {
       ? "CREATE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL"
       : "CREATE UNIQUE INDEX idx_mistakes_evidence_key ON mistakes(evidence_key) WHERE evidence_key IS NOT NULL");
   })();
+
+  // SB124-T10 backfill: now that mistakes table definitely exists
+  // (and has is_archived + a closing unique index), mark all rows
+  // that aren't referenced by mistake_cases.original_mistake_id as
+  // archived. This catches the pre-T1 lifecycle rows that lived
+  // purely in the mistakes mirror and never made it into the
+  // closure loop.
+  db.exec(
+    `UPDATE mistakes SET is_archived = 1
+       WHERE is_archived = 0
+         AND id NOT IN (SELECT original_mistake_id FROM mistake_cases WHERE original_mistake_id IS NOT NULL)`,
+  );
 }
 
 export interface MistakeCompatibilityRecord {
@@ -1011,6 +1033,7 @@ function addMistakesChildIdForeignKey(db: Database.Database): void {
         evidence_confirmed_at INTEGER,
         child_id TEXT NOT NULL DEFAULT 'default',
         level INTEGER,
+        is_archived INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
         FOREIGN KEY (child_id) REFERENCES children(id) ON DELETE CASCADE
       )

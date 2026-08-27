@@ -126,19 +126,25 @@ describe("learning Session revisions and withdrawals (#106)", () => {
   });
 
   it("does not adopt a game-only mistake session as a study Session", async () => {
-    const mistake = await request(app).post("/api/game/mistake").send({
+    // SB124-T10: /api/game/mistake is retired (returns 410). The
+    // closure loop's helper is the source of truth for game-source
+    // mistakes too — see integration-source-events.test.ts for the
+    // shared recordAttempt helper pattern.
+    const { insertMistake } = await import("./routes/mistake-api.js");
+    const mistake = insertMistake(db, {
       childId: "default",
       problem: "7+8",
       userAnswer: "14",
       correctAnswer: "15",
+      errorType: null,
       source: "game",
     });
-    expect(mistake.status).toBe(201);
+    expect(mistake.id).toBeGreaterThan(0);
     const gameSession = db.prepare(
       `SELECT s.id, s.subject
          FROM sessions s JOIN mistakes m ON m.session_id = s.id
         WHERE m.id = ?`,
-    ).get(mistake.body.id) as { id: string; subject: string };
+    ).get(mistake.id) as { id: string; subject: string };
     expect(gameSession.subject).toBe("__game__:math");
 
     const started = await request(app).post("/api/session/start").send({ subject: "作业" });

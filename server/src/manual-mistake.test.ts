@@ -167,15 +167,18 @@ describe("POST /api/capture/manual (SB124-T03 #127: 手动录入进收件箱)", 
     // So a manual entry and a game entry with the same problem coexist
     // as separate cases — the parent is allowed to log the same problem
     // through different capture paths.
-    const game = await request(app)
-      .post("/api/game/mistake")
-      .send({
-        childId: CHILD,
-        problem: "shared-problem-source",
-        userAnswer: "1",
-        correctAnswer: "2",
-        errorType: "compute",
-      });
+    //
+    // SB124-T10 retired /api/game/mistake (returns 410). Use the
+    // insertMistake helper directly to seed the game-source row.
+    const { insertMistake } = await import("./routes/mistake-api.js");
+    insertMistake(db, {
+      childId: CHILD,
+      problem: "shared-problem-source",
+      userAnswer: "1",
+      correctAnswer: "2",
+      errorType: "compute",
+      source: "game",
+    });
     const manual = await request(app)
       .post("/api/capture/manual")
       .send({
@@ -185,9 +188,16 @@ describe("POST /api/capture/manual (SB124-T03 #127: 手动录入进收件箱)", 
         correctAnswer: "2",
         subject: "math",
       });
-    expect(game.status).toBe(201);
     expect(manual.status).toBe(201);
-    expect(game.body.caseId).not.toBe(manual.body.caseId);
+    // Game row was inserted via the helper, not via HTTP; pull its
+    // caseId out of the closure loop for the source-isolation check.
+    const gameCase = db
+      .prepare(
+        `SELECT case_id FROM mistake_cases
+          WHERE child_id = ? AND problem = ? AND source = 'game'`,
+      )
+      .get(CHILD, "shared-problem-source") as { case_id: string };
+    expect(gameCase.case_id).not.toBe(manual.body.caseId);
   });
 
   it("MM10: 400 when text fields exceed source contract bounds", async () => {
@@ -218,15 +228,17 @@ describe("GET /api/capture/inbox (SB124-T03 #127: 今日收件箱按孩子隔离
         correctAnswer: "12",
         subject: "math",
       });
-    await request(app)
-      .post("/api/game/mistake")
-      .send({
-        childId: CHILD,
-        problem: "inbox-B",
-        userAnswer: "1",
-        correctAnswer: "2",
-        errorType: "compute",
-      });
+    // SB124-T10 retired /api/game/mistake (returns 410). Use
+    // insertMistake directly to seed the game-source row.
+    const { insertMistake: insertGame } = await import("./routes/mistake-api.js");
+    insertGame(db, {
+      childId: CHILD,
+      problem: "inbox-B",
+      userAnswer: "1",
+      correctAnswer: "2",
+      errorType: "compute",
+      source: "game",
+    });
     const res = await request(app)
       .get("/api/capture/inbox")
       .query({ childId: CHILD });
@@ -258,14 +270,12 @@ describe("GET /api/capture/inbox (SB124-T03 #127: 今日收件箱按孩子隔离
         subject: "math",
       });
     expect(create.status).toBe(201);
-    // Three correct reviews cascade to verified
+    // Three correct reviews cascade to verified. SB124-T10 retired
+    // /api/game/mistake-review; use the closure-loop replacement.
     for (let i = 0; i < 3; i++) {
       const r = await request(app)
-        .post("/api/game/mistake-review")
-        .send({
-          childId: CHILD,
-          results: [{ mistakeId: create.body.id, correct: true }],
-        });
+        .post(`/api/capture/case/${create.body.caseId}/attempt`)
+        .send({ childId: CHILD, answer: "12" });
       expect(r.status).toBe(200);
     }
     const inbox = await request(app)

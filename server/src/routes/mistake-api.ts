@@ -1,37 +1,19 @@
 // server/src/routes/mistake-api.ts
 // =====================================================================
-// POST /api/game/mistake        — auto-record wrong answers (#98, T1)
-// POST /api/game/mistake-review — bump reviewed_count + cascade (#100, T3)
-// =====================================================================
+// SB124-T10 #134: the legacy /api/game/mistake* endpoints are
+// deprecated. The closure loop (mistake_cases + correction_obligations
+// + learning_attempts) is the source of truth; this file now exposes
+// the canonical `insertMistake()` write helper plus 410-only stubs
+// for the retired game routes.
 //
-// Issue #98 (T1 of #34 split): the server-side foundation that lets
-// the client POST a wrong answer and have it deduped per (childId,
-// problem) via a UNIQUE index. Response shape:
+// Replacements:
+//   POST /api/game/mistake          → POST /api/capture/manual
+//   POST /api/game/mistake-review   → POST /api/capture/case/:caseId/attempt
 //
-//   201 {id: number, created: true}   when a new row was inserted
-//   200 {id: number, created: false}  when the row already existed (idempotent)
-//   400 {error: string}               when required fields are missing
-//
-// Issue #100 (T3 of #34 split): the cascade-review endpoint. Each
-// correct review increments reviewed_count via CAS; when the count
-// reaches 3 the row is cascade-deleted. Wrong answers are no-ops.
-// Cross-child isolation: a childId in the request must match the
-// row's child_id, otherwise the operation is a no-op (no 4xx — we
-// report reviewedCount: 0 to the client so the queue flushes
-// cleanly even if the row was deleted by another device).
-//
-// T2 (#99) is implemented in routes/quiz-context.ts and is
-// independent of these endpoints.
-//
-// Note on session_id: the existing `mistakes.session_id` column is
-// NOT NULL because the schema was designed for study-buddy chat
-// mistakes (where every mistake belongs to a chat session). Auto-
-// recorded game mistakes are not associated with a paired study session,
-// so we create/reuse an unpaired session carrying a private game-only
-// subject marker. This keeps the NOT NULL relationship intact without
-// attaching game evidence to a child's active homework session.
-// A future schema migration could split mistakes into chat / game
-// streams, but that's out of scope for T1.
+// The 410 stubs advertise the X-Sunset header so clients can render
+// a clear "this is retired" message during the sunset window.
+// `insertMistake()` is the canonical closure-loop write path used by
+// capture.ts, game-sync, and the integration tests.
 // =====================================================================
 
 import type { Express, Request, Response } from "express";
@@ -48,134 +30,48 @@ export interface MistakeRouteDeps {
   beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
 }
 
-interface MistakeRequestBody {
-  childId?: unknown;
-  problem?: unknown;
-  userAnswer?: unknown;
-  correctAnswer?: unknown;
-  errorType?: unknown;
-}
+export function registerMistakeRoutes(app: Express, _deps: MistakeRouteDeps): void {
+  // T10 #134: registerMistakeRoutes is now a 410-only stub. The
+  // closure-loop surface lives in routes/capture.ts and the
+  // /api/capture/case/:caseId/attempt endpoint; this stub exists
+  // so the legacy /api/game/mistake* paths still return a clean
+  // 410 + replacement path during the sunset window. We accept
+  // (and ignore) the deps so the existing wiring in app.ts keeps
+  // working.
 
-interface MistakeReviewRequestBody {
-  childId?: unknown;
-  results?: unknown;
-}
+  // ============== T10 #134: deprecate the old game endpoints ==============
+  // The closure loop (mistake_cases + correction_obligations +
+  // learning_attempts) is the source of truth as of SB124-T01.
+  // The /api/game/mistake and /api/game/mistake-review routes
+  // still used the pre-T1 contract (mistakes table + reviewed_count
+  // CAS + 3-cascade-delete). They now return 410 Gone with the
+  // replacement path so existing v0.5 clients can be migrated
+  // before the sunset date.
+  //
+  // X-Sunset header advertises the official removal date for
+  // client-side caching. Replacements are stable closure-loop
+  // routes that already ship.
+  const GAME_ENDPOINT_SUNSET = "2026-12-31";
+  const goneWithReplacement = (
+    res: Response,
+    replacement: string,
+  ): Response => {
+    res.setHeader("X-Sunset", GAME_ENDPOINT_SUNSET);
+    return res.status(410).json({
+      error: "this endpoint was retired in SB124-T10; use the closure-loop replacement",
+      replacement,
+    });
+  };
 
-export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): void {
-  const { db } = deps;
-
-  app.post("/api/game/mistake", (req: Request, res: Response) => {
-    const body: MistakeRequestBody = (req.body ?? {}) as MistakeRequestBody;
-
-    // childId defaults to "default" for backwards compat with old clients
-    // that don't know about per-child mistake tracking. Empty string also
-    // collapses to the default (defensive — empty childId is meaningless).
-    const childId =
-      typeof body.childId === "string" && body.childId.length > 0
-        ? body.childId
-        : "default";
-
-    // problem is the dedupe key (paired with childId and the canonical
-    // route-owned source category by the UNIQUE index).
-    // Reject missing/non-string early so we never INSERT a NULL problem.
-    if (!isBoundedText(body.problem, 200)) {
-      res.status(400).json({ error: "problem is required" });
-      return;
-    }
-
-    // userAnswer is required so the agent can see what the kid typed.
-    if (!isBoundedText(body.userAnswer, 100, true)) {
-      res.status(400).json({ error: "userAnswer is required" });
-      return;
-    }
-
-    const correctAnswer =
-      typeof body.correctAnswer === "string" ? body.correctAnswer : null;
-    const errorType = typeof body.errorType === "string" ? body.errorType : null;
-    // App identity is not a learning-evidence category. This route owns the
-    // canonical `game` source so client labels cannot partition deduplication
-    // or disappear from game-only weak-topic aggregation.
-    const source = "game";
-    if (
-      (correctAnswer !== null && !isBoundedText(correctAnswer, 100, true)) ||
-      (errorType !== null && !isBoundedText(errorType, 64, true))
-    ) {
-      res.status(400).json({ error: "attempt fields exceed the source contract" });
-      return;
-    }
-
-    let result: InsertMistakeResult;
-    try {
-      result = insertMistake(
-        db,
-        {
-          childId,
-          problem: body.problem,
-          userAnswer: body.userAnswer,
-          correctAnswer,
-          errorType,
-          source,
-        },
-        deps.beforeSourceEventAppend,
-      );
-    } catch {
-      res.status(500).json({ error: "mistake could not be recorded" });
-      return;
-    }
-
-    res
-      .status(result.created ? 201 : 200)
-      .json({ id: result.id, caseId: result.caseId, created: result.created });
+  app.post("/api/game/mistake", (_req: Request, res: Response) => {
+    goneWithReplacement(res, "POST /api/capture/manual");
   });
 
-  // ============== T3: cascade review ==============
-  // Body: { childId, results: [{ mistakeId, correct }] }
-  // Response: { reviews: [{ mistakeId, reviewedCount, deleted }] }
-  //
-  // Per-result semantics:
-  //   correct=false → no-op, report current reviewedCount
-  //   correct=true  → CAS increment reviewed_count, possibly delete
-  //   row not found / wrong child → no-op, report reviewedCount:0
-  //
-  // Batch semantics: all results are processed, response always
-  // returns one entry per input result (same order, same length).
-  // The endpoint never 5xx's on per-result failures — those collapse
-  // to no-ops so the client's queue can flush cleanly even when a
-  // row was deleted by another device mid-session.
-  app.post("/api/game/mistake-review", (req: Request, res: Response) => {
-    const body: MistakeReviewRequestBody = (req.body ?? {}) as MistakeReviewRequestBody;
-
-    const childId =
-      typeof body.childId === "string" && body.childId.length > 0
-        ? body.childId
-        : "default";
-
-    if (!Array.isArray(body.results)) {
-      res.status(400).json({ error: "results array is required" });
-      return;
-    }
-
-    const reviews: ReviewResult[] = [];
-    for (const raw of body.results) {
-      if (
-        !raw ||
-        typeof raw !== "object" ||
-        typeof (raw as any).mistakeId !== "number" ||
-        typeof (raw as any).correct !== "boolean"
-      ) {
-        // Skip malformed entries silently (don't fail the whole batch)
-        continue;
-      }
-      const r = raw as { mistakeId: number; correct: boolean };
-      const result = reviewMistake(db, {
-        childId,
-        mistakeId: r.mistakeId,
-        correct: r.correct,
-      });
-      reviews.push(result);
-    }
-
-    res.json({ reviews });
+  app.post("/api/game/mistake-review", (_req: Request, res: Response) => {
+    goneWithReplacement(
+      res,
+      "POST /api/capture/case/:caseId/attempt",
+    );
   });
 }
 
@@ -397,20 +293,6 @@ export function insertMistake(
   })();
 }
 
-function isBoundedText(
-  value: unknown,
-  maxLength: number,
-  allowEmpty = false,
-): value is string {
-  return (
-    typeof value === "string" &&
-    value.length <= maxLength &&
-    (allowEmpty || value.length > 0) &&
-    // oxlint-disable-next-line no-control-regex -- intentional: reject control chars in user input
-    !/[\u0000-\u001f\u007f]/.test(value)
-  );
-}
-
 /**
  * Make sure a `children` row exists for this childId. In production the
  * default child is created at app startup (db-migrate.ts) and additional
@@ -466,267 +348,4 @@ function ensureActiveSession(db: Database.Database, childId: string): string {
     "INSERT INTO sessions (id, child_id, subject) VALUES (?, ?, ?)",
   ).run(id, childId, GAME_ONLY_SESSION_SUBJECT);
   return id;
-}
-
-// =====================================================================
-// T3: cascade review
-// =====================================================================
-
-export interface ReviewMistakeInput {
-  childId: string;
-  mistakeId: number;
-  correct: boolean;
-}
-
-export interface ReviewResult {
-  mistakeId: number;
-  reviewedCount: number;
-  deleted: boolean;
-}
-
-const CASCADE_THRESHOLD = 3;
-const MAX_CAS_RETRIES = 5;
-
-/**
- * Apply one review result to the closure-loop tables.
- *
- * v0.9 (SB124-T01 PR-D): reviewed_count and status now live on
- * correction_obligations (joined to mistake_cases by case_id). The
- * mistakes mirror is a thin compat layer kept for mistake_photo FKs.
- *
- * v0.9 (SB124-T02 #126): correct=false is no longer a silent no-op.
- * It still does NOT touch reviewed_count or close the obligation (so
- * the picker keeps showing the case), but it DOES append a
- * 'correction' learning_attempt (is_correct=0) so the closure loop
- * is auditable. The kid's actual wrong answer text is not captured
- * at this layer (the review API only takes { mistakeId, correct });
- * user_answer is NULL.
- *
- * Behavior:
- *   - correct=false  → append a correction learning_attempt (is_correct=0);
- *                      do NOT touch reviewed_count or status. Return
- *                      current reviewedCount (or 0 if case not found).
- *   - correct=true   → CAS-increment correction_obligations.reviewed_count
- *                      and record a correction attempt; when the count
- *                      reaches `CASCADE_THRESHOLD` (3), mark the
- *                      obligation status='verified' and delete the
- *                      legacy mistakes mirror row
- *   - case not found → no-op, return reviewedCount:0
- *   - wrong child    → no-op, return reviewedCount:0 (cross-child isolation)
- *   - already verified → no-op (closeObligation path; status filter)
- *
- * The CAS loop handles the rare lost-race case: two devices submit
- * reviews for the same mistakeId concurrently, the first to commit
- * wins, the second sees changes() === 0 and retries with the new
- * value. We bound the retry count at MAX_CAS_RETRIES (5) — past that
- * we let the exception bubble (the express error handler returns 500
- * and the client retries on next session).
- */
-export function reviewMistake(
-  db: Database.Database,
-  input: ReviewMistakeInput,
-): ReviewResult {
-  const { childId, mistakeId, correct } = input;
-
-  // correct=false: SB124-T02 (#126) — wrong corrections are no longer a
-  // silent no-op. We still do NOT touch reviewed_count (so the picker
-  // keeps showing the case) and we do NOT change obligation status, but
-  // we DO append a 'correction' learning_attempt (is_correct=0) so the
-  // closure loop is auditable. The kid's actual wrong answer is not
-  // captured at this layer — the client only sends { mistakeId, correct }
-  // — so user_answer is NULL.
-  if (!correct) {
-    const row = db
-      .prepare(
-        `SELECT co.reviewed_count, co.case_id, co.status,
-                mc.problem AS problem, mc.correct_answer AS correct_answer,
-                mc.source AS source
-           FROM correction_obligations co
-           JOIN mistake_cases mc ON mc.case_id = co.case_id
-          WHERE mc.original_mistake_id = ? AND mc.child_id = ?`,
-      )
-      .get(mistakeId, childId) as {
-        reviewed_count: number;
-        case_id: string;
-        status: string;
-        problem: string | null;
-        correct_answer: string | null;
-        source: string;
-      } | undefined;
-    if (row) {
-      // Only append when the case exists for this child — wrong child /
-      // gone rows stay no-op so the queue can flush cleanly.
-      db.prepare(`
-        INSERT OR IGNORE INTO learning_attempts
-          (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
-           user_answer, correct_answer, is_correct, occurred_at, source)
-        VALUES (?, ?, 'correction', ?, ?, ?, NULL, ?, 0, ?, ?)
-      `).run(
-        `review-wrong:${row.case_id}:${Date.now()}`,
-        row.case_id,
-        mistakeId,
-        childId,
-        row.problem,
-        row.correct_answer,
-        Date.now(),
-        row.source,
-      );
-    }
-    return {
-      mistakeId,
-      reviewedCount: row?.reviewed_count ?? 0,
-      deleted: false,
-    };
-  }
-
-  // correct=true: read current, then CAS-increment with retry on race.
-  let current = db
-    .prepare(
-      `SELECT co.reviewed_count, co.case_id, co.status,
-              mc.opened_at AS ts, mc.problem, mc.correct_answer, mc.source
-         FROM correction_obligations co
-         JOIN mistake_cases mc ON mc.case_id = co.case_id
-        WHERE mc.original_mistake_id = ? AND mc.child_id = ?`,
-    )
-    .get(mistakeId, childId) as {
-      reviewed_count: number;
-      case_id: string;
-      status: string;
-      ts: number;
-      problem: string | null;
-      correct_answer: string | null;
-      source: string;
-    } | undefined;
-
-  // Case not found (or wrong child) — collapse to no-op so the queue
-  // can flush cleanly across devices.
-  if (!current) {
-    return { mistakeId, reviewedCount: 0, deleted: false };
-  }
-
-  // Already verified — no-op (the 3-correct cascade has already fired).
-  // The mistake_cases + correction_obligations rows are durable
-  // evidence; the picker filters status='open' so the kid doesn't see
-  // them again. Returning reviewedCount: 0 here would be misleading
-  // (the case IS at the threshold), so we report the actual count.
-  if (current.status !== "open") {
-    return {
-      mistakeId,
-      reviewedCount: current.reviewed_count,
-      deleted: false,
-    };
-  }
-
-  for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
-    const update = db
-      .prepare(
-        `UPDATE correction_obligations
-            SET reviewed_count = reviewed_count + 1
-          WHERE case_id = ? AND reviewed_count = ? AND status = 'open'`,
-      )
-      .run(current.case_id, current.reviewed_count);
-
-    if (update.changes === 1) {
-      const newCount = current.reviewed_count + 1;
-      const deleted = recordReviewCompatibility(db, {
-        caseId: current.case_id,
-        mistakeId,
-        childId,
-        source: current.source,
-        occurredAt: current.ts,
-        problem: current.problem,
-        correctAnswer: current.correct_answer,
-        reviewCount: newCount,
-        closeObligation: newCount >= CASCADE_THRESHOLD,
-      });
-      return { mistakeId, reviewedCount: newCount, deleted };
-    }
-
-    // Lost the race. Re-read and retry.
-    current = db
-      .prepare(
-        `SELECT co.reviewed_count, co.case_id, co.status,
-                mc.opened_at AS ts, mc.problem, mc.correct_answer, mc.source
-           FROM correction_obligations co
-           JOIN mistake_cases mc ON mc.case_id = co.case_id
-          WHERE mc.original_mistake_id = ? AND mc.child_id = ?`,
-      )
-      .get(mistakeId, childId) as {
-        reviewed_count: number;
-        case_id: string;
-        status: string;
-        ts: number;
-        problem: string | null;
-        correct_answer: string | null;
-        source: string;
-      } | undefined;
-    if (!current || current.status !== "open") {
-      // Case was closed by another concurrent review (the other device
-      // hit 3 first). Report it as a no-op.
-      return {
-        mistakeId,
-        reviewedCount: current?.reviewed_count ?? 0,
-        deleted: false,
-      };
-    }
-  }
-
-  // Hit retry cap — surface so logs show the contention.
-  throw new Error(
-    `reviewMistake: CAS retries exhausted (mistakeId=${mistakeId}, childId=${childId})`,
-  );
-}
-
-interface ReviewCompatibilityInput {
-  caseId: string;
-  mistakeId: number;
-  childId: string;
-  source: string;
-  occurredAt: number;
-  problem: string | null;
-  correctAnswer: string | null;
-  reviewCount: number;
-  closeObligation: boolean;
-}
-
-function recordReviewCompatibility(
-  db: Database.Database,
-  input: ReviewCompatibilityInput,
-): boolean {
-  return db.transaction(() => {
-    // v0.9 (SB124-T01 PR-D): no compat bridge needed — the case row
-    // already exists (it was the lookup target in reviewMistake). Just
-    // record the correction attempt.
-    db.prepare(`
-      INSERT OR IGNORE INTO learning_attempts
-        (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
-         user_answer, correct_answer, is_correct, occurred_at, source)
-      VALUES (?, ?, 'correction', ?, ?, ?, NULL, ?, 1, ?, ?)
-    `).run(
-      `review:${input.caseId}:${input.reviewCount}`,
-      input.caseId,
-      input.mistakeId,
-      input.childId,
-      input.problem,
-      input.correctAnswer,
-      Date.now(),
-      input.source,
-    );
-    if (!input.closeObligation) return false;
-
-    const verifiedAt = Date.now();
-    db.prepare(`
-      UPDATE correction_obligations
-         SET status = 'verified', verified_at = ?
-       WHERE case_id = ?
-    `).run(verifiedAt, input.caseId);
-    // Keep the explicit case and attempts as durable evidence while
-    // dropping the legacy mistakes mirror. The mistake_id FK on
-    // mistake_photo_confirmations is preserved (no change to that
-    // table in this PR — PR-D v2 would migrate it to case_id).
-    db.prepare(
-      "DELETE FROM mistakes WHERE id = ? AND child_id = ?",
-    ).run(input.mistakeId, input.childId);
-    return true;
-  })();
 }
