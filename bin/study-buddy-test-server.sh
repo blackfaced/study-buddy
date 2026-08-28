@@ -88,17 +88,26 @@ cmd_start() {
   # Override the production env vars that server/src/index.ts reads.
   # stdout → STDOUT_LOG (so the test user can see boot logs without
   # polluting the production /tmp/study-buddy-server.log).
-  HTTPS_PORT="$HTTPS_PORT" \
-  HTTP_PORT="$HTTP_PORT" \
-  STUDY_DB="$DB_PATH" \
-  MISTAKES_DIR="$MISTAKES_DIR" \
-  LOG_FILE="$LOGFILE" \
+  #
+  # Why the explicit `env` wrapper (8/28 fix): on macOS the
+  # `VAR=val nohup child &` form loses the env vars between nohup
+  # and child (nohup is the immediate command, not the tsx binary),
+  # so the test server boots with prod defaults (port 3000, prod
+  # DB) and immediately EADDRINUSE's against 3000. Wrapping in
+  # `env` makes the env vars part of the child process's environment
+  # and nohup just inherits them cleanly.
+  #
   # Why not "npx tsx": on macOS the npx-spawned tsx child exits a few
   # seconds after listen() succeeds (npm exec passes through differently
   # than direct invocation), so the test server looks "up" via the npm
   # exec pid but lsof shows nothing on the port. Direct path is stable.
-  nohup ./server/node_modules/.bin/tsx server/src/index.ts \
-    >"$STDOUT_LOG" 2>&1 &
+  env HTTPS_PORT="$HTTPS_PORT" \
+      HTTP_PORT="$HTTP_PORT" \
+      STUDY_DB="$DB_PATH" \
+      MISTAKES_DIR="$MISTAKES_DIR" \
+      LOG_FILE="$LOGFILE" \
+    nohup ./server/node_modules/.bin/tsx server/src/index.ts \
+      >"$STDOUT_LOG" 2>&1 &
   local pid=$!
   echo "$pid" > "$PIDFILE"
   info "started pid=$pid — waiting up to 10s for the port to listen"

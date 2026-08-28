@@ -11,9 +11,24 @@ import { config as loadDotenv } from "dotenv";
 import express, { type Request } from "express";
 import multer from "multer";
 import Database from "better-sqlite3";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
 import { type VisionClient } from "./vision.js";
+
+// src/app.ts is at <repo>/server/src/app.ts. The static `web/` tree
+// lives at <repo>/web. Resolve relative to this file so the path
+// works regardless of process.cwd() (the prod bin script runs from
+// <repo>, the test bin script also runs from <repo>, vitest runs
+// from <repo>/server — all three must agree on the same WEB_DIR).
+// Bug (8/28): the previous `resolve(process.cwd(), "../web")` only
+// worked when cwd happened to be <repo>/server. With cwd = <repo>
+// (e.g. the test bin script's direct tsx path) it resolved to
+// <parent>/web, which doesn't exist → /api/capture/* still worked
+// but GET / returned 404 "Cannot GET /" because express.static
+// had no index.html to serve.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_WEB_DIR = resolve(HERE, "../../web");
 import { requestLogger, type Logger, createLogger, stdoutSink } from "./logger.js";
 import { BuddyLock } from "./buddy-lock.js";
 import { registerPortalRoutes } from "./routes/portal.js";
@@ -42,7 +57,7 @@ import { registerMistakePagePhotoRoutes } from "./routes/mistake-page-photo.js";
 
 loadDotenv({ path: resolve(process.cwd(), ".env") });
 
-const WEB_DIR = process.env.WEB_DIR || resolve(process.cwd(), "../web");
+const WEB_DIR = process.env.WEB_DIR || DEFAULT_WEB_DIR;
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 3000);
 
 export interface AppOptions {
