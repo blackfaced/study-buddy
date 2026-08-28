@@ -11,8 +11,7 @@ import {
   respondOwnedSessionFailure,
   type OwnedSessionFailure,
 } from "./session.js";
-import { appendLearningAttemptSourceEvent } from "../source-events.js";
-import { ensureMistakeCompatibility } from "../db-migrate.js";
+import { insertMistake } from "./mistake-api.js";
 import {
   MISTAKE_PHOTO_MAX_BYTES,
   MISTAKE_PHOTO_TYPES,
@@ -175,82 +174,32 @@ export function registerMistakePhotoRoutes(app: Express, deps: MistakePhotoRoute
       const result = db.transaction(() => {
         const current = findOwnedActiveSession(db, session.id, devicePrincipal(res));
         if (current.status !== "ok") throw new SessionChanged(current.status);
-        const existingBeforeInsert = db.prepare(
-          `SELECT id, ts, problem, user_answer, correct_answer, source
-             FROM mistakes
-            WHERE child_id = ? AND problem = ? AND source = 'vision'
-            ORDER BY id LIMIT 1`,
-        ).get(session.child_id, normalized) as {
-          id: number;
-          ts: number;
-          problem: string | null;
-          user_answer: string | null;
-          correct_answer: string | null;
-          source: string;
-        } | undefined;
-        const inserted = existingBeforeInsert ? null : db.prepare(
-          `INSERT OR IGNORE INTO mistakes
-             (session_id, subject, problem, error_type, source, child_id,
-              vision_model, vision_ts, evidence_key, evidence_status,
-              evidence_method, evidence_confirmed_at)
-           VALUES (?, 'math', ?, 'confirmed', 'vision', ?, ?, ?, ?, 'confirmed', ?, ?)`,
-        ).run(
-          session.id,
-          normalized,
-          session.child_id,
-          draft.model,
-          draft.createdAt,
-          draftId,
-          method,
-          confirmedAt,
-        );
-        let mistakeId = existingBeforeInsert?.id ?? Number(inserted?.lastInsertRowid);
-        if (existingBeforeInsert || inserted?.changes === 0) {
-          const existing = existingBeforeInsert ?? db.prepare(
-            `SELECT id, ts, problem, user_answer, correct_answer, source
-               FROM mistakes
-              WHERE child_id = ? AND problem = ? AND source = 'vision'
-              ORDER BY id LIMIT 1`,
-          ).get(session.child_id, normalized) as {
-            id: number;
-            ts: number;
-            problem: string | null;
-            user_answer: string | null;
-            correct_answer: string | null;
-            source: string;
-          } | undefined;
-          if (!existing) throw new Error("vision mistake collision without a row");
-          mistakeId = existing.id;
-          ensureMistakeCompatibility(db, {
-            mistakeId: existing.id,
+        // T10 mirror work (issue #166): vision confirm writes the
+        // closure-loop primary tables directly via `insertMistake()`.
+        // It handles dedupe by (child_id, problem, source), writes
+        // mistake_cases + learning_attempts (original) +
+        // correction_obligations (open), INSERTs a mistakes mirror
+        // row (to keep `mistake_photo_confirmations.mistake_id` FK
+        // satisfied until PR-D v2.4 drops the column), and appends
+        // the learning_attempt source event.
+        const insertResult = insertMistake(
+          db,
+          {
             childId: session.child_id,
-            source: existing.source,
-            occurredAt: existing.ts,
-            problem: existing.problem,
-            userAnswer: existing.user_answer,
-            correctAnswer: existing.correct_answer,
-          });
-        } else {
-          ensureMistakeCompatibility(db, {
-            mistakeId,
-            childId: session.child_id,
-            source: "vision",
-            occurredAt: confirmedAt,
             problem: normalized,
-          });
-          deps.beforeSourceEventAppend?.("learning_attempt");
-          appendLearningAttemptSourceEvent(db, {
-            mistakeId,
-            childId: session.child_id,
-            occurredAt: confirmedAt,
+            // Vision path has no typed user/correct answer — the
+            // closure loop contract is "we have a wrong answer
+            // worth tracking"; typed answer text arrives later
+            // (issue #160 capture user answer in review).
+            userAnswer: "",
+            correctAnswer: "",
+            errorType: "confirmed",
+            source: "vision",
             subject: "math",
-            problem: normalized,
-            submittedAnswer: "",
-            expectedAnswer: null,
-            mistakeType: "confirmed",
-            source: "vision",
-          });
-        }
+          },
+          deps.beforeSourceEventAppend,
+        );
+        const mistakeId = insertResult.id;
         db.prepare(
           `INSERT OR IGNORE INTO mistake_photo_confirmations
              (draft_id, mistake_id, session_id, child_id, device_id,
@@ -265,7 +214,12 @@ export function registerMistakePhotoRoutes(app: Express, deps: MistakePhotoRoute
           method,
           confirmedAt,
         );
-        return { mistakeId, problemText: normalized, confirmationMethod: method };
+        return {
+          caseId: insertResult.caseId,
+          mistakeId,
+          problemText: normalized,
+          confirmationMethod: method,
+        };
       })();
       workflow.complete(draftId);
       return res.json({ state: "confirmed", ...result });
@@ -319,6 +273,7 @@ function ownedDraft(
 
 interface ConfirmationReceipt {
   sessionId: string;
+  caseId: string;
   mistakeId: number;
   problemText: string;
   confirmationMethod: string;
@@ -329,10 +284,12 @@ function findConfirmationReceipt(
   draftId: string,
 ): ConfirmationReceipt | null {
   const row = db.prepare(
-    `SELECT c.session_id AS sessionId, m.id AS mistakeId, m.problem AS problemText,
+    `SELECT c.session_id AS sessionId, mc.case_id AS caseId, m.id AS mistakeId,
+            m.problem AS problemText,
             c.confirmation_method AS confirmationMethod
        FROM mistake_photo_confirmations c
        JOIN mistakes m ON m.id = c.mistake_id
+       JOIN mistake_cases mc ON mc.original_mistake_id = m.id
       WHERE c.draft_id = ?`,
   ).get(draftId) as ConfirmationReceipt | undefined;
   return row ?? null;
