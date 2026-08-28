@@ -45,6 +45,15 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  // T10 mirror work (issue #166): confirm now writes the closure
+  // loop, so beforeEach needs to wipe the closure-loop tables too
+  // (not just the legacy mistakes mirror) to keep tests isolated.
+  db.prepare("DELETE FROM mistake_photo_confirmations").run();
+  db.prepare("DELETE FROM mistake_photo_page_drafts").run();
+  db.prepare("DELETE FROM mistake_photo_candidates").run();
+  db.prepare("DELETE FROM learning_attempts").run();
+  db.prepare("DELETE FROM correction_obligations").run();
+  db.prepare("DELETE FROM mistake_cases").run();
   db.prepare("DELETE FROM mistakes").run();
   db.prepare("DELETE FROM sessions").run();
   providerCalls = 0;
@@ -115,20 +124,32 @@ describe("confirmed mistake-photo workflow", () => {
       .send({ sessionId, problemText: "1 + 1" });
     expect(confirmed.status).toBe(200);
     expect(confirmed.body.confirmationMethod).toBe("explicit_acceptance");
+    expect(confirmed.body.caseId).toMatch(/^case:/);
 
-    const row = db.prepare("SELECT * FROM mistakes").get() as any;
-    expect(row.problem).toBe("1 + 1");
-    expect(row.source).toBe("vision");
-    expect(row.evidence_status).toBe("confirmed");
-    expect(row.evidence_method).toBe("explicit_acceptance");
-    expect(row.image_path).toBeNull();
-    expect(row.vision_input).toBeNull();
-    expect(row.vision_reasoning).toBeNull();
-    expect(JSON.stringify(row)).not.toContain("secretProviderPayload");
+    // T10 mirror work (issue #166): closure loop is the source of
+    // truth, mistakes mirror is a thin compat layer. The case row
+    // carries the canonical evidence; vision-specific columns
+    // (evidence_status, evidence_method, image_path, vision_*) live
+    // on mistake_photo_drafts / mistake_photo_candidates in the new
+    // contract, not on the mistakes mirror.
+    const caseRow = db
+      .prepare("SELECT child_id, problem, source FROM mistake_cases WHERE case_id = ?")
+      .get(confirmed.body.caseId) as { child_id: string; problem: string; source: string } | undefined;
+    expect(caseRow).toEqual({
+      child_id: "default",
+      problem: "1 + 1",
+      source: "vision",
+    });
+    expect(JSON.stringify(caseRow)).not.toContain("secretProviderPayload");
     expect(JSON.stringify(logMemory.entries())).not.toContain("不会持久化的模型推理");
+    const mistakeId = (
+      db
+        .prepare("SELECT original_mistake_id FROM mistake_cases WHERE case_id = ?")
+        .get(confirmed.body.caseId) as { original_mistake_id: number | null } | undefined
+    )?.original_mistake_id;
     const event = db.prepare(
       "SELECT record_type, event_type, payload_json FROM source_events WHERE record_id = ?",
-    ).get(`mistake:${row.id}`) as any;
+    ).get(`mistake:${mistakeId}`) as any;
     expect(event.record_type).toBe("learning_attempt");
     expect(event.event_type).toBe("learning_attempt_recorded");
     expect(JSON.parse(event.payload_json)).toMatchObject({
@@ -151,8 +172,18 @@ describe("confirmed mistake-photo workflow", () => {
       problemText: "1 + 2\n= ?",
       confirmationMethod: "explicit_correction",
     });
-    const row = db.prepare("SELECT problem, evidence_method FROM mistakes").get();
-    expect(row).toEqual({ problem: "1 + 2\n= ?", evidence_method: "explicit_correction" });
+    // T10 mirror work: closure loop is the source of truth.
+    // The "explicit_correction" mark is captured in
+    // mistake_photo_confirmations.confirmation_method (audit), not
+    // on mistakes.evidence_method (legacy).
+    const row = db
+      .prepare("SELECT problem FROM mistake_cases WHERE case_id = ?")
+      .get(response.body.caseId) as { problem: string } | undefined;
+    expect(row).toEqual({ problem: "1 + 2\n= ?" });
+    const confirmation = db
+      .prepare("SELECT confirmation_method FROM mistake_photo_confirmations WHERE draft_id = ?")
+      .get("draft_correction") as { confirmation_method: string } | undefined;
+    expect(confirmation?.confirmation_method).toBe("explicit_correction");
   });
 
   it("exposes confidence 'low' on the draft response when VLM returns 无法识别", async () => {
@@ -215,8 +246,18 @@ describe("confirmed mistake-photo workflow", () => {
     const retried = await request(restartedApp)
       .post("/api/mistake-photo/draft_duplicate/confirm")
       .send({ sessionId, problemText: "1 + 1" });
+    // T10 mirror work: closure loop is the source of truth, dedupe
+    // key is (child_id, problem, source). The caseId is the stable
+    // identity across retries; mistakeId (legacy mirror id) is
+    // also stable.
+    expect(retried.body.caseId).toBe(accepted.body.caseId);
     expect(retried.body.mistakeId).toBe(accepted.body.mistakeId);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM mistakes").get()).toEqual({ count: 1 });
+    // Exactly one closure-loop case for this (child, problem, source).
+    expect(
+      db
+        .prepare("SELECT COUNT(*) AS c FROM mistake_cases WHERE child_id = ? AND problem = ? AND source = 'vision'")
+        .get("default", "1 + 1"),
+    ).toEqual({ c: 1 });
     const repeatedUpload = await analyze(restartedApp, sessionId, "draft_duplicate");
     expect(repeatedUpload.body).toMatchObject({
       state: "confirmed",
@@ -228,24 +269,33 @@ describe("confirmed mistake-photo workflow", () => {
   it("keeps game and vision provenance separate for the same problem", async () => {
     const app = makeApp();
     const sessionId = await startSession(app);
-    db.prepare(
-      `INSERT INTO mistakes
-         (session_id, child_id, problem, source, error_type)
-       VALUES (?, 'default', '1 + 1', 'game', 'compute')`,
-    ).run(sessionId);
+    // Seed a game-source mistake via the closure loop's insertMistake
+    // helper so we exercise the same write path real game clients use.
+    const { insertMistake } = await import("./routes/mistake-api.js");
+    insertMistake(db, {
+      childId: "default",
+      problem: "1 + 1",
+      userAnswer: "3",
+      correctAnswer: "2",
+      errorType: "compute",
+      source: "game",
+    });
 
     await analyze(app, sessionId, "draft_provenance");
     const response = await request(app)
       .post("/api/mistake-photo/draft_provenance/confirm")
       .send({ sessionId, problemText: "1 + 1" });
     expect(response.status).toBe(200);
-    const rows = db.prepare(
-      "SELECT source, evidence_status FROM mistakes WHERE child_id = 'default' AND problem = '1 + 1' ORDER BY source",
-    ).all();
-    expect(rows).toEqual([
-      { source: "game", evidence_status: null },
-      { source: "vision", evidence_status: "confirmed" },
-    ]);
+    // T10 mirror work: closure loop keeps `source` on mistake_cases,
+    // not on the mistakes mirror. Two separate cases (game + vision)
+    // for the same (child, problem) — different `source` makes them
+    // distinct rows in the closure loop.
+    const caseSources = db
+      .prepare(
+        "SELECT source FROM mistake_cases WHERE child_id = 'default' AND problem = '1 + 1' ORDER BY opened_at",
+      )
+      .all() as Array<{ source: string }>;
+    expect(caseSources.map((r) => r.source)).toEqual(["game", "vision"]);
   });
 
   it("rolls back confirmation if its Source Event cannot be appended", async () => {
