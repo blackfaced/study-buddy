@@ -1,17 +1,19 @@
 // server/src/routes/mistake-api.ts
 // =====================================================================
-// SB124-T10 #134: the legacy /api/game/mistake* endpoints are
-// deprecated. The closure loop (mistake_cases + correction_obligations
-// + learning_attempts) is the source of truth; this file now exposes
-// the canonical `insertMistake()` write helper plus 410-only stubs
-// for the retired game routes.
+// Compat-adapter home for the legacy game clients
+// (candy-math-island, multiplication-drill).
 //
-// Replacements:
-//   POST /api/game/mistake          → POST /api/capture/manual
-//   POST /api/game/mistake-review   → POST /api/capture/case/:caseId/attempt
+//   POST /api/game/mistake         — adapter over insertMistake()
+//   POST /api/game/mistake-review  — adapter over recordCorrectionAttempt()
 //
-// The 410 stubs advertise the X-Sunset header so clients can render
-// a clear "this is retired" message during the sunset window.
+// SB124-T10 briefly retired both endpoints to 410-only stubs; that was
+// reversed because these are the ONLY production clients of the routes
+// and their error handling silently drops queued data on any non-2xx —
+// the sunset window protected nobody and lost every game wrong answer
+// and in-quiz re-attempt. The adapters are the long-lived contract;
+// they delegate to the same closure-loop write paths (mistake_cases +
+// correction_obligations + learning_attempts) as the capture UI.
+//
 // `insertMistake()` is the canonical closure-loop write path used by
 // capture.ts, game-sync, and the integration tests.
 // =====================================================================
@@ -21,6 +23,8 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { GAME_ONLY_SESSION_SUBJECT } from "../session-kind.js";
 import { appendLearningAttemptSourceEvent } from "../source-events.js";
+import { recordCorrectionAttempt } from "../attempt-recorder.js";
+import type { Logger } from "../logger.js";
 // PR-D: ensureMistakeCompatibility removed (PR #153 made mistake_cases
 // the source of truth; the compat bridge is dead code).
 import { inferMistakeLevel } from "../mistake-level.js";
@@ -28,50 +32,192 @@ import { inferMistakeLevel } from "../mistake-level.js";
 export interface MistakeRouteDeps {
   db: Database.Database;
   beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
+  logger?: Logger;
 }
 
-export function registerMistakeRoutes(app: Express, _deps: MistakeRouteDeps): void {
-  // T10 #134: registerMistakeRoutes is now a 410-only stub. The
-  // closure-loop surface lives in routes/capture.ts and the
-  // /api/capture/case/:caseId/attempt endpoint; this stub exists
-  // so the legacy /api/game/mistake* paths still return a clean
-  // 410 + replacement path during the sunset window. We accept
-  // (and ignore) the deps so the existing wiring in app.ts keeps
-  // working.
+interface MistakeRequestBody {
+  childId?: unknown;
+  problem?: unknown;
+  userAnswer?: unknown;
+  correctAnswer?: unknown;
+  errorType?: unknown;
+}
 
-  // ============== T10 #134: deprecate the old game endpoints ==============
-  // The closure loop (mistake_cases + correction_obligations +
-  // learning_attempts) is the source of truth as of SB124-T01.
-  // The /api/game/mistake and /api/game/mistake-review routes
-  // still used the pre-T1 contract (mistakes table + reviewed_count
-  // CAS + 3-cascade-delete). They now return 410 Gone with the
-  // replacement path so existing v0.5 clients can be migrated
-  // before the sunset date.
+export function registerMistakeRoutes(app: Express, deps: MistakeRouteDeps): void {
+  const { db } = deps;
+
+  // ============== POST /api/game/mistake ==============
+  // Compat adapter over insertMistake() for the legacy game clients
+  // (candy-math-island, multiplication-drill). Contract (issue #98):
   //
-  // X-Sunset header advertises the official removal date for
-  // client-side caching. Replacements are stable closure-loop
-  // routes that already ship.
-  const GAME_ENDPOINT_SUNSET = "2026-12-31";
-  const goneWithReplacement = (
-    res: Response,
-    replacement: string,
-  ): Response => {
-    res.setHeader("X-Sunset", GAME_ENDPOINT_SUNSET);
-    return res.status(410).json({
-      error: "this endpoint was retired in SB124-T10; use the closure-loop replacement",
-      replacement,
-    });
-  };
+  //   201 {id, caseId, created: true}   new case inserted
+  //   200 {id, caseId, created: false}  idempotent dedupe hit
+  //   400 {error}                       missing/invalid required fields
+  //
+  // The route owns the canonical `game` source so client labels cannot
+  // partition deduplication.
+  app.post("/api/game/mistake", (req: Request, res: Response) => {
+    const body: MistakeRequestBody = (req.body ?? {}) as MistakeRequestBody;
 
-  app.post("/api/game/mistake", (_req: Request, res: Response) => {
-    goneWithReplacement(res, "POST /api/capture/manual");
+    // childId defaults to "default" for backwards compat with old clients
+    // that don't know about per-child mistake tracking. Empty string also
+    // collapses to the default (defensive — empty childId is meaningless).
+    const childId =
+      typeof body.childId === "string" && body.childId.length > 0
+        ? body.childId
+        : "default";
+
+    // problem is the dedupe key (paired with childId and the canonical
+    // route-owned source category by the UNIQUE index).
+    // Reject missing/non-string early so we never INSERT a NULL problem.
+    if (!isBoundedText(body.problem, 200)) {
+      res.status(400).json({ error: "problem is required" });
+      return;
+    }
+
+    // userAnswer is required so the agent can see what the kid typed.
+    if (!isBoundedText(body.userAnswer, 100, true)) {
+      res.status(400).json({ error: "userAnswer is required" });
+      return;
+    }
+
+    const correctAnswer =
+      typeof body.correctAnswer === "string" ? body.correctAnswer : null;
+    const errorType = typeof body.errorType === "string" ? body.errorType : null;
+    // App identity is not a learning-evidence category. This route owns the
+    // canonical `game` source so client labels cannot partition deduplication
+    // or disappear from game-only weak-topic aggregation.
+    const source = "game";
+    if (
+      (correctAnswer !== null && !isBoundedText(correctAnswer, 100, true)) ||
+      (errorType !== null && !isBoundedText(errorType, 64, true))
+    ) {
+      res.status(400).json({ error: "attempt fields exceed the source contract" });
+      return;
+    }
+
+    let result: InsertMistakeResult;
+    try {
+      result = insertMistake(
+        db,
+        {
+          childId,
+          problem: body.problem,
+          userAnswer: body.userAnswer,
+          correctAnswer,
+          errorType,
+          source,
+        },
+        deps.beforeSourceEventAppend,
+      );
+    } catch {
+      res.status(500).json({ error: "mistake could not be recorded" });
+      return;
+    }
+
+    res
+      .status(result.created ? 201 : 200)
+      .json({ id: result.id, caseId: result.caseId, created: result.created });
   });
 
-  app.post("/api/game/mistake-review", (_req: Request, res: Response) => {
-    goneWithReplacement(
-      res,
-      "POST /api/capture/case/:caseId/attempt",
-    );
+  // ============== POST /api/game/mistake-review ==============
+  // Compat adapter over recordCorrectionAttempt() for the legacy game
+  // clients' in-quiz re-attempts of due mistakes. Body:
+  //
+  //   { childId?, results: [{ mistakeId: number, correct: boolean,
+  //                           userAnswer?: string }] }
+  //
+  // Each result resolves its case via mistake_cases.original_mistake_id
+  // and records a correction attempt (attempt_id prefix "review-game").
+  // correct=true also verifies the obligation and drops the legacy
+  // mistakes mirror row; correct=false leaves the obligation open.
+  //
+  // Batch semantics: once the top-level body is well-formed the
+  // endpoint ALWAYS returns 200 with per-result statuses —
+  // {results: [{mistakeId, status: "recorded"|"skipped"}]} — because
+  // clients drop their whole queue on any non-2xx, so a single bad
+  // row must not fail the batch. 400 is reserved for a malformed
+  // top-level body. Skips (case not found, child mismatch, obligation
+  // already verified) are warn-logged.
+  app.post("/api/game/mistake-review", (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { childId?: unknown; results?: unknown };
+
+    const childId =
+      typeof body.childId === "string" && body.childId.length > 0
+        ? body.childId
+        : "default";
+
+    if (!Array.isArray(body.results)) {
+      res.status(400).json({ error: "results array is required" });
+      return;
+    }
+
+    const results: Array<{ mistakeId: number | null; status: "recorded" | "skipped" }> = [];
+    const skip = (mistakeId: number, reason: string): void => {
+      deps.logger?.warn("game mistake-review result skipped", {
+        mistakeId,
+        childId,
+        reason,
+      });
+      results.push({ mistakeId, status: "skipped" });
+    };
+
+    for (const raw of body.results) {
+      if (
+        !raw ||
+        typeof raw !== "object" ||
+        typeof (raw as Record<string, unknown>).mistakeId !== "number" ||
+        typeof (raw as Record<string, unknown>).correct !== "boolean"
+      ) {
+        // Malformed entry: report it as skipped (never silently drop —
+        // the response is the only feedback channel the client has) and
+        // warn-log so the bad producer shows up in logs.
+        const rawId = (raw as Record<string, unknown> | null)?.mistakeId;
+        const entryId = typeof rawId === "number" ? rawId : null;
+        deps.logger?.warn("game mistake-review result skipped", {
+          mistakeId: entryId,
+          childId,
+          reason: "malformed entry",
+        });
+        results.push({ mistakeId: entryId, status: "skipped" });
+        continue;
+      }
+      const r = raw as { mistakeId: number; correct: boolean; userAnswer?: unknown };
+
+      const caseRow = db
+        .prepare(
+          "SELECT case_id AS caseId, child_id AS childId FROM mistake_cases WHERE original_mistake_id = ?",
+        )
+        .get(r.mistakeId) as { caseId: string; childId: string } | undefined;
+      if (!caseRow) {
+        skip(r.mistakeId, "case not found");
+        continue;
+      }
+      if (caseRow.childId !== childId) {
+        skip(r.mistakeId, "case belongs to another child");
+        continue;
+      }
+
+      const outcome = recordCorrectionAttempt(db, {
+        caseId: caseRow.caseId,
+        childId,
+        isCorrect: r.correct,
+        userAnswer: typeof r.userAnswer === "string" ? r.userAnswer : null,
+        attemptIdPrefix: "review-game",
+      });
+      if (outcome.outcome === "recorded") {
+        results.push({ mistakeId: r.mistakeId, status: "recorded" });
+      } else if (outcome.outcome === "already-verified") {
+        // Idempotent retry: obligation already closed — don't append a
+        // duplicate attempt, tell the client to drop the queue entry.
+        skip(r.mistakeId, "obligation already verified");
+      } else {
+        // Case vanished between resolution and the transactional fetch.
+        skip(r.mistakeId, "case not found");
+      }
+    }
+
+    res.json({ results });
   });
 }
 
@@ -96,6 +242,20 @@ export interface InsertMistakeResult {
   id: number;
   caseId: string;
   created: boolean;
+}
+
+export function isBoundedText(
+  value: unknown,
+  maxLength: number,
+  allowEmpty = false,
+): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= maxLength &&
+    (allowEmpty || value.length > 0) &&
+    // oxlint-disable-next-line no-control-regex -- intentional: reject control chars in user input
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
 }
 
 /**

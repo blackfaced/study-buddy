@@ -159,6 +159,7 @@ export function createApp(opts: AppOptions): express.Express {
   registerMistakeRoutes(app, {
     db,
     beforeSourceEventAppend: opts.beforeSourceEventAppend,
+    logger,
   });
   registerCaptureRoutes(app, {
     db,

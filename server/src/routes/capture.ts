@@ -20,7 +20,8 @@
 
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
-import { insertMistake } from "./mistake-api.js";
+import { insertMistake, isBoundedText } from "./mistake-api.js";
+import { recordCorrectionAttempt } from "../attempt-recorder.js";
 import {
   addHypothesis,
   confirmHypothesis,
@@ -838,7 +839,7 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
 }
 
 function handleAttempt(db: Database.Database, req: Request, res: Response): void {
-  const caseId = req.params.caseId;
+  const caseId = String(req.params.caseId);
   const body = (req.body ?? {}) as { childId?: unknown; answer?: unknown };
 
   const childId =
@@ -852,12 +853,14 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
     return;
   }
 
+  // Validation fetch: 404 / 403 / the canonical correctAnswer for
+  // answersMatch. recordCorrectionAttempt re-fetches authoritatively
+  // inside its transaction for the verified-idempotency check.
   const row = db
     .prepare(
       `SELECT mc.case_id AS caseId,
               mc.child_id AS childId,
               mc.correct_answer AS correctAnswer,
-              mc.source,
               co.status AS obligationStatus,
               co.reviewed_count AS reviewedCount
          FROM mistake_cases mc
@@ -869,7 +872,6 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
         caseId: string;
         childId: string;
         correctAnswer: string | null;
-        source: string;
         obligationStatus: string;
         reviewedCount: number;
       }
@@ -883,68 +885,40 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
     return;
   }
 
-  // Already verified (race with another device, or someone hit T3 3-correct
-  // cascade in parallel): report the current state, don't append a new
-  // attempt row. Idempotent retry of the kid's last input.
-  if (row.obligationStatus !== "open") {
-    const verifiedRow = db
-      .prepare("SELECT verified_at AS verifiedAt FROM correction_obligations WHERE case_id = ?")
-      .get(caseId) as { verifiedAt: number | null } | undefined;
+  const isCorrect = answersMatch(String(body.answer), row.correctAnswer ?? "");
+  const result = recordCorrectionAttempt(db, {
+    caseId,
+    childId,
+    isCorrect,
+    userAnswer: String(body.answer),
+  });
+
+  // Already verified (race with another device closing the same
+  // obligation): report the current state, don't append a new attempt
+  // row. Idempotent retry of the kid's last input.
+  if (result.outcome === "already-verified") {
     res.json({
       caseId,
       isCorrect: true,
-      obligationStatus: row.obligationStatus,
-      reviewedCount: row.reviewedCount,
-      verifiedAt: verifiedRow?.verifiedAt ?? null,
+      obligationStatus: result.obligationStatus,
+      reviewedCount: result.reviewedCount,
+      verifiedAt: result.verifiedAt,
     });
     return;
   }
-
-  const isCorrect = answersMatch(String(body.answer), row.correctAnswer ?? "");
-  const occurredAt = Date.now();
-  const attemptId = `review-self:${caseId}:${occurredAt}`;
-
-  db.prepare(`
-    INSERT OR IGNORE INTO learning_attempts
-      (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
-       user_answer, correct_answer, is_correct, occurred_at, source)
-    VALUES (?, ?, 'correction', NULL, ?, NULL, ?, ?, ?, ?, ?)
-  `).run(
-    attemptId,
-    caseId,
-    childId,
-    String(body.answer),
-    row.correctAnswer,
-    isCorrect ? 1 : 0,
-    occurredAt,
-    row.source,
-  );
-
-  let verifiedAt: number | null = null;
-  let reviewedCount = row.reviewedCount;
-  let obligationStatus = row.obligationStatus;
-  if (isCorrect) {
-    // First independent correct closes the obligation (T05 semantics).
-    // T3 still uses the 3-correct cascade for game-flow reviews.
-    verifiedAt = Date.now();
-    db.prepare(
-      "UPDATE correction_obligations SET status = 'verified', verified_at = ? WHERE case_id = ? AND status = 'open'",
-    ).run(verifiedAt, caseId);
-    obligationStatus = "verified";
-    // Drop the legacy mistakes mirror (same as T3 closeObligation path,
-    // PR-D #155). mistake_cases is preserved. The mirror's id is the
-    // original_mistake_id stored on the canonical case row.
-    db.prepare(
-      "DELETE FROM mistakes WHERE id = (SELECT original_mistake_id FROM mistake_cases WHERE case_id = ?) AND child_id = ?",
-    ).run(caseId, childId);
+  if (result.outcome === "not-found") {
+    // Race: the case vanished between the validation fetch and the
+    // helper's transactional fetch. Mirror the validation-fetch 404.
+    res.status(404).json({ error: "case not found" });
+    return;
   }
 
   res.json({
     caseId,
     isCorrect: Boolean(isCorrect),
-    obligationStatus,
-    reviewedCount,
-    verifiedAt,
+    obligationStatus: result.obligationStatus,
+    reviewedCount: result.reviewedCount,
+    verifiedAt: result.verifiedAt,
   });
 }
 
@@ -973,20 +947,6 @@ export function answersMatch(submitted: string, expected: string): boolean {
 // oxlint: unicorn(consistent-function-scoping)
 function normalizeAnswer(s: string): string {
   return (s ?? "").replace(/\s+/g, "").toLowerCase();
-}
-
-function isBoundedText(
-  value: unknown,
-  maxLength: number,
-  allowEmpty = false,
-): value is string {
-  return (
-    typeof value === "string" &&
-    value.length <= maxLength &&
-    (allowEmpty || value.length > 0) &&
-    // oxlint-disable-next-line no-control-regex -- intentional: reject control chars in user input
-    !/[\u0000-\u001f\u007f]/.test(value)
-  );
 }
 
 // ============== T09 PR-C: parent summary ==============

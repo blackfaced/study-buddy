@@ -64,15 +64,13 @@ describe("GET /api/apps (platform registry)", () => {
   });
 });
 
-describe("T10 #134: deprecated /api/game/mistake returns 410", () => {
-  // The old mistake-write endpoint (issue #98 contract) is retired
-  // as of SB124-T10. The closure loop replaces it:
-  //   POST /api/capture/manual          — manual entry
-  //   POST /api/mistake-photo/...       — page-photo OCR (T04)
-  // For game-source mistakes, callers go through insertMistake()
-  // directly (used by v0.5+ client code). This test guards the
-  // 410 contract.
-  it("returns 410 + replacement path on any payload", async () => {
+describe("POST /api/game/mistake (compat adapter)", () => {
+  // The legacy game endpoint (issue #98 contract) is a long-lived
+  // compat adapter over insertMistake(). T10's 410 retirement was
+  // reversed: production game clients still call this route and
+  // silently drop data on non-2xx. Full DB-level assertions live in
+  // mistake-api.test.ts; here we guard the HTTP contract.
+  it("records a valid mistake: 201 + created:true", async () => {
     const res = await request(app)
       .post("/api/game/mistake")
       .send({
@@ -82,24 +80,26 @@ describe("T10 #134: deprecated /api/game/mistake returns 410", () => {
         userAnswer: "11",
         correctAnswer: "12",
       });
-    expect(res.status).toBe(410);
-    expect(res.body.replacement).toBe("POST /api/capture/manual");
-    expect(res.headers["x-sunset"]).toBe("2026-12-31");
+    expect(res.status).toBe(201);
+    expect(res.body.created).toBe(true);
+    expect(typeof res.body.id).toBe("number");
+    expect(typeof res.body.caseId).toBe("string");
   });
 
-  it("returns 410 even with missing fields (deprecation is unconditional)", async () => {
+  it("returns 400 on missing required fields", async () => {
     const res = await request(app)
       .post("/api/game/mistake")
       .send({ childId: "default" });
-    expect(res.status).toBe(410);
+    expect(res.status).toBe(400);
   });
 });
 
 describe("GET /api/game/weak-topics", () => {
   it("returns the aggregated weak topics across recent days", async () => {
-    // Seed three carries via insertMistake (T10 retired
-    // /api/game/mistake — use the helper directly so this test
-    // continues to cover the weak-topics aggregation logic).
+    // Seed three carries via insertMistake (the same helper the
+    // /api/game/mistake compat adapter delegates to — using it
+    // directly keeps this test focused on the weak-topics
+    // aggregation logic).
     const { insertMistake } = await import("./routes/mistake-api.js");
     for (let i = 0; i < 3; i++) {
       insertMistake(db, {
