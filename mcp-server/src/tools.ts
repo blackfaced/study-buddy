@@ -3,7 +3,7 @@
 // handleTool without triggering the stdio transport (which would hang
 // waiting for stdin).
 import { randomUUID } from "node:crypto";
-import { db, ensureMistakeCompatibility } from "./db.js";
+import { db } from "./db.js";
 import {
   computeChatStats,
   computeOfftopicRate,
@@ -112,17 +112,27 @@ export const TOOLS = [
   },
   {
     name: "log_mistake",
-    description: "记录错题。错题会自动进入薄弱知识点统计。",
+    description:
+      "记录错题。写入 closure loop (mistake_cases + learning_attempts + correction_obligations)，不再写 mistakes mirror (T10 退役)。userAnswer / correctAnswer 是 closure loop 必填 (T03 #127 contract)。",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string" },
         subject: { type: "string", description: "math/chinese/english 等" },
         problem: { type: "string", description: "题目或简短描述" },
+        userAnswer: { type: "string", description: "孩子实际写的答案" },
+        correctAnswer: { type: "string", description: "正确答案" },
         errorType: { type: "string", description: "错误类型，如 钟表/加减法/拼音/生字" },
         hint: { type: "string", description: "agent 给的思路提示" },
       },
-      required: ["sessionId", "subject", "problem", "errorType"],
+      required: [
+        "sessionId",
+        "subject",
+        "problem",
+        "userAnswer",
+        "correctAnswer",
+        "errorType",
+      ],
     },
   },
 
@@ -355,54 +365,103 @@ export async function handleTool(name: string, args: any) {
     }
 
     case "log_mistake": {
+      // T10 mirror work (issue #166 mcp-server side): log_mistake now
+      // writes directly to the closure-loop tables (mistake_cases +
+      // learning_attempts + correction_obligations). The legacy
+      // `mistakes` mirror is no longer touched — it survives only as
+      // a read-only compat layer for old clients.
+      //
+      // Required: sessionId, subject, problem, userAnswer,
+      // correctAnswer, errorType. source is hard-coded to
+      // "study-buddy" (the MCP-side channel; the kid-app /api/game
+      // path uses "game" — see server/src/routes/mistake-api.ts).
+      const userAnswer = args.userAnswer;
+      const correctAnswer = args.correctAnswer;
+      if (typeof userAnswer !== "string" || userAnswer.length === 0) {
+        return { isError: true, error: "userAnswer is required" };
+      }
+      if (typeof correctAnswer !== "string" || correctAnswer.length === 0) {
+        return { isError: true, error: "correctAnswer is required" };
+      }
       return db.transaction(() => {
         const session = requireSession(args.sessionId);
         const occurredAt = Date.now();
+        const source = "study-buddy";
+        // Dedupe against mistake_cases (the new source of truth, per
+        // T10). Reuse the existing case for the same
+        // (child_id, problem, source) tuple — idempotent retries
+        // (e.g. an agent re-asserting the same mistake) collapse
+        // to one case.
         const existing = db.prepare(
-          `SELECT id, ts, problem, source
-             FROM mistakes
-            WHERE child_id = ? AND problem = ? AND source = 'study-buddy'
-            ORDER BY id LIMIT 1`,
-        ).get(session.child_id, args.problem) as {
-          id: number;
-          ts: number;
-          problem: string | null;
-          source: string;
+          `SELECT case_id, original_mistake_id, opened_at
+             FROM mistake_cases
+            WHERE child_id = ? AND problem = ? AND source = ?
+            ORDER BY opened_at, case_id LIMIT 1`,
+        ).get(session.child_id, args.problem, source) as {
+          case_id: string;
+          original_mistake_id: number | null;
+          opened_at: number;
         } | undefined;
         if (existing) {
-          ensureMistakeCompatibility({
-            mistakeId: existing.id,
-            childId: session.child_id,
-            source: existing.source,
-            occurredAt: existing.ts,
-            problem: existing.problem,
-          });
-          return { id: existing.id, ts: existing.ts };
+          // Mirror may have been dropped (post-T10); only look it up
+          // when the table still carries a back-link.
+          const mistakeId = existing.original_mistake_id ?? 0;
+          return {
+            caseId: existing.case_id,
+            mistakeId,
+            created: false,
+          };
         }
-        const id = Number(db.prepare(
-          `INSERT INTO mistakes
-             (session_id, child_id, ts, subject, problem, error_type, hint, source)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'study-buddy')`,
+        // No existing case — write the closure-loop primary tables
+        // directly. The mcp-server's mistake_cases schema (this
+        // file) has original_mistake_id as NULLABLE so we don't
+        // have to touch the legacy `mistakes` mirror. PR-D v2.4
+        // (#165) drops the mirror and the column on a coordinated
+        // cutover; until then the mirror stays empty for MCP writes.
+        const caseId = `case:${randomUUID()}`;
+        db.prepare(
+          `INSERT INTO mistake_cases
+             (case_id, original_mistake_id, child_id, source, opened_at,
+              session_id, ts, subject, problem, error_type, hint,
+              user_answer, correct_answer)
+           VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
         ).run(
-          args.sessionId, session.child_id, occurredAt, args.subject,
-          args.problem, args.errorType, args.hint || null,
-        ).lastInsertRowid);
-        ensureMistakeCompatibility({
-          mistakeId: id,
-          childId: session.child_id,
-          source: "study-buddy",
+          caseId, session.child_id, source, occurredAt,
+          args.sessionId, occurredAt, args.subject, args.problem,
+          args.errorType ?? null, userAnswer, correctAnswer,
+        );
+        db.prepare(
+          `INSERT INTO learning_attempts
+             (attempt_id, case_id, attempt_kind, mistake_id, child_id,
+              problem, user_answer, correct_answer, is_correct,
+              occurred_at, source)
+           VALUES (?, ?, 'original', NULL, ?, ?, ?, ?, 0, ?, ?)`,
+        ).run(
+          `attempt:${caseId}`,
+          caseId,
+          session.child_id,
+          args.problem,
+          userAnswer,
+          correctAnswer,
           occurredAt,
-          problem: args.problem,
-        });
+          source,
+        );
+        db.prepare(
+          `INSERT INTO correction_obligations
+             (case_id, status, opened_at, reviewed_count)
+           VALUES (?, 'open', ?, 0)`,
+        ).run(caseId, occurredAt);
         appendMcpMistakeSourceEvent(db, {
-          mistakeId: id,
+          caseId,
           childId: session.child_id,
           occurredAt,
           subject: args.subject,
           problem: args.problem,
+          userAnswer,
+          correctAnswer,
           mistakeType: args.errorType,
         });
-        return { id, ts: occurredAt };
+        return { caseId, mistakeId: 0, created: true };
       })();
     }
 

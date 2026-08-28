@@ -123,18 +123,20 @@ export function appendMcpChatTurnSourceEvent(
 export function appendMcpMistakeSourceEvent(
   db: Database.Database,
   input: {
-    mistakeId: number;
+    caseId: string;
     childId: string;
     occurredAt: number;
     subject: string;
     problem: string;
-    mistakeType: string;
+    userAnswer: string;
+    correctAnswer: string;
+    mistakeType?: string | null;
   },
 ): void {
   appendSourceEvent(db, {
     childId: input.childId,
     recordType: "learning_attempt",
-    recordId: `mistake:${input.mistakeId}`,
+    recordId: input.caseId,
     revision: 1,
     occurredAt: input.occurredAt,
     eventType: "learning_attempt_recorded",
@@ -142,9 +144,9 @@ export function appendMcpMistakeSourceEvent(
       kind: "learning_attempt",
       subject: input.subject,
       problem: input.problem,
-      submittedAnswer: "",
-      expectedAnswer: null,
-      mistakeType: input.mistakeType,
+      submittedAnswer: input.userAnswer,
+      expectedAnswer: input.correctAnswer,
+      mistakeType: input.mistakeType ?? null,
       source: "study-buddy",
     },
   });

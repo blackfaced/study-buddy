@@ -242,10 +242,32 @@ function runMigrations(inst: Database.Database) {
     -- and correction obligations without changing old readers.
     CREATE TABLE IF NOT EXISTS mistake_cases (
       case_id TEXT PRIMARY KEY,
-      original_mistake_id INTEGER NOT NULL UNIQUE,
+      -- T10 mirror work: original_mistake_id is NULLABLE because the
+      -- mistakes mirror is read-only legacy. New MCP-side writes
+      -- don't need a mirror row at all (issue #165 will eventually
+      -- drop the column entirely on the server side too).
+      original_mistake_id INTEGER UNIQUE,
       child_id TEXT NOT NULL,
       source TEXT NOT NULL,
-      opened_at INTEGER NOT NULL
+      opened_at INTEGER NOT NULL,
+      session_id TEXT,
+      ts INTEGER,
+      subject TEXT,
+      problem TEXT,
+      error_type TEXT,
+      hint TEXT,
+      level INTEGER,
+      image_path TEXT,
+      vision_input TEXT,
+      vision_reasoning TEXT,
+      vision_model TEXT,
+      vision_ts INTEGER,
+      user_answer TEXT,
+      correct_answer TEXT,
+      evidence_key TEXT,
+      evidence_status TEXT,
+      evidence_method TEXT,
+      evidence_confirmed_at INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS learning_attempts (
@@ -268,6 +290,7 @@ function runMigrations(inst: Database.Database) {
       status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'verified')),
       opened_at INTEGER NOT NULL,
       verified_at INTEGER,
+      reviewed_count INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE
     );
 
