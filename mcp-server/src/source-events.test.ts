@@ -23,16 +23,23 @@ describe("MCP transactional Source Event writes", () => {
       sessionId: started.sessionId,
       subject: "math",
       problem: "2 + 2",
+      userAnswer: "5",
+      correctAnswer: "4",
       errorType: "compute",
-    }) as { id: number };
+    }) as { caseId: string };
     const retryMistake = await handleTool("log_mistake", {
       sessionId: started.sessionId,
       subject: "math",
       problem: "2 + 2",
+      userAnswer: "5",
+      correctAnswer: "4",
       errorType: "compute",
-    }) as { id: number };
-    expect(retryMistake.id).toBe(firstMistake.id);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM mistakes").get()).toEqual({ count: 1 });
+    }) as { caseId: string };
+    // T10 mirror work: log_mistake now returns the closure-loop
+    // caseId and skips the legacy `mistakes` mirror. The dedupe
+    // contract is "same (child, problem, source) → same caseId".
+    expect(retryMistake.caseId).toBe(firstMistake.caseId);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM mistakes").get()).toEqual({ count: 0 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM mistake_cases").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM learning_attempts").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM correction_obligations").get()).toEqual({ count: 1 });
