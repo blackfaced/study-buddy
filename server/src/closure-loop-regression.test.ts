@@ -1,17 +1,19 @@
 // server/src/closure-loop-regression.test.ts
 //
-// T10-4: end-to-end smoke for the closure-loop replacement endpoints
-// retired by SB124-T10 #134. Each retired endpoint has a documented
-// replacement; this test exercises the replacements and the
-// surrounding closure-loop surface so the integration is regression-
-// safe.
+// T10-4: end-to-end smoke for the closure loop as exercised through
+// the legacy game compat adapters (POST /api/game/mistake and
+// POST /api/game/mistake-review). SB124-T10 briefly retired those
+// endpoints to 410; that was reversed because the only production
+// clients still call them and silently drop data on non-2xx. They
+// are now long-lived compat adapters delegating to insertMistake()
+// and recordCorrectionAttempt().
 //
 // What's covered:
+//   - compat mistake write → case open (visible in the inbox)
+//   - compat review (correct) → obligation verified → mirror row
+//     deleted on closure → readArchivedMistake returns null
 //   - manual capture → 3 correct attempts via /api/capture/case/:caseId/attempt
-//     → case is verified → mirror row deleted by cascade → readArchivedMistake
-//     returns null after the closure.
-//   - 410 contract on the retired endpoints is re-asserted here so the
-//     end-to-end story is "old = 410, new = 200, old = gone".
+//     → case is verified → readArchivedMistake returns null after closure
 //
 // What is NOT covered here (already covered elsewhere):
 //   - per-route response shapes (capture-routes.test.ts, review-workspace.test.ts,
@@ -53,22 +55,30 @@ afterAll(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("T10 #134: closure-loop replacement smoke", () => {
-  it("T10-4a: retired /api/game/mistake returns 410, replacement works end-to-end", async () => {
-    // 1. Old endpoint: 410.
-    const old = await request(app)
+describe("closure-loop smoke via the game compat adapters", () => {
+  it("T10-4a: POST /api/game/mistake opens a case; manual-capture closure path still works end-to-end", async () => {
+    // 1. Compat adapter: the game client POSTs a wrong answer and a
+    //    case opens.
+    const legacy = await request(app)
       .post("/api/game/mistake")
       .send({
         childId: CHILD,
-        problem: "3+5",
+        problem: "smoke-legacy-3+5",
         userAnswer: "7",
         correctAnswer: "8",
         errorType: "compute",
       });
-    expect(old.status).toBe(410);
-    expect(old.headers["x-sunset"]).toBe("2026-12-31");
+    expect(legacy.status).toBe(201);
+    expect(legacy.body.created).toBe(true);
 
-    // 2. Replacement: POST /api/capture/manual creates the case.
+    const inboxLegacy = await request(app)
+      .get("/api/capture/inbox")
+      .query({ childId: CHILD });
+    const legacyProblems = (inboxLegacy.body.cases as Array<{ problem: string }>)
+      .map((c) => c.problem);
+    expect(legacyProblems).toContain("smoke-legacy-3+5");
+
+    // 2. Manual capture: POST /api/capture/manual creates the case.
     const create = await request(app)
       .post("/api/capture/manual")
       .send({
@@ -91,8 +101,8 @@ describe("T10 #134: closure-loop replacement smoke", () => {
       .map((c) => c.problem);
     expect(problemsBefore).toContain("smoke-3+5");
 
-    // 4. Three correct attempts close the obligation (T05's 1-correct
-    //    path lives elsewhere; this is the original T3 cascade).
+    // 4. Correct attempts close the obligation (first independent
+    //    correct verifies; repeats are idempotent no-ops).
     for (let i = 0; i < 3; i++) {
       const r = await request(app)
         .post(`/api/capture/case/${caseId}/attempt`)
@@ -108,39 +118,52 @@ describe("T10 #134: closure-loop replacement smoke", () => {
       .map((c) => c.problem);
     expect(problemsAfter).not.toContain("smoke-3+5");
 
-    // 6. The T3 cascade deleted the legacy mistakes mirror row.
+    // 6. Closure deleted the legacy mistakes mirror row.
     expect(readArchivedMistake(db, mistakeId)).toBeNull();
   });
 
-  it("T10-4b: retired /api/game/mistake-review returns 410, replacement closes the case", async () => {
-    // 1. Old endpoint: 410.
-    const old = await request(app)
-      .post("/api/game/mistake-review")
-      .send({
-        childId: CHILD,
-        results: [{ mistakeId: 1, correct: true }],
-      });
-    expect(old.status).toBe(410);
-    expect(old.body.replacement).toBe("POST /api/capture/case/:caseId/attempt");
-
-    // 2. Replacement: /api/capture/case/:caseId/attempt is the
-    //    closure-loop alternative. The 410 contract advertises the
-    //    same path; this just exercises the success path so the
-    //    route is alive.
+  it("T10-4b: POST /api/game/mistake-review (correct) verifies the obligation end-to-end", async () => {
+    // 1. Compat adapter: a wrong answer opens a case.
     const create = await request(app)
-      .post("/api/capture/manual")
+      .post("/api/game/mistake")
       .send({
         childId: CHILD,
-        problem: "smoke-9-4",
+        problem: "smoke-legacy-9-4",
         userAnswer: "4",
         correctAnswer: "5",
         errorType: "compute",
-        subject: "math",
       });
     expect(create.status).toBe(201);
-    const attempt = await request(app)
-      .post(`/api/capture/case/${create.body.caseId}/attempt`)
-      .send({ childId: CHILD, answer: "5" });
-    expect(attempt.status).toBe(200);
+    const mistakeId = create.body.id as number;
+    const caseId = create.body.caseId as string;
+
+    // 2. Compat adapter: the in-quiz re-attempt was correct → the
+    //    obligation is verified.
+    const review = await request(app)
+      .post("/api/game/mistake-review")
+      .send({
+        childId: CHILD,
+        results: [{ mistakeId, correct: true, userAnswer: "5" }],
+      });
+    expect(review.status).toBe(200);
+    expect(review.body.results).toEqual([{ mistakeId, status: "recorded" }]);
+
+    const obligation = db
+      .prepare(
+        "SELECT status, verified_at AS verifiedAt FROM correction_obligations WHERE case_id = ?",
+      )
+      .get(caseId) as { status: string; verifiedAt: number | null };
+    expect(obligation.status).toBe("verified");
+    expect(obligation.verifiedAt).not.toBeNull();
+
+    // 3. The verified case drops out of the inbox and the legacy
+    //    mistakes mirror row is deleted on closure.
+    const inboxAfter = await request(app)
+      .get("/api/capture/inbox")
+      .query({ childId: CHILD });
+    const problemsAfter = (inboxAfter.body.cases as Array<{ problem: string }>)
+      .map((c) => c.problem);
+    expect(problemsAfter).not.toContain("smoke-legacy-9-4");
+    expect(readArchivedMistake(db, mistakeId)).toBeNull();
   });
 });
