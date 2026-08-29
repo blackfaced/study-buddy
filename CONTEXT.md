@@ -20,6 +20,10 @@ _Avoid_: review task, reviewed_count, 3-correct cascade
 The lifecycle every Mistake Case travels: capture → open Correction Obligation → correction attempts → reinforcement → delayed review waves. "Closing the loop" means a case reaches `verified` with its full attempt history preserved.
 _Avoid_: mistake lifecycle, review pipeline
 
+**Capture** (录入):
+Bringing one wrong answer into the system from any source (game, manual typing, photo confirmation). Every Capture mode writes through the same Mistake Case write path; dedupe is scoped per (child, problem, capture source).
+_Avoid_: intake, ingestion
+
 **Source Event** (来源事件):
 An immutable, provider-owned record of a learning fact, committed in the same transaction as the local write. External consumers read monotonic pages of Source Events; they never see raw chat, images, or credentials.
 _Avoid_: outbox row, push message
