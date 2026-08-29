@@ -37,11 +37,10 @@ import {
   devicePrincipal,
   type DeviceRequestAuthenticator,
 } from "../device-auth.js";
+import { findOwnedActiveSession, type OwnedSessionFailure } from "../session-queries.js";
 import {
-  findOwnedActiveSession,
   requireOwnedActiveSession,
   respondOwnedSessionFailure,
-  type OwnedSessionFailure,
 } from "./session.js";
 import { registerMistakePhotoRoutes } from "./mistake-photo.js";
 import { MistakePhotoWorkflow } from "../mistake-photo-workflow.js";

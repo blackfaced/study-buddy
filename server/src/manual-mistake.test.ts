@@ -170,7 +170,7 @@ describe("POST /api/capture/manual (SB124-T03 #127: 手动录入进收件箱)", 
     //
     // SB124-T10 retired /api/game/mistake (returns 410). Use the
     // insertMistake helper directly to seed the game-source row.
-    const { insertMistake } = await import("./routes/mistake-api.js");
+    const { insertMistake } = await import("./capture-service.js");
     insertMistake(db, {
       childId: CHILD,
       problem: "shared-problem-source",
@@ -230,7 +230,7 @@ describe("GET /api/capture/inbox (SB124-T03 #127: 今日收件箱按孩子隔离
       });
     // SB124-T10 retired /api/game/mistake (returns 410). Use
     // insertMistake directly to seed the game-source row.
-    const { insertMistake: insertGame } = await import("./routes/mistake-api.js");
+    const { insertMistake: insertGame } = await import("./capture-service.js");
     insertGame(db, {
       childId: CHILD,
       problem: "inbox-B",

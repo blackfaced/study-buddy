@@ -20,7 +20,8 @@
 
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
-import { insertMistake, isBoundedText } from "./mistake-api.js";
+import { isBoundedText } from "./mistake-api.js";
+import { insertMistake } from "../capture-service.js";
 import { recordCorrectionAttempt } from "../attempt-recorder.js";
 import {
   addHypothesis,

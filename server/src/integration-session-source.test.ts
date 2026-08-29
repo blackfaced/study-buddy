@@ -130,7 +130,7 @@ describe("learning Session revisions and withdrawals (#106)", () => {
     // closure loop's helper is the source of truth for game-source
     // mistakes too — see integration-source-events.test.ts for the
     // shared recordAttempt helper pattern.
-    const { insertMistake } = await import("./routes/mistake-api.js");
+    const { insertMistake } = await import("./capture-service.js");
     const mistake = insertMistake(db, {
       childId: "default",
       problem: "7+8",

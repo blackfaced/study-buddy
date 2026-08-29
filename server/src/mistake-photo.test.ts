@@ -271,7 +271,7 @@ describe("confirmed mistake-photo workflow", () => {
     const sessionId = await startSession(app);
     // Seed a game-source mistake via the closure loop's insertMistake
     // helper so we exercise the same write path real game clients use.
-    const { insertMistake } = await import("./routes/mistake-api.js");
+    const { insertMistake } = await import("./capture-service.js");
     insertMistake(db, {
       childId: "default",
       problem: "1 + 1",

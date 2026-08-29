@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { migrateSchema } from "./db-migrate.js";
 import { getGameWeakTopics, recordGameSession, getGameDailyStats } from "./game-sync.js";
-import { insertMistake } from "./routes/mistake-api.js";
+import { insertMistake } from "./capture-service.js";
 
 let db: Database.Database;
 

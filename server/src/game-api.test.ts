@@ -100,7 +100,7 @@ describe("GET /api/game/weak-topics", () => {
     // /api/game/mistake compat adapter delegates to — using it
     // directly keeps this test focused on the weak-topics
     // aggregation logic).
-    const { insertMistake } = await import("./routes/mistake-api.js");
+    const { insertMistake } = await import("./capture-service.js");
     for (let i = 0; i < 3; i++) {
       insertMistake(db, {
         childId: "default",

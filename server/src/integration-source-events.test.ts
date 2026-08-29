@@ -50,7 +50,7 @@ describe("Study Buddy transactional source-event feed (#104)", () => {
         body: { error: "problem is required (1-200 chars)" },
       };
     }
-    const { insertMistake } = await import("./routes/mistake-api.js");
+    const { insertMistake } = await import("./capture-service.js");
     try {
       const r = insertMistake(
         db,

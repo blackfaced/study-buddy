@@ -8,9 +8,9 @@
 //   - POST /api/session/end
 //   - GET /api/session/active
 //
-// findOwnedActiveSession is the shared boundary for chat and media writes:
-// callers must provide an explicit session id and authenticated device, and
-// the session must still belong to that device/child and remain active.
+// findOwnedActiveSession lives in ../session-queries.js (the non-route
+// home for the shared session-ownership seam, so domain modules like
+// capture-service don't import from route files).
 //
 // /start supersedes only the same device's active session for the same child;
 // /end aggregates the events logged during that exact owned session.
@@ -23,7 +23,6 @@ import type Database from "better-sqlite3";
 import type { Logger } from "../logger.js";
 import {
   devicePrincipal,
-  type DevicePrincipal,
   type DeviceRequestAuthenticator,
 } from "../device-auth.js";
 import {
@@ -32,43 +31,15 @@ import {
   type StudySessionPayloadInput,
 } from "../source-events.js";
 import { GAME_ONLY_SESSION_SUBJECT } from "../session-kind.js";
+import {
+  findOwnedActiveSession,
+  type OwnedSessionFailure,
+} from "../session-queries.js";
 
 export interface SessionRouteDeps {
   db: Database.Database;
   logger: Logger;
   auth: DeviceRequestAuthenticator;
-}
-
-export type OwnedSessionResult =
-  | { status: "ok"; session: { id: string; child_id: string } }
-  | { status: "not-found" }
-  | { status: "forbidden" }
-  | { status: "ended" };
-
-export type OwnedSessionFailure = Exclude<OwnedSessionResult["status"], "ok">;
-
-export function findOwnedActiveSession(
-  db: Database.Database,
-  sessionId: string,
-  device: DevicePrincipal,
-): OwnedSessionResult {
-  const session = db.prepare(
-    `SELECT id, child_id, device_id, ended_at
-       FROM sessions WHERE id = ?`,
-  ).get(sessionId) as
-    | { id: string; child_id: string; device_id: string | null; ended_at: number | null }
-    | undefined;
-  if (!session) return { status: "not-found" };
-  if (session.child_id !== device.childId || session.device_id !== device.deviceId) {
-    return { status: "forbidden" };
-  }
-  const activeDevice = db.prepare(
-    `SELECT 1 FROM paired_devices
-      WHERE device_id = ? AND child_id = ? AND revoked_at IS NULL`,
-  ).get(device.deviceId, device.childId);
-  if (!activeDevice) return { status: "forbidden" };
-  if (session.ended_at !== null) return { status: "ended" };
-  return { status: "ok", session: { id: session.id, child_id: session.child_id } };
 }
 
 export function requireOwnedActiveSession(

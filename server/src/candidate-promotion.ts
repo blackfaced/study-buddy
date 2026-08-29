@@ -4,10 +4,10 @@
 // candidate row + the kid's typed answer. Trivial composition so
 // the workflow (T04C-3) and route (T04C-5) can both call it.
 //
-// The actual DB writes live in insertMistake() (mistake-api.ts) and
+// The actual DB writes live in insertMistake() (capture-service.ts) and
 // are wired by candidate-workflow.ts. This file is pure data shape.
 
-import type { InsertMistakeInput } from "./routes/mistake-api.js";
+import type { InsertMistakeInput } from "./capture-service.js";
 
 export interface CandidateForPromotion {
   id: number;

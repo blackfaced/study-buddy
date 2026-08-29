@@ -33,7 +33,7 @@ beforeAll(async () => {
     .run(CHILD, "小宝", "二年级");
   db.prepare(`INSERT OR IGNORE INTO children (id, name, grade) VALUES (?, ?, ?)`)
     .run(CHILD_OTHER, "Bob", "三年级");
-  const { insertMistake } = await import("./routes/mistake-api.js");
+  const { insertMistake } = await import("./capture-service.js");
   const math = insertMistake(db, {
     childId: CHILD,
     problem: "3+4=?",
