@@ -22,7 +22,7 @@ import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import { isBoundedText } from "./mistake-api.js";
 import { insertMistake } from "../capture-service.js";
-import { recordCorrectionAttempt } from "../attempt-recorder.js";
+import { answersMatch, recordCorrectionAttempt } from "../attempt-recorder.js";
 import {
   addHypothesis,
   confirmHypothesis,
@@ -921,33 +921,6 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
     reviewedCount: result.reviewedCount,
     verifiedAt: result.verifiedAt,
   });
-}
-
-/**
- * Compare a kid's submitted answer to the canonical correct_answer.
- * Pure function. Whitespace-stripped + case-folded.
- * Returns false if either side is missing/empty.
- *
- * v0.1 limitation: this is a textual comparison. Math problems where
- * the kid writes "5+3=8" vs the canonical "8" won't match — the spec
- * says "首次独立订正正确" closes the obligation, so v0.5 can add a
- * numeric / expression-aware comparator. The current implementation
- * is intentionally conservative: better to ask the kid to type the
- * exact answer form than to over-credit fuzzy matches.
- */
-export function answersMatch(submitted: string, expected: string): boolean {
-  const a = normalizeAnswer(submitted);
-  const b = normalizeAnswer(expected);
-  if (!a || !b) return false;
-  return a === b;
-}
-
-// Strip ALL whitespace (not just collapse). Math answers often vary
-// in spacing (1+1=2 vs 1 + 1 = 2) but the kid is still expressing
-// the same answer. Pure function, no captures.
-// oxlint: unicorn(consistent-function-scoping)
-function normalizeAnswer(s: string): string {
-  return (s ?? "").replace(/\s+/g, "").toLowerCase();
 }
 
 // ============== T09 PR-C: parent summary ==============

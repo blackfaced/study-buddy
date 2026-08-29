@@ -12,6 +12,7 @@
 //     correct answer so the loop can show progress.
 
 import type Database from "better-sqlite3";
+import { answersMatch } from "./attempt-recorder.js";
 
 export class MaxAttemptsReachedError extends Error {
   constructor(
@@ -132,11 +133,10 @@ export function submitReinforcementAnswer(
   if (existing.userAnswer !== null) {
     throw new AttemptAlreadySubmittedError(attemptId);
   }
-  // textual + whitespace-stripped equality (same shape as T05
-  // answersMatch for closure-loop attempts)
-  const a = userAnswer.trim().toLowerCase();
-  const b = existing.correctAnswer.trim().toLowerCase();
-  const isCorrect = a === b ? 1 : 0;
+  // answersMatch is THE single answer-comparison semantics (owned by
+  // the Attempt module): strips ALL whitespace + case-folds, false if
+  // either side is empty. Same judge as closure-loop correction attempts.
+  const isCorrect = answersMatch(userAnswer, existing.correctAnswer) ? 1 : 0;
   db.prepare(
     `UPDATE reinforcement_attempts
         SET user_answer = ?, is_correct = ?, submitted_at = ?
