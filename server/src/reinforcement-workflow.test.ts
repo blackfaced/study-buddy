@@ -111,6 +111,15 @@ describe("submitReinforcementAnswer (T07 PR-C)", () => {
     expect(state.t).toBeNull();
   });
 
+  it("interior whitespace in the submitted answer still matches (unified answersMatch semantics)", () => {
+    // The old inline trim().toLowerCase() compare marked "1 + 1 = 2"
+    // vs canonical "1+1=2" as WRONG. The unified answersMatch strips
+    // all whitespace, so this must be judged correct.
+    const a = startReinforcementAttempt(db, caseId, CHILD, "1+1=?", "1+1=2");
+    const after = submitReinforcementAnswer(db, a.id, "1 + 1 = 2");
+    expect(after.isCorrect).toBe(1);
+  });
+
   it("re-submit throws AttemptAlreadySubmitted (idempotency)", () => {
     const a = startReinforcementAttempt(db, caseId, CHILD, "5+3=?", "8");
     submitReinforcementAnswer(db, a.id, "8");

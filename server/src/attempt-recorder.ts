@@ -1,12 +1,21 @@
 // server/src/attempt-recorder.ts
 // =====================================================================
-// recordCorrectionAttempt — the post-validation core of a correction
-// attempt against a mistake case. Extracted from handleAttempt
-// (routes/capture.ts) so the legacy /api/game/mistake-review compat
-// adapter can record in-quiz re-attempts through the exact same
-// closure-loop write path as the capture UI.
+// The Attempt module seed. Owns:
 //
-// Holds:
+//   - answersMatch / normalizeAnswer: THE single answer-comparison
+//     semantics for correction attempts (routes/capture.ts
+//     handleAttempt) AND reinforcement attempts
+//     (reinforcement-workflow.ts submitReinforcementAnswer). No other
+//     module may grow its own comparator.
+//
+//   - recordCorrectionAttempt: the post-validation core of a
+//     correction attempt against a mistake case. Extracted from
+//     handleAttempt (routes/capture.ts) so the legacy
+//     /api/game/mistake-review compat adapter can record in-quiz
+//     re-attempts through the exact same closure-loop write path as
+//     the capture UI.
+//
+// recordCorrectionAttempt holds:
 //   - case + obligation fetch (authoritative, inside the transaction)
 //   - verified-idempotency: an already-closed obligation gets NO new
 //     attempt row — the caller reports the current state instead
@@ -21,12 +30,43 @@
 // correction.
 //
 // Callers own HTTP-level validation: existence (404), cross-child
-// checks (403), and the answer comparison (answersMatch) all stay in
-// the route handler. `userAnswer` is nullable because the legacy game
-// clients don't always echo the kid's re-attempt answer.
+// checks (403), and calling answersMatch all stay in the route handler.
+// `userAnswer` is nullable because the legacy game clients don't always
+// echo the kid's re-attempt answer.
 // =====================================================================
 
 import type Database from "better-sqlite3";
+
+/**
+ * Compare a kid's submitted answer to the canonical correct_answer.
+ * Pure function. Whitespace-stripped + case-folded.
+ * Returns false if either side is missing/empty.
+ *
+ * THE single answer-comparison semantics for correction AND
+ * reinforcement attempts — both routes/capture.ts and
+ * reinforcement-workflow.ts import this. Do not grow a second
+ * comparator elsewhere.
+ *
+ * v0.1 limitation: this is a textual comparison. Math problems where
+ * the kid writes "5+3=8" vs the canonical "8" won't match — the spec
+ * says "首次独立订正正确" closes the obligation, so v0.5 can add a
+ * numeric / expression-aware comparator. The current implementation
+ * is intentionally conservative: better to ask the kid to type the
+ * exact answer form than to over-credit fuzzy matches.
+ */
+export function answersMatch(submitted: string, expected: string): boolean {
+  const a = normalizeAnswer(submitted);
+  const b = normalizeAnswer(expected);
+  if (!a || !b) return false;
+  return a === b;
+}
+
+// Strip ALL whitespace (not just collapse). Math answers often vary
+// in spacing (1+1=2 vs 1 + 1 = 2) but the kid is still expressing
+// the same answer. Pure function, no captures.
+export function normalizeAnswer(s: string): string {
+  return (s ?? "").replace(/\s+/g, "").toLowerCase();
+}
 
 export interface RecordCorrectionAttemptInput {
   caseId: string;
