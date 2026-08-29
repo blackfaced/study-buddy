@@ -48,17 +48,19 @@ app.get("/api/apps", (req, res) => res.json({ apps: APPS }));
 
 如果 HTTP server 不可达，mcp-server `get_apps` 退到静态 fallback 列表，至少能展示当前已知的 app。
 
-### 2. 错题本 (mistakes) 是跨 app 共享的
+### 2. 错题本是跨 app 共享的（closure loop）
 
-`mistakes` 表加了一个 `source` 列，标识错题来源：
+所有 app 的错题都写入同一份 closure loop（`mistake_cases` + `correction_obligations` + `learning_attempts`，术语见根目录 `CONTEXT.md`），统一入口是 `server/src/capture-service.ts` 的 `insertMistake()`。`source` 列标识来源：
 
 | source | 来自 | 例子 |
 |---|---|---|
 | `study-buddy` | 聊天 agent 报题 (v0.1) | agent 在对话中指出错题 |
-| `vision` | 拍照识别 (v0.5) | iPad 拍作业→MiniMax-M3 读题 |
+| `vision` | 单张拍照识别 (v0.5) | iPad 拍作业→MiniMax-M3 读题 |
+| `vision_page` | 整页拍照 (T04) | 一页作业拆多个候选题 |
 | `game` | 小游戏 (v0.5b) | 糖果口算岛关卡打错 |
+| `manual` | 手动录入 (T03) | 家长/孩子手打错题 |
 
-`server/src/game-sync.ts` 把游戏错题写进同一张表（`source='game'`），`get_weak_topics` MCP 工具 + `get_game_weak_topics` MCP 工具都能直接 query。
+游戏错题经 compat adapter `POST /api/game/mistake` 进入同一写路径；`get_weak_topics` MCP 工具 + `get_game_weak_topics` MCP 工具都能直接 query。旧 `mistakes` 表是 thin mirror，PR-D (#159–#165) 会整表删除——新代码不要直接读写它。
 
 ### 3. Game sync 流程（双向）
 
@@ -66,7 +68,7 @@ app.get("/api/apps", (req, res) => res.json({ apps: APPS }));
 1. 糖果口算岛打错题 → push 到 `wrongList`，每条标 `syncedToServer: false`
 2. `syncToStudyBuddy()` 遍历未同步的，POST 到 `/api/game/mistake`
 3. 触发时机：`onload` + `pagehide` + `visibilitychange === 'hidden'`
-4. 服务端插入 `mistakes(source='game')`，并在同一 SQLite 事务里追加不可变 Source Event
+4. 服务端经 `insertMistake()` 写入 `mistake_cases(source='game')` + 开启订正义务，并在同一 SQLite 事务里追加不可变 Source Event
 5. 4xx/5xx 也标 `syncedToServer: true`（避免无限重试），仅网络错误才重试
 
 **study-buddy → game**：
@@ -120,7 +122,8 @@ beforeAll(() => {
    { id: "my-app", name: "...", url: "/<app-dir>/", emoji: "...", description: "...", status: "ready" }
    ```
 3. 如果要写错题：
-   - 调用 `POST /api/game/mistake`（参数跟 candy-math-island 一样，复用同 schema）
+   - 游戏类 app 调用 `POST /api/game/mistake`（参数跟 candy-math-island 一样；它是 `insertMistake()` 之上的 compat adapter，source 固定为 `game`）
+   - 非游戏来源用对应的 capture 入口（手动 `/api/capture/manual`），不要直接写表
 4. 如果要读错题：
    - `GET /api/game/weak-topics?days=7`（聚合所有 source=game 的）
    - 或 MCP 工具 `get_weak_topics` / `get_game_weak_topics`

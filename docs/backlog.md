@@ -11,7 +11,7 @@
 | # | 改动 | 估时 | issue |
 |---|------|:---:|------|
 | OPT-C1 🔥 | 难度自适应（5 局 ≥95% → +1） | 3-4h | [#30](https://github.com/blackfaced/study-buddy/issues/30) |
-| OPT-C2 🔥 | 错题本机制（间隔重复） | 2-3h | [#31](https://github.com/blackfaced/study-buddy/issues/31) |
+| OPT-C2 ✅ | 错题本机制（间隔重复） | 已 ship（SB124 closure loop + T08 延迟回放） | [#31](https://github.com/blackfaced/study-buddy/issues/31) |
 | OPT-C3 ⚠️ | 跟写作业联动（数学完成 → 弹游戏） | 2-3h | [#32](https://github.com/blackfaced/study-buddy/issues/32) |
 | OPT-C4 ⚠️ | 题目按年级分级（1 年级下 = 20 以内+表内乘除+应用题） | 4-5h | [#33](https://github.com/blackfaced/study-buddy/issues/33) |
 | OPT-C5 ✅ | 错题讲评动画 | 4-6h | [#34](https://github.com/blackfaced/study-buddy/issues/34) |

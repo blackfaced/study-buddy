@@ -45,7 +45,7 @@ The mcp-server is a child of the mavis daemon (`mavis mcp add`); don't manage it
 study-buddy is a **hub**: one shared backend (HTTP server + mcp-server + SQLite) + multiple hung apps under `web/<app-dir>/`. The portal page (`web/index.html`) lists all `status: "ready"` apps; kid clicks one to enter.
 
 - **Apps registry** (`server/src/app.ts → APPS` const) is the single source of truth. `GET /api/apps` returns it; the mcp-server tool `get_apps` fetches it via HTTP (with a static fallback when the HTTP server is down).
-- **Shared mistake ledger**: the `mistakes` table has a `source` column (`study-buddy` / `vision` / `game`) so all apps contribute to the same wrong-answer pool that `get_weak_topics` queries.
+- **Shared mistake ledger**: every app writes through `server/src/capture-service.ts` (`insertMistake`) — one Mistake Case + open Correction Obligation + original Learning Attempt + Source Event per wrong answer (see `CONTEXT.md` for the vocabulary). `mistake_cases` is the source of truth; the legacy `mistakes` table is a thin mirror pending removal in PR-D (#159–#165). Legacy game clients use the compat adapters `POST /api/game/mistake*` (see `docs/t10-mistakes-deprecation.md`).
 - **Two-way game sync** (game ↔ server) is in `server/src/game-sync.ts` + `web/games/<app>/...`. Auto-creates a session if none is active; syncs on `onload` / `pagehide` / `visibilitychange`.
 - **External integration is provider-owned and loose-coupled**: eligible domain rows and immutable `source_events` commit in one SQLite transaction. Authenticated loopback APIs expose monotonic pages and bounded chat turns; consumers own cursors and delivery.
 - **mcp-server db refactor** (`mcp-server/src/db.ts`): `initDb(path)` + `getDb()` + `db` Proxy so tests can use `:memory:` without touching the real file. `handleTool` is in `tools.ts` so tests don't trigger the stdio transport.
@@ -107,4 +107,4 @@ Five canonical roles, all default names: `needs-triage` / `needs-info` / `ready-
 
 ### Domain docs
 
-Single-context layout: `CONTEXT.md` at root + `docs/adr/`. Both are created lazily by `/domain-modeling` as terms get resolved; absent is fine — see `docs/agents/domain.md`.
+Single-context layout: `CONTEXT.md` at root (glossary: Mistake Case, Learning Attempt, Correction Obligation, Closure Loop, Capture, Source Event) + `docs/adr/` (ADR-0001: photo capture paths stay unmerged until T04-D). Both are kept current by `/domain-modeling` as terms get resolved — see `docs/agents/domain.md`.
