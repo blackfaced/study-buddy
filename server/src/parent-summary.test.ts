@@ -26,7 +26,7 @@ beforeAll(async () => {
   migrateSchema(db);
   db.prepare(`INSERT OR IGNORE INTO children (id, name, grade) VALUES (?, ?, ?)`)
     .run(CHILD, "小宝", "二年级");
-  const { insertMistake } = await import("./routes/mistake-api.js");
+  const { insertMistake } = await import("./capture-service.js");
   // We also need a second child to verify isolation.
   db.prepare(`INSERT OR IGNORE INTO children (id, name, grade) VALUES (?, ?, ?)`)
     .run("bob", "Bob", "三年级");

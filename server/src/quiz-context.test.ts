@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
-import { insertMistake } from "./routes/mistake-api.js";
+import { insertMistake } from "./capture-service.js";
 
 let db: Database.Database;
 let app: ReturnType<typeof createApp>;

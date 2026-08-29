@@ -32,7 +32,7 @@ beforeAll(async () => {
   db.prepare(`INSERT OR IGNORE INTO children (id, name, grade) VALUES (?, ?, ?)`)
     .run(CHILD_OTHER, "Bob", "三年级");
   // need a real case_id with FK target
-  const { insertMistake } = await import("./routes/mistake-api.js");
+  const { insertMistake } = await import("./capture-service.js");
   const r = insertMistake(db, {
     childId: CHILD,
     problem: "12-7",

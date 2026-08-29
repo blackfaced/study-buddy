@@ -15,8 +15,8 @@ import sharp from "sharp";
 import type { Logger } from "../logger.js";
 import type { VisionClient } from "../vision.js";
 import { devicePrincipal, type DeviceRequestAuthenticator } from "../device-auth.js";
+import { findOwnedActiveSession } from "../session-queries.js";
 import {
-  findOwnedActiveSession,
   requireOwnedActiveSession,
   respondOwnedSessionFailure,
 } from "./session.js";

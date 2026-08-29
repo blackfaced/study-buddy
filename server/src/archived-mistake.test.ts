@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { migrateSchema } from "./db-migrate.js";
-import { insertMistake } from "./routes/mistake-api.js";
+import { insertMistake } from "./capture-service.js";
 import { readArchivedMistake } from "./archived-mistake.js";
 
 let db: Database.Database;

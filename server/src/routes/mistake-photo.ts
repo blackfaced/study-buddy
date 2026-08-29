@@ -5,13 +5,17 @@ import type { Logger } from "../logger.js";
 import type { VisionClient } from "../vision.js";
 import { analyzeMistakeImage } from "../vision.js";
 import { devicePrincipal, type DeviceRequestAuthenticator } from "../device-auth.js";
+import { findOwnedActiveSession } from "../session-queries.js";
 import {
-  findOwnedActiveSession,
   requireOwnedActiveSession,
   respondOwnedSessionFailure,
-  type OwnedSessionFailure,
 } from "./session.js";
-import { insertMistake } from "./mistake-api.js";
+import {
+  confirmMistakePhotoDraft,
+  findMistakePhotoConfirmation,
+  SessionChangedError,
+  type MistakePhotoConfirmationReceipt,
+} from "../capture-service.js";
 import {
   MISTAKE_PHOTO_MAX_BYTES,
   MISTAKE_PHOTO_TYPES,
@@ -59,7 +63,7 @@ export function registerMistakePhotoRoutes(app: Express, deps: MistakePhotoRoute
       if (!validDraftId(draftId)) {
         return res.status(400).json({ error: "valid draftId is required" });
       }
-      const receipt = findConfirmationReceipt(db, draftId);
+      const receipt = findMistakePhotoConfirmation(db, draftId);
       if (receipt) {
         if (receipt.sessionId !== session.id) {
           return res.status(403).json({ error: "draft belongs to another session" });
@@ -107,7 +111,7 @@ export function registerMistakePhotoRoutes(app: Express, deps: MistakePhotoRoute
     if (!session) return;
     const draftId = req.params.draftId;
     if (!validDraftId(draftId)) return res.status(400).json({ error: "invalid draftId" });
-    const receipt = findConfirmationReceipt(db, draftId);
+    const receipt = findMistakePhotoConfirmation(db, draftId);
     if (receipt) {
       if (receipt.sessionId !== session.id) {
         return res.status(403).json({ error: "draft belongs to another session" });
@@ -131,7 +135,7 @@ export function registerMistakePhotoRoutes(app: Express, deps: MistakePhotoRoute
     if (draft && !ownedDraft(draft, session.id, devicePrincipal(res))) {
       return res.status(403).json({ error: "draft does not belong to this session" });
     }
-    const receipt = findConfirmationReceipt(db, draftId);
+    const receipt = findMistakePhotoConfirmation(db, draftId);
     if (receipt) {
       if (receipt.sessionId !== session.id) {
         return res.status(403).json({ error: "draft belongs to another session" });
@@ -152,7 +156,7 @@ export function registerMistakePhotoRoutes(app: Express, deps: MistakePhotoRoute
       return res.status(400).json({ error: "problemText must contain 1 to 2000 characters" });
     }
 
-    const receipt = findConfirmationReceipt(db, draftId);
+    const receipt = findMistakePhotoConfirmation(db, draftId);
     if (receipt) {
       if (receipt.sessionId !== session.id) {
         return res.status(403).json({ error: "draft belongs to another session" });
@@ -165,66 +169,23 @@ export function registerMistakePhotoRoutes(app: Express, deps: MistakePhotoRoute
     if (!ownedDraft(draft, session.id, devicePrincipal(res))) {
       return res.status(403).json({ error: "draft does not belong to this session" });
     }
-    const method = normalized === draft.proposedProblem
-      ? "explicit_acceptance"
-      : "explicit_correction";
-    const confirmedAt = Date.now();
-
     try {
-      const result = db.transaction(() => {
-        const current = findOwnedActiveSession(db, session.id, devicePrincipal(res));
-        if (current.status !== "ok") throw new SessionChanged(current.status);
-        // T10 mirror work (issue #166): vision confirm writes the
-        // closure-loop primary tables directly via `insertMistake()`.
-        // It handles dedupe by (child_id, problem, source), writes
-        // mistake_cases + learning_attempts (original) +
-        // correction_obligations (open), INSERTs a mistakes mirror
-        // row (to keep `mistake_photo_confirmations.mistake_id` FK
-        // satisfied until PR-D v2.4 drops the column), and appends
-        // the learning_attempt source event.
-        const insertResult = insertMistake(
-          db,
-          {
-            childId: session.child_id,
-            problem: normalized,
-            // Vision path has no typed user/correct answer — the
-            // closure loop contract is "we have a wrong answer
-            // worth tracking"; typed answer text arrives later
-            // (issue #160 capture user answer in review).
-            userAnswer: "",
-            correctAnswer: "",
-            errorType: "confirmed",
-            source: "vision",
-            subject: "math",
-          },
-          deps.beforeSourceEventAppend,
-        );
-        const mistakeId = insertResult.id;
-        db.prepare(
-          `INSERT OR IGNORE INTO mistake_photo_confirmations
-             (draft_id, mistake_id, session_id, child_id, device_id,
-              confirmation_method, confirmed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
+      const result = confirmMistakePhotoDraft(
+        db,
+        {
           draftId,
-          mistakeId,
-          session.id,
-          session.child_id,
-          devicePrincipal(res).deviceId,
-          method,
-          confirmedAt,
-        );
-        return {
-          caseId: insertResult.caseId,
-          mistakeId,
           problemText: normalized,
-          confirmationMethod: method,
-        };
-      })();
+          proposedProblem: draft.proposedProblem,
+          sessionId: session.id,
+          childId: session.child_id,
+          deviceId: devicePrincipal(res).deviceId,
+        },
+        deps.beforeSourceEventAppend,
+      );
       workflow.complete(draftId);
       return res.json({ state: "confirmed", ...result });
     } catch (error) {
-      if (error instanceof SessionChanged) {
+      if (error instanceof SessionChangedError) {
         return respondOwnedSessionFailure(res, error.status);
       }
       logger.error("mistake photo confirmation failed", { errorType: "database" });
@@ -271,31 +232,7 @@ function ownedDraft(
     && draft.deviceId === principal.deviceId;
 }
 
-interface ConfirmationReceipt {
-  sessionId: string;
-  caseId: string;
-  mistakeId: number;
-  problemText: string;
-  confirmationMethod: string;
-}
-
-function findConfirmationReceipt(
-  db: Database.Database,
-  draftId: string,
-): ConfirmationReceipt | null {
-  const row = db.prepare(
-    `SELECT c.session_id AS sessionId, mc.case_id AS caseId, m.id AS mistakeId,
-            m.problem AS problemText,
-            c.confirmation_method AS confirmationMethod
-       FROM mistake_photo_confirmations c
-       JOIN mistakes m ON m.id = c.mistake_id
-       JOIN mistake_cases mc ON mc.original_mistake_id = m.id
-      WHERE c.draft_id = ?`,
-  ).get(draftId) as ConfirmationReceipt | undefined;
-  return row ?? null;
-}
-
-function publicReceipt(receipt: ConfirmationReceipt) {
+function publicReceipt(receipt: MistakePhotoConfirmationReceipt) {
   const { sessionId: _sessionId, ...result } = receipt;
   return { state: "confirmed", ...result };
 }
@@ -310,10 +247,4 @@ function expectedSharpFormat(mimetype: string): "jpeg" | "png" | "webp" {
   if (mimetype === "image/png") return "png";
   if (mimetype === "image/webp") return "webp";
   return "jpeg";
-}
-
-class SessionChanged extends Error {
-  constructor(readonly status: OwnedSessionFailure) {
-    super("owned session changed");
-  }
 }

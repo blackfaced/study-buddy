@@ -20,7 +20,7 @@ import type Database from "better-sqlite3";
 import {
   insertMistake,
   type InsertMistakeResult,
-} from "./routes/mistake-api.js";
+} from "./capture-service.js";
 import { buildInsertMistakeInput } from "./candidate-promotion.js";
 
 export class CandidateNotFoundError extends Error {

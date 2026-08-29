@@ -42,7 +42,7 @@ beforeAll(async () => {
   ).run(SESSION, CHILD, "default");
   // We need a mistake_cases row for the FK. Use insertMistake to get a
   // real case_id, then reuse it across tests.
-  const { insertMistake } = await import("./routes/mistake-api.js");
+  const { insertMistake } = await import("./capture-service.js");
   const r = insertMistake(db, {
     childId: CHILD,
     problem: "9-4",
