@@ -61,8 +61,8 @@ function seedMistakes(n: number): void {
     const caseId = `case:test-${runId}-${i}`;
     const mistakeResult = db.prepare(
       `INSERT INTO mistakes
-         (session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source, reviewed_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+         (session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       testSessionId,
       CHILD,
@@ -95,8 +95,8 @@ function seedMistakes(n: number): void {
       `prob-${i}`, String(i), String(i + 1), now, "candy-math-island",
     );
     db.prepare(`
-      INSERT INTO correction_obligations (case_id, status, opened_at, reviewed_count)
-      VALUES (?, 'open', ?, 0)
+      INSERT INTO correction_obligations (case_id, status, opened_at)
+      VALUES (?, 'open', ?)
     `).run(caseId, now);
   }
 }
@@ -258,21 +258,22 @@ describe("POST /api/game/quiz-context (issue #99: 30% mistake-mix window)", () =
     expect(Array.isArray(res.body.mistakes)).toBe(true);
   });
 
-  it("QC10: only mistakes with reviewed_count < 3 are returned (3-correct cascade filter)", async () => {
+  it("QC10: only cases with an open obligation are returned (verified cases leave the due pool)", async () => {
     db.exec("DELETE FROM game_sessions");
     db.exec("DELETE FROM learning_attempts");
     db.exec("DELETE FROM correction_obligations");
     db.exec("DELETE FROM mistake_cases");
     db.exec("DELETE FROM mistakes");
-    // Insert 2 fresh mistakes + 1 already-mastered (reviewed_count=3
-    // → status='verified' on the closure-loop row)
+    // Insert 2 fresh mistakes (open obligations) + 1 already-verified
+    // case (first independent correct closed the obligation — the
+    // reviewed_count cascade is gone; obligation status is the signal).
     seedMistakes(2);
     const masteredRunId = Date.now();
     const masteredNow = masteredRunId + 100;
     const masteredMistake = db.prepare(
       `INSERT INTO mistakes
-         (session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source, reviewed_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (session_id, child_id, ts, problem, user_answer, correct_answer, error_type, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       testSessionId,
       CHILD,
@@ -282,7 +283,6 @@ describe("POST /api/game/quiz-context (issue #99: 30% mistake-mix window)", () =
       "100",
       "compute",
       "candy-math-island",
-      3,
     );
     const masteredMistakeId = Number(masteredMistake.lastInsertRowid);
     const masteredCaseId = `case:test-mastered-${masteredRunId}`;
@@ -305,14 +305,14 @@ describe("POST /api/game/quiz-context (issue #99: 30% mistake-mix window)", () =
       "mastered", "99", "100", masteredNow, "candy-math-island",
     );
     db.prepare(`
-      INSERT INTO correction_obligations (case_id, status, opened_at, reviewed_count)
-      VALUES (?, 'verified', ?, 3)
+      INSERT INTO correction_obligations (case_id, status, opened_at)
+      VALUES (?, 'verified', ?)
     `).run(masteredCaseId, masteredNow);
     const res = await request(app)
       .post("/api/game/quiz-context")
       .send({ childId: CHILD, date: TODAY });
     expect(res.status).toBe(200);
-    // Only the 2 fresh mistakes, not the mastered one
+    // Only the 2 fresh mistakes, not the verified one
     expect(res.body.mistakes).toHaveLength(2);
     for (const m of res.body.mistakes) {
       expect(m.problem).not.toBe("mastered");

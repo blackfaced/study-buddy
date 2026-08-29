@@ -138,7 +138,6 @@ interface InboxEntry {
   errorType: string | null;
   source: string;
   subject: string | null;
-  reviewedCount: number;
   status: string;
   openedAt: number;
 }
@@ -226,7 +225,7 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
   // GET /api/capture/inbox?childId=X
   // Response: { cases: [{ caseId, mistakeId, problem, userAnswer,
   //                       correctAnswer, errorType, source, subject,
-  //                       reviewedCount, status, openedAt }] }
+  //                       status, openedAt }] }
   //
   // Returns open correction obligations for the child, across all
   // sources (game, manual, vision, …). Verified obligations are
@@ -247,14 +246,12 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
                 mc.error_type AS errorType,
                 mc.source,
                 mc.subject,
-                co.reviewed_count AS reviewedCount,
                 co.status,
                 co.opened_at AS openedAt
            FROM mistake_cases mc
            JOIN correction_obligations co ON co.case_id = mc.case_id
           WHERE mc.child_id = ?
             AND co.status = 'open'
-            AND co.reviewed_count < 3
           ORDER BY co.opened_at DESC, mc.case_id`,
       )
       .all(childId) as InboxEntry[];
@@ -266,7 +263,7 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
   // GET /api/capture/case/:caseId?childId=X
   // Response: { caseId, problem, userAnswer (original wrong),
   //             correctAnswer, errorType, source, subject,
-  //             obligationStatus, reviewedCount, openedAt,
+  //             obligationStatus, openedAt,
   //             attempts: [{ kind, userAnswer, isCorrect, occurredAt }] }
   //
   // Privacy: this endpoint is the kid-facing view of a Mistake Case.
@@ -297,7 +294,6 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
                 mc.source,
                 mc.subject,
                 co.status AS obligationStatus,
-                co.reviewed_count AS reviewedCount,
                 co.opened_at AS openedAt
            FROM mistake_cases mc
            JOIN correction_obligations co ON co.case_id = mc.case_id
@@ -314,7 +310,6 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
           source: string;
           subject: string | null;
           obligationStatus: string;
-          reviewedCount: number;
           openedAt: number;
         }
       | undefined;
@@ -348,7 +343,7 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
   // ============== Review attempt submission ==============
   // POST /api/capture/case/:caseId/attempt
   // Body: { childId, answer }
-  // Response: { caseId, isCorrect, obligationStatus, reviewedCount, verifiedAt? }
+  // Response: { caseId, isCorrect, obligationStatus, verifiedAt? }
   //
   // The kid re-solves the problem independently. Server compares the
   // submitted answer to the canonical correct_answer (textual +
@@ -862,8 +857,7 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
       `SELECT mc.case_id AS caseId,
               mc.child_id AS childId,
               mc.correct_answer AS correctAnswer,
-              co.status AS obligationStatus,
-              co.reviewed_count AS reviewedCount
+              co.status AS obligationStatus
          FROM mistake_cases mc
          JOIN correction_obligations co ON co.case_id = mc.case_id
         WHERE mc.case_id = ?`,
@@ -874,7 +868,6 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
         childId: string;
         correctAnswer: string | null;
         obligationStatus: string;
-        reviewedCount: number;
       }
     | undefined;
   if (!row) {
@@ -902,7 +895,6 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
       caseId,
       isCorrect: true,
       obligationStatus: result.obligationStatus,
-      reviewedCount: result.reviewedCount,
       verifiedAt: result.verifiedAt,
     });
     return;
@@ -918,7 +910,6 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
     caseId,
     isCorrect: Boolean(isCorrect),
     obligationStatus: result.obligationStatus,
-    reviewedCount: result.reviewedCount,
     verifiedAt: result.verifiedAt,
   });
 }

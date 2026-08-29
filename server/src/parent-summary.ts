@@ -46,15 +46,14 @@ export function aggregateParentSummary(
     )
     .get(childId, recentCutoff) as { n: number }).n;
 
-  // pendingReview: open obligation, reviewed_count < 3
+  // pendingReview: open obligation (still awaiting first independent correct)
   const pendingReview = (db
     .prepare(
       `SELECT count(*) AS n
          FROM mistake_cases mc
          JOIN correction_obligations co ON co.case_id = mc.case_id
         WHERE mc.child_id = ?
-          AND co.status = 'open'
-          AND co.reviewed_count < 3`,
+          AND co.status = 'open'`,
     )
     .get(childId) as { n: number }).n;
 

@@ -130,9 +130,9 @@ describe("Vision path → closure loop (issue #166)", () => {
     expect(attempts).toHaveLength(1);
     expect(attempts[0]).toEqual({ attempt_kind: "original", is_correct: 0, child_id: "default" });
 
-    const obligations = db.prepare("SELECT status, reviewed_count FROM correction_obligations").all() as Array<{ status: string; reviewed_count: number }>;
+    const obligations = db.prepare("SELECT status FROM correction_obligations").all() as Array<{ status: string }>;
     expect(obligations).toHaveLength(1);
-    expect(obligations[0]).toEqual({ status: "open", reviewed_count: 0 });
+    expect(obligations[0]).toEqual({ status: "open" });
   });
 
   it("V-2: idempotent retry of confirm returns same caseId, does not create a second case", async () => {

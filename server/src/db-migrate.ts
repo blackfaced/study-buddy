@@ -220,7 +220,15 @@ export function migrateSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN evidence_status TEXT`); } catch {}
   try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN evidence_method TEXT`); } catch {}
   try { db.exec(`ALTER TABLE mistake_cases ADD COLUMN evidence_confirmed_at INTEGER`); } catch {}
-  try { db.exec(`ALTER TABLE correction_obligations ADD COLUMN reviewed_count INTEGER NOT NULL DEFAULT 0`); } catch {}
+
+  // reviewed_count was a dead concept on correction_obligations: zero
+  // writers, and every reader's `< 3` filter was a no-op. Mastery
+  // semantics are: first independent correct verifies the obligation;
+  // delayed review waves are the ongoing evidence. Drop the column on
+  // legacy DBs (idempotent: PRAGMA check, DROP only if present).
+  // NOTE: mistakes.reviewed_count (the legacy mirror's column) STAYS
+  // until PR-D #165 drops the whole mistakes table.
+  dropColumnIfPresent(db, "correction_obligations", "reviewed_count");
 
   // 初始化 schema
   db.exec(`
@@ -340,8 +348,7 @@ export function migrateSchema(db: Database.Database): void {
     --
     -- v0.9 (SB124-T01, issue #125): mistake_cases now carries the same
     -- evidence columns as mistakes so the case row is the source-of-truth
-    -- for closure-loop reads. correction_obligations tracks reviewed_count
-    -- (the v0.8.x "mastery" trigger). Old readers still go through
+    -- for closure-loop reads. Old readers still go through
     -- mistakes; new readers go through these three tables.
     CREATE TABLE IF NOT EXISTS mistake_cases (
       case_id TEXT PRIMARY KEY,
@@ -388,8 +395,7 @@ export function migrateSchema(db: Database.Database): void {
       case_id TEXT PRIMARY KEY,
       status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'verified')),
       opened_at INTEGER NOT NULL,
-      verified_at INTEGER,
-      reviewed_count INTEGER NOT NULL DEFAULT 0
+      verified_at INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS mistake_photo_confirmations (
@@ -693,6 +699,25 @@ export function migrateSchema(db: Database.Database): void {
   ).run();
 }
 
+/**
+ * Idempotent column drop for legacy DBs. SQLite ≥ 3.35 supports
+ * DROP COLUMN; better-sqlite3 bundles a much newer SQLite. PRAGMA
+ * table_info on a missing table returns [] → no-op, so this is safe
+ * on fresh DBs too.
+ */
+function dropColumnIfPresent(
+  db: Database.Database,
+  table: string,
+  column: string,
+): void {
+  const cols = db
+    .prepare(`PRAGMA table_info(${table})`)
+    .all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+  }
+}
+
 function ensureMistakeCompatibilityIndexes(db: Database.Database): void {
   db.transaction(() => {
     db.exec(`
@@ -763,7 +788,6 @@ export interface MistakeCompatibilityRecord {
   evidenceStatus?: string | null;
   evidenceMethod?: string | null;
   evidenceConfirmedAt?: number | null;
-  reviewedCount?: number | null;
 }
 
 /** Keep newly written legacy rows visible in the explicit mistake model. */
@@ -816,9 +840,9 @@ export function ensureMistakeCompatibility(
   );
   db.prepare(`
     INSERT OR IGNORE INTO correction_obligations
-      (case_id, status, opened_at, reviewed_count)
-    VALUES (?, 'open', ?, ?)
-  `).run(caseId, record.occurredAt, record.reviewedCount ?? 0);
+      (case_id, status, opened_at)
+    VALUES (?, 'open', ?)
+  `).run(caseId, record.occurredAt);
 }
 
 function backfillMistakeCompatibility(db: Database.Database): void {
@@ -883,8 +907,8 @@ function backfillMistakeCompatibility(db: Database.Database): void {
       JOIN mistake_cases mc ON mc.original_mistake_id = m.id;
 
       INSERT OR IGNORE INTO correction_obligations
-        (case_id, status, opened_at, reviewed_count)
-      SELECT mc.case_id, 'open', m.ts, COALESCE(m.reviewed_count, 0)
+        (case_id, status, opened_at)
+      SELECT mc.case_id, 'open', m.ts
       FROM mistakes m
       JOIN mistake_cases mc ON mc.original_mistake_id = m.id;
     `);

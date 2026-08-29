@@ -92,9 +92,9 @@ describe("MCP log_mistake → closure loop (issue #166 mirror)", () => {
     });
 
     const obligation = db
-      .prepare("SELECT status, reviewed_count FROM correction_obligations WHERE case_id = ?")
-      .get(out.caseId) as { status: string; reviewed_count: number } | undefined;
-    expect(obligation).toEqual({ status: "open", reviewed_count: 0 });
+      .prepare("SELECT status FROM correction_obligations WHERE case_id = ?")
+      .get(out.caseId) as { status: string } | undefined;
+    expect(obligation).toEqual({ status: "open" });
   });
 
   it("M-3: duplicate (child, problem, source) returns same caseId, does not create new case", async () => {

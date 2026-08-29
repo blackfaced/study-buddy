@@ -107,7 +107,6 @@ function renderInboxEntry(c) {
         <div class="meta">
           <span class="pill" data-source="${escapeAttr(source)}">${escapeHtml(source)}</span>
           <span>${escapeHtml(subject)}</span>
-          <span>订正 ${c.reviewedCount}/3</span>
           ${errorType}
         </div>
         <span class="open-hint" aria-hidden="true">订正 ›</span>

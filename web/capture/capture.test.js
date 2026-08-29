@@ -202,9 +202,9 @@ test("CAP10: loadInbox with cases → renders each entry with subject label and 
       jsonResponse(200, {
         cases: [
           { caseId: "case:1", mistakeId: 1, problem: "8+5", userAnswer: "12", correctAnswer: "13",
-            errorType: "compute", source: "manual", subject: "math", reviewedCount: 0, status: "open", openedAt: 100 },
+            errorType: "compute", source: "manual", subject: "math", status: "open", openedAt: 100 },
           { caseId: "case:2", mistakeId: 2, problem: "汉字", userAnswer: "x", correctAnswer: "y",
-            errorType: null, source: "game", subject: "chinese", reviewedCount: 1, status: "open", openedAt: 50 },
+            errorType: null, source: "game", subject: "chinese", status: "open", openedAt: 50 },
         ],
       }),
     ],
@@ -215,8 +215,9 @@ test("CAP10: loadInbox with cases → renders each entry with subject label and 
   assert.match(html, /数学/);
   assert.match(html, /汉字/);
   assert.match(html, /语文/);
-  assert.match(html, /订正 0\/3/);
-  assert.match(html, /订正 1\/3/);
+  // No 订正 N/3 badge — reviewed_count was a dead counter that never
+  // moved; the concept is deleted (obligation status is the signal).
+  assert.doesNotMatch(html, /订正 \d+\/3/);
   assert.match(html, /data-source="manual"/);
   assert.match(html, /data-source="game"/);
   assert.equal(nodes["inbox-count"]._text, "2");

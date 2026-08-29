@@ -78,7 +78,6 @@ describe("GET /api/capture/case/:caseId (review workspace case detail)", () => {
       source: "manual",
       subject: "math",
       obligationStatus: "open",
-      reviewedCount: 0,
     });
     expect(Array.isArray(res.body.attempts)).toBe(true);
     // Initial attempt (original) is always there
@@ -155,8 +154,6 @@ describe("POST /api/capture/case/:caseId/attempt (kid review submission)", () =>
     expect(res.status).toBe(200);
     expect(res.body.isCorrect).toBe(false);
     expect(res.body.obligationStatus).toBe("open");
-    // reviewed_count is NOT bumped (T05 doesn't use the 3-correct cascade)
-    expect(res.body.reviewedCount).toBe(0);
     // A correction learning_attempt row was appended
     const attempts = db.prepare(
       "SELECT attempt_kind, is_correct, user_answer FROM learning_attempts WHERE case_id = ? ORDER BY occurred_at",

@@ -20,7 +20,8 @@ multiplication-drill）仍在调用这两个 endpoint，且其错误处理在非
 | `POST /api/game/mistake-review` | 适配器，委托 `recordCorrectionAttempt()`（`server/src/attempt-recorder.ts`，从 handleAttempt 抽取）。body `{childId?, results:[{mistakeId, correct, userAnswer?}]}`；通过 `mistake_cases.original_mistake_id` 解析 case，校验 child，记录 correction attempt（correct=true 时 verify obligation + 删 legacy mirror）。body 合法时永远 200，逐条返回 `{mistakeId, status: "recorded"\|"skipped"}`（客户端遇非 2xx 会丢整个队列，单条坏数据不能拖垮整批）；仅顶层 body 畸形才 400 |
 
 旧的 `reviewed_count` CAS + 3-cascade-delete 语义**没有**恢复——那个
-概念已被 closure loop 取代。
+概念已被 closure loop 取代（且 `correction_obligations.reviewed_count`
+列已物理删除）。
 
 ## mistakes mirror table 弃用（不受影响，仍然有效）
 
@@ -46,4 +47,3 @@ raw data。closure-loop 读者不应走这条路 —— mistake_cases 才是 sou
   `server/src/game-api.test.ts` / `server/src/closure-loop-regression.test.ts`
   — adapter 行为 + 端到端回归测试
 - `server/src/archived-mistake.ts` — `readArchivedMistake`（诊断用）
-- `server/src/audit-reviewed-count.ts` — reviewed_count 引用扫描

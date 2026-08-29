@@ -59,14 +59,13 @@ export interface InsertMistakeResult {
  *
  * Behavior:
  *   - New tuple → INSERT mistake_cases + mistakes mirror + learning_attempt
- *     (original, is_correct=0) + correction_obligation (open, reviewed_count=0).
+ *     (original, is_correct=0) + correction_obligation (open).
  *     Return {id, caseId, created: true}.
  *   - Existing tuple → return the earliest existing mistake_id + its
  *     caseId with {id, caseId, created: false} (idempotent retry).
  *
  * On collision we DO NOT update user_answer / correct_answer / error_type
- * — the first wrong answer is the "authoritative" record. reviewed_count
- * is only mutated by T3's CAS path.
+ * — the first wrong answer is the "authoritative" record.
  *
  * Throws if the UNIQUE collision is reported but SELECT cannot find the
  * row (impossible state, surfacing it makes the bug loud in logs).
@@ -119,11 +118,6 @@ export function insertMistake(
       // a mirror mistake now so callers can use the case's mistake_id.
       let mistakeId = existingCase.original_mistake_id;
       if (mistakeId == null) {
-        // reviewed_count lives on correction_obligations; for the
-        // mirror we need to read it from there if it exists.
-        const reviewedCount = (db
-          .prepare("SELECT reviewed_count FROM correction_obligations WHERE case_id = ?")
-          .get(existingCase.case_id) as { reviewed_count: number } | undefined)?.reviewed_count ?? 0;
         const mirror = db.prepare(`
           INSERT INTO mistakes (
             session_id, child_id, ts, problem, user_answer, correct_answer,
@@ -134,7 +128,7 @@ export function insertMistake(
         `).run(
           existingCase.session_id, input.childId, existingCase.opened_at,
           existingCase.problem, existingCase.user_answer, existingCase.correct_answer,
-          existingCase.error_type, existingCase.hint, reviewedCount,
+          existingCase.error_type, existingCase.hint, 0,
           existingCase.source, existingCase.level,
           existingCase.image_path, existingCase.vision_input, existingCase.vision_reasoning,
           existingCase.vision_model, existingCase.vision_ts,
@@ -222,10 +216,10 @@ export function insertMistake(
       input.source,
     );
 
-    // 4. Open correction obligation with reviewed_count=0.
+    // 4. Open the correction obligation.
     db.prepare(`
-      INSERT INTO correction_obligations (case_id, status, opened_at, reviewed_count)
-      VALUES (?, 'open', ?, 0)
+      INSERT INTO correction_obligations (case_id, status, opened_at)
+      VALUES (?, 'open', ?)
     `).run(caseId, occurredAt);
 
     beforeSourceEventAppend?.("learning_attempt");
