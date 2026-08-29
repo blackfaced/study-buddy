@@ -16,7 +16,7 @@
 ## 6 统计
 
 - **newMistakes** (since last summary? — v0.1 简化为 all-time openedAt > now-30d)  — Mistake Cases opened in the last 30 days
-- **pendingReview** — Mistake Cases with status='open' obligation AND reviewed_count < 3
+- **pendingReview** — Mistake Cases with status='open' obligation
 - **alreadyCorrected** — Mistake Cases with status='verified' obligation
 - **pendingReplay** — review_schedules with completed_at IS NULL AND scheduled_at <= now (i.e. ready / overdue)
 - **reopened** — review_schedules with completed_is_correct = 0 AND reopened_count > 0

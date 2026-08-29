@@ -644,9 +644,8 @@ describe("migrateSchema — mistakes.child_id FK", () => {
 // ---------------------------------------------------------------------------
 // Issue #125 (SB124-T01): extend mistake_cases + correction_obligations to
 // be independent source-of-truth for the closure loop. mistake_cases now
-// carries the same evidence columns as mistakes; correction_obligations
-// tracks reviewed_count. legacy mistakes rows are back-filled into the new
-// columns so the compat bridge is data-equivalent.
+// carries the same evidence columns as mistakes. legacy mistakes rows are
+// back-filled into the new columns so the compat bridge is data-equivalent.
 // ---------------------------------------------------------------------------
 describe("migrateSchema (SB124-T01 mistake case model)", () => {
   it("mistake_cases carries all evidence columns on a fresh database", () => {
@@ -664,14 +663,60 @@ describe("migrateSchema (SB124-T01 mistake case model)", () => {
     db.close();
   });
 
-  it("correction_obligations carries reviewed_count on a fresh database", () => {
+  it("correction_obligations has NO reviewed_count on a fresh database", () => {
+    // reviewed_count was a dead concept: zero writers, all readers'
+    // `< 3` filters were no-ops. Mastery = first independent correct
+    // (obligation verified); delayed review waves are the ongoing
+    // evidence. The column is physically dropped.
     const db = freshDb();
     (globalThis as any).__migrateSchema(db);
     const cols = (db.prepare("PRAGMA table_info(correction_obligations)").all() as Array<{ name: string }>)
       .map((c) => c.name);
     expect(cols).toEqual(expect.arrayContaining([
-      "case_id", "status", "opened_at", "verified_at", "reviewed_count",
+      "case_id", "status", "opened_at", "verified_at",
     ]));
+    expect(cols).not.toContain("reviewed_count");
+    db.close();
+  });
+
+  it("drops reviewed_count from a legacy correction_obligations, preserving rows, and re-migrates cleanly", () => {
+    // Legacy DB: the table already exists WITH reviewed_count (and a
+    // non-zero value that used to mean something to the cascade).
+    // migrateSchema must drop the column, keep the row, and a second
+    // migrate must be a no-op (idempotent).
+    const db = freshDb();
+    db.exec(`
+      CREATE TABLE correction_obligations (
+        case_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'verified')),
+        opened_at INTEGER NOT NULL,
+        verified_at INTEGER,
+        reviewed_count INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO correction_obligations (case_id, status, opened_at, verified_at, reviewed_count)
+        VALUES ('case:legacy', 'verified', 1000, 2000, 3);
+    `);
+
+    (globalThis as any).__migrateSchema(db);
+
+    const cols = (db.prepare("PRAGMA table_info(correction_obligations)").all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    expect(cols).not.toContain("reviewed_count");
+    const row = db.prepare(
+      "SELECT case_id, status, opened_at, verified_at FROM correction_obligations WHERE case_id = 'case:legacy'",
+    ).get();
+    expect(row).toEqual({
+      case_id: "case:legacy",
+      status: "verified",
+      opened_at: 1000,
+      verified_at: 2000,
+    });
+
+    // Idempotent: second migrate on the already-migrated DB is a no-op.
+    (globalThis as any).__migrateSchema(db);
+    const colsAfter = (db.prepare("PRAGMA table_info(correction_obligations)").all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    expect(colsAfter).not.toContain("reviewed_count");
     db.close();
   });
 
@@ -739,9 +784,9 @@ describe("migrateSchema (SB124-T01 mistake case model)", () => {
     });
 
     const obligation = db.prepare(
-      "SELECT reviewed_count, status FROM correction_obligations WHERE case_id = 'mistake:1'"
+      "SELECT status FROM correction_obligations WHERE case_id = 'mistake:1'"
     ).get();
-    expect(obligation).toEqual({ reviewed_count: 0, status: "open" });
+    expect(obligation).toEqual({ status: "open" });
     db.close();
   });
 

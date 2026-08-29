@@ -95,7 +95,6 @@ test("RE2: valid load → renders the case with problem + original wrong + corre
         source: "manual",
         subject: "math",
         obligationStatus: "open",
-        reviewedCount: 0,
         openedAt: 100,
         attempts: [
           { kind: "original", userAnswer: "12", isCorrect: false, occurredAt: 100 },
@@ -132,7 +131,6 @@ test("RE3: closed obligation → shows closed banner, no form", async () => {
         source: "game",
         subject: "chinese",
         obligationStatus: "verified",
-        reviewedCount: 1,
         openedAt: 100,
         verifiedAt: 200,
         attempts: [
@@ -184,7 +182,6 @@ test("RE6: timeline sorts attempts by occurredAt, marks each with icon", async (
         source: "manual",
         subject: "math",
         obligationStatus: "open",
-        reviewedCount: 0,
         openedAt: 1,
         attempts: [
           { kind: "original", userAnswer: "wrong1", isCorrect: false, occurredAt: 1000 },
@@ -228,7 +225,6 @@ test("RE7: submit form → POST /api/capture/case/.../attempt with answer", asyn
         source: "manual",
         subject: "math",
         obligationStatus: "open",
-        reviewedCount: 0,
         openedAt: 0,
         attempts: [{ kind: "original", userAnswer: "wrong", isCorrect: false, occurredAt: 0 }],
       }),
@@ -244,7 +240,6 @@ test("RE7: submit form → POST /api/capture/case/.../attempt with answer", asyn
         source: "manual",
         subject: "math",
         obligationStatus: "verified",
-        reviewedCount: 0,
         openedAt: 0,
         attempts: [
           { kind: "original", userAnswer: "wrong", isCorrect: false, occurredAt: 0 },
@@ -285,7 +280,6 @@ test("RE8: wrong submission shows '再想想' status", async () => {
         source: "manual",
         subject: "math",
         obligationStatus: "open",
-        reviewedCount: 0,
         openedAt: 0,
         attempts: [{ kind: "original", userAnswer: "wrong", isCorrect: false, occurredAt: 0 }],
       }),

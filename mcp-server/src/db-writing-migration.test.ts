@@ -108,6 +108,7 @@ describe("MCP writing schema migration", () => {
   });
 
   it("preserves legacy mistake evidence while keeping source provenance separate", () => {
+
     tempDir = mkdtempSync(join(tmpdir(), "study-buddy-mcp-mistakes-"));
     const path = join(tempDir, "study.db");
     const legacy = new Database(path);
@@ -138,5 +139,39 @@ describe("MCP writing schema migration", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM mistake_cases").get()).toEqual({ count: 3 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM learning_attempts").get()).toEqual({ count: 3 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM correction_obligations").get()).toEqual({ count: 3 });
+  });
+
+  it("drops correction_obligations.reviewed_count on a legacy database, preserving rows", () => {
+    // reviewed_count was a dead concept (zero writers, no-op `< 3`
+    // readers). The column is physically dropped in BOTH processes;
+    // this pins the MCP-side idempotent drop.
+    tempDir = mkdtempSync(join(tmpdir(), "study-buddy-mcp-obligations-"));
+    const path = join(tempDir, "study.db");
+    const legacy = new Database(path);
+    legacy.exec(`
+      CREATE TABLE correction_obligations (
+        case_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'open',
+        opened_at INTEGER NOT NULL,
+        verified_at INTEGER,
+        reviewed_count INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO correction_obligations (case_id, status, opened_at, reviewed_count)
+        VALUES ('case:legacy', 'open', 1000, 2);
+    `);
+    legacy.close();
+
+    const db = initDb(path);
+    const columns = db.prepare("PRAGMA table_info(correction_obligations)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).not.toContain("reviewed_count");
+    const row = db.prepare(
+      "SELECT case_id, status, opened_at FROM correction_obligations WHERE case_id = 'case:legacy'",
+    ).get();
+    expect(row).toEqual({ case_id: "case:legacy", status: "open", opened_at: 1000 });
+
+    // Idempotent: re-init on the already-migrated DB stays clean.
+    const again = initDb(path);
+    const columnsAgain = again.prepare("PRAGMA table_info(correction_obligations)").all() as Array<{ name: string }>;
+    expect(columnsAgain.map((column) => column.name)).not.toContain("reviewed_count");
   });
 });

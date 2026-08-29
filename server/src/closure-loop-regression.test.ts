@@ -18,7 +18,6 @@
 // What is NOT covered here (already covered elsewhere):
 //   - per-route response shapes (capture-routes.test.ts, review-workspace.test.ts,
 //     capture-review.test.ts, capture-reinforcement.test.ts)
-//   - The audited `reviewed_count` scanner (audit-reviewed-count.test.ts)
 //   - The diagnostic archived-mistake read (archived-mistake.test.ts)
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";

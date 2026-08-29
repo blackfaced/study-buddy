@@ -6,7 +6,7 @@
 // Issue #99 (T2 of #34 split): the client (candy-math-island) calls
 // this at the start of each session to find out (a) whether the kid is
 // still inside the "first 5 sessions of today" review-mix window, and
-// (b) which due mistakes (reviewed_count < 3) to draw from.
+// (b) which due mistakes (open correction obligations) to draw from.
 //
 // The server is the single source of truth for the per-day session
 // count — kids may have 2 devices open, and a client-side count would
@@ -24,9 +24,9 @@
 // session as a normal one (no mix, no special handling).
 //
 // T3 (#100) adds the `POST /api/game/mistake-review` endpoint that
-// the client calls after each mistake to bump `reviewed_count` (and
-// cascade-delete after 3 corrects). The `reviewed_count < 3` filter
-// here is what makes the cascade work end-to-end.
+// the client calls after each in-quiz re-attempt. A correct re-attempt
+// verifies the obligation (via recordCorrectionAttempt), which is what
+// removes the mistake from the due pool here.
 //
 // SB124-T01 PR-C: due-mistake pool now reads from mistake_cases JOIN
 // correction_obligations (the canonical closure-loop tables). The
@@ -112,8 +112,8 @@ export interface QuizContextResult {
  * review of something they already failed.
  *
  * `mistakes` returns up to `MISTAKE_POOL_LIMIT` due mistakes (those
- * with reviewed_count < 3 AND status = 'open') for the child, in
- * RANDOM() order. The client draws from this pool with 30% probability
+ * with status = 'open' on their correction obligation) for the child,
+ * in RANDOM() order. The client draws from this pool with 30% probability
  * per question. We use RANDOM() instead of e.g. "oldest first" because
  * the picker is already drawing without replacement in spirit (the
  * client tracks which mistakes it has shown this session) — random
@@ -140,7 +140,7 @@ export function getQuizContext(
   }
 
   // v0.9 (SB124-T01 PR-C): read from the canonical mistake_cases
-  // JOIN correction_obligations (where reviewed_count + status live).
+  // JOIN correction_obligations (where the obligation status lives).
   // The mistakes table is a thin mirror; this is the picker hot path
   // and must reflect the live closure-loop state.
   const rows = db
@@ -153,7 +153,6 @@ export function getQuizContext(
          JOIN correction_obligations co ON co.case_id = mc.case_id
         WHERE mc.child_id = ?
           AND co.status = 'open'
-          AND co.reviewed_count < 3
         ORDER BY RANDOM()
         LIMIT ?`,
     )

@@ -10,15 +10,14 @@
 //   - On success: queue is mutated in place to empty (length = 0).
 //   - On error: queue is dropped (length = 0) — best-effort. We don't
 //     retry because the kid's next session will re-mix the same
-//     mistakes anyway (the server still has them with reviewed_count
-//     unchanged), so a retry would just count them twice.
+//     mistakes anyway (the server still has them with the obligation
+//     open), so a retry would just record them twice.
 //   - Empty queue: no-op, returns immediately.
 //
 // Why drop the queue on error instead of keeping it: a stuck queue
-// means we'd keep POSTing the same review on every session, eventually
-// incrementing reviewed_count past 3 via repeated correct reviews and
-// cascade-deleting a row that should still be there. The drop is
-// safer than the retry.
+// means we'd keep POSTing the same review on every session, recording
+// duplicate correction attempts for a case the kid already verified.
+// The drop is safer than the retry.
 //
 // Used by web/games/candy-math-island/index.html syncToServer().
 

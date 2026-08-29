@@ -117,6 +117,18 @@ function runMigrations(inst: Database.Database) {
     try { inst.exec(sql); } catch { /* column already exists */ }
   }
 
+  // reviewed_count on correction_obligations was a dead concept (zero
+  // writers, no-op `< 3` readers) — drop it on legacy DBs. Idempotent:
+  // PRAGMA check first, DROP COLUMN only if present (SQLite ≥ 3.35).
+  // Mirrors server/src/db-migrate.ts. mistakes.reviewed_count (the
+  // legacy mirror column) STAYS until the mistakes table itself is dropped.
+  const obligationCols = inst
+    .prepare("PRAGMA table_info(correction_obligations)")
+    .all() as Array<{ name: string }>;
+  if (obligationCols.some((c) => c.name === "reviewed_count")) {
+    inst.exec("ALTER TABLE correction_obligations DROP COLUMN reviewed_count");
+  }
+
   // Mirror server/src/db-migrate.ts: normalize source on legacy rows while
   // preserving every row as original evidence for the compatibility model.
   try {
@@ -290,7 +302,6 @@ function runMigrations(inst: Database.Database) {
       status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'verified')),
       opened_at INTEGER NOT NULL,
       verified_at INTEGER,
-      reviewed_count INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (case_id) REFERENCES mistake_cases(case_id) ON DELETE CASCADE
     );
 

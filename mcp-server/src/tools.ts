@@ -448,8 +448,8 @@ export async function handleTool(name: string, args: any) {
         );
         db.prepare(
           `INSERT INTO correction_obligations
-             (case_id, status, opened_at, reviewed_count)
-           VALUES (?, 'open', ?, 0)`,
+             (case_id, status, opened_at)
+           VALUES (?, 'open', ?)`,
         ).run(caseId, occurredAt);
         appendMcpMistakeSourceEvent(db, {
           caseId,

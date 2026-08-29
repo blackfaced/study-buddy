@@ -252,7 +252,6 @@ describe("GET /api/capture/inbox (SB124-T03 #127: 今日收件箱按孩子隔离
       expect(typeof c.caseId).toBe("string");
       expect(typeof c.problem).toBe("string");
       expect(typeof c.source).toBe("string");
-      expect(c.reviewedCount).toBe(0);
       expect(c.status).toBe("open");
     }
   });

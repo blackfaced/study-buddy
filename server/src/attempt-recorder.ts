@@ -85,13 +85,11 @@ export type RecordCorrectionAttemptResult =
   | {
       outcome: "recorded";
       obligationStatus: string;
-      reviewedCount: number;
       verifiedAt: number | null;
     }
   | {
       outcome: "already-verified";
       obligationStatus: string;
-      reviewedCount: number;
       verifiedAt: number | null;
     }
   | { outcome: "not-found" };
@@ -108,8 +106,7 @@ export function recordCorrectionAttempt(
                 mc.child_id AS childId,
                 mc.correct_answer AS correctAnswer,
                 mc.source,
-                co.status AS obligationStatus,
-                co.reviewed_count AS reviewedCount
+                co.status AS obligationStatus
            FROM mistake_cases mc
            JOIN correction_obligations co ON co.case_id = mc.case_id
           WHERE mc.case_id = ?`,
@@ -121,7 +118,6 @@ export function recordCorrectionAttempt(
           correctAnswer: string | null;
           source: string;
           obligationStatus: string;
-          reviewedCount: number;
         }
       | undefined;
     if (!row) {
@@ -140,7 +136,6 @@ export function recordCorrectionAttempt(
       return {
         outcome: "already-verified",
         obligationStatus: row.obligationStatus,
-        reviewedCount: row.reviewedCount,
         verifiedAt: verifiedRow?.verifiedAt ?? null,
       };
     }
@@ -184,7 +179,6 @@ export function recordCorrectionAttempt(
     return {
       outcome: "recorded",
       obligationStatus,
-      reviewedCount: row.reviewedCount,
       verifiedAt,
     };
   })();
