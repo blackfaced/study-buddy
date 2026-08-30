@@ -66,3 +66,8 @@ test("portalEntry(true) returns null so the portal keeps its static copy", () =>
   const BuddyPhotoOnly = loadModule();
   assert.equal(BuddyPhotoOnly.portalEntry(true), null);
 });
+
+test("portalEntry(undefined) returns null — an old server without the field keeps the default", () => {
+  const BuddyPhotoOnly = loadModule();
+  assert.equal(BuddyPhotoOnly.portalEntry(undefined), null);
+});
