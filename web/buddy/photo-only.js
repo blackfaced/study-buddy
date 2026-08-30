@@ -33,7 +33,9 @@
    * @returns {{emoji: string, title: string, desc: string} | null}
    */
   function portalEntry(chatEnabled) {
-    if (chatEnabled) return null;
+    // Strict === false: an old server without the field (undefined)
+    // must keep the default static copy.
+    if (chatEnabled !== false) return null;
     return { emoji: "📷", title: "拍错题", desc: "把做错的题拍下来" };
   }
 

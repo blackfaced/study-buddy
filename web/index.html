@@ -47,7 +47,7 @@
       <p>选一个想做的事吧</p>
     </header>
     <section class="entries" aria-label="学习入口">
-      <a class="entry" href="/buddy/">
+      <a class="entry" href="/buddy/" id="buddy-entry">
         <span class="emoji">📚</span>
         <span><h2>小书童陪伴</h2><p>聊天、拍题、一起写作业</p></span>
         <span class="arrow" aria-hidden="true">›</span>
@@ -76,7 +76,24 @@
       </a>
     </section>
   </main>
+  <script src="/buddy/photo-only.js"></script>
   <script>
+    // BUDDY_CHAT_ENABLED=false: swap the buddy entry to a photo-capture
+    // entry. Fetch failure keeps the static copy (chat assumed on).
+    async function loadBuddyEntry() {
+      try {
+        const res = await fetch('/api/buddy/status');
+        if (!res.ok) return;
+        const status = await res.json();
+        const entry = window.BuddyPhotoOnly && window.BuddyPhotoOnly.portalEntry(status.chatEnabled);
+        if (!entry) return;
+        const link = document.getElementById('buddy-entry');
+        link.querySelector('.emoji').textContent = entry.emoji;
+        link.querySelector('h2').textContent = entry.title;
+        link.querySelector('p').textContent = entry.desc;
+      } catch { /* keep the static companion entry */ }
+    }
+
     async function loadApps() {
       try {
         const res = await fetch('/api/apps');
@@ -110,6 +127,7 @@
       } catch { strip.style.display = 'none'; }
     }
 
+    loadBuddyEntry();
     loadApps();
     loadGameTodayStrip();
   </script>
