@@ -48,6 +48,10 @@ window.Buddy.state = {
   // 拍照
   photoInFlight: false,
   photoFlow: null,
+
+  // BUDDY_CHAT_ENABLED（/api/buddy/status 下发）：false = 只拍题模式，
+  // 隐藏聊天 UI。默认 true，status 拉取失败也保持聊天开启。
+  chatEnabled: true,
 };
 
 /**

@@ -144,6 +144,15 @@
       z-index: 10;
     }
     #cam-preview.mirrored { transform: scaleX(-1); }  /* 前置摄像头镜像 */
+
+    /* Photo-only mode (BUDDY_CHAT_ENABLED=false): chat stays in the
+     * DOM (recoverable by flipping the env back) but is hidden; the 📷
+     * button becomes the single prominent action. */
+    .app.photo-only .chat,
+    .app.photo-only #input,
+    .app.photo-only #send-btn { display: none; }
+    .app.photo-only .input-row { justify-content: center; }
+    .app.photo-only #photo-btn { flex: 1; padding: 18px; font-size: 28px; }
   </style>
 </head>
 <body>
@@ -281,6 +290,7 @@
 <script src="./camera.js"></script>
 <script src="./chat.js"></script>
 <script src="./photo-flow.js"></script>
+<script src="./photo-only.js"></script>
 <script src="./voice.js"></script>
 <script>
 // ===== Buddy top-level orchestrator =====
@@ -397,6 +407,16 @@ function unlockBuddyUI() {
   pinUnlocked = true;
   pinOverlay.style.display = 'none';
   document.querySelector('.app').classList.remove('hidden');
+  // Photo-only mode (BUDDY_CHAT_ENABLED=false): hide the chat UI, keep
+  // the 📷 mistake-capture button. Chat code stays loaded, just hidden.
+  if (window.Buddy.state.chatEnabled === false) {
+    window.BuddyPhotoOnly.applyPhotoOnlyMode({
+      app: document.querySelector('.app'),
+      chat: chatEl,
+      input: inputEl,
+      sendBtn: document.getElementById('send-btn'),
+    });
+  }
   // A restored free-chat epoch has no camera loop, so keep its preview
   // hidden. Homework startup will reveal it before requesting permission.
   const camEl = document.getElementById('cam-preview');
@@ -519,6 +539,11 @@ async function start() {
 async function beginBuddyGate() {
   try {
     const status = await window.StudyBuddy.fetch('/api/buddy/status');
+    // BUDDY_CHAT_ENABLED: surfaced for unlockBuddyUI (photo-only mode)
+    // regardless of which gate path we take — PIN or dev-mode直通.
+    if (status && typeof status.chatEnabled === 'boolean') {
+      window.Buddy.state.chatEnabled = status.chatEnabled;
+    }
     if (status && status.locked === false) {
       // dev mode: skip the gate, go straight to the chat.
       unlockBuddyUI();
