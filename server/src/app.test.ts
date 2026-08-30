@@ -361,14 +361,14 @@ describe("GET /api/buddy/status (issue: dev-mode skip PIN gate)", () => {
     const appWithPin = makeApp(null);
     const res = await request(appWithPin).get("/api/buddy/status");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ locked: false });
+    expect(res.body).toEqual({ locked: false, chatEnabled: true });
   });
 
   it("returns { locked: true } when BUDDY_PIN is set (and never leaks the PIN)", async () => {
     const appWithPin = makeApp("8864");
     const res = await request(appWithPin).get("/api/buddy/status");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ locked: true });
+    expect(res.body).toEqual({ locked: true, chatEnabled: true });
     expect(JSON.stringify(res.body)).not.toContain("8864");
   });
 
@@ -376,7 +376,7 @@ describe("GET /api/buddy/status (issue: dev-mode skip PIN gate)", () => {
     const appWithPin = makeApp("");
     const res = await request(appWithPin).get("/api/buddy/status");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ locked: false });
+    expect(res.body).toEqual({ locked: false, chatEnabled: true });
   });
 
   it("status endpoint is open to any IP (no rate limit, no unlock required)", async () => {
@@ -385,6 +385,27 @@ describe("GET /api/buddy/status (issue: dev-mode skip PIN gate)", () => {
       const res = await request(appWithPin).get("/api/buddy/status");
       expect(res.status).toBe(200);
     }
+  });
+
+  it("returns chatEnabled: true by default (BUDDY_CHAT_ENABLED unset)", async () => {
+    const appWithPin = makeApp(null);
+    const res = await request(appWithPin).get("/api/buddy/status");
+    expect(res.status).toBe(200);
+    expect(res.body.chatEnabled).toBe(true);
+  });
+
+  it("returns chatEnabled: false when the buddy chat is disabled (photo-only mode)", async () => {
+    const outbox = join(mkdtempSync(join(tmpdir(), "study-buddy-buddystatus-")), "outbox.jsonl");
+    const appNoChat = createApp({
+      db,
+      httpsPort: 3000,
+      outboxPath: outbox,
+      buddyPin: null,
+      buddyChatEnabled: false,
+    });
+    const res = await request(appNoChat).get("/api/buddy/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ locked: false, chatEnabled: false });
   });
 });
 

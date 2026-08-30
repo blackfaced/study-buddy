@@ -30,6 +30,8 @@ export interface BuddyRouteDeps {
   httpsPort: number;
   /** PIN gate state. Reuse the same instance across the app. */
   lock: BuddyLock;
+  /** Whether the /buddy/ chat UI is enabled (BUDDY_CHAT_ENABLED). */
+  chatEnabled: boolean;
   logger: Logger;
 }
 
@@ -37,7 +39,7 @@ export interface BuddyRouteDeps {
  * Mount the buddy routes on the given Express app.
  */
 export function registerBuddyRoutes(app: Express, deps: BuddyRouteDeps): void {
-  const { db, httpsPort, lock, logger } = deps;
+  const { db, httpsPort, lock, chatEnabled, logger } = deps;
 
   // ============== Buddy PIN gate (issue #55) ==============
   // Per-IP rate limit: 5 wrong → 5-min lockout. State is in-memory;
@@ -47,7 +49,10 @@ export function registerBuddyRoutes(app: Express, deps: BuddyRouteDeps): void {
     // hits this on page load to decide whether to render the PIN
     // overlay (locked: true) or skip straight to the chat (locked:
     // false, dev mode). Never leaks the PIN.
-    return res.json({ locked: lock.isEnabled() });
+    // chatEnabled (BUDDY_CHAT_ENABLED): when false the buddy page and
+    // the portal hide the chat UI and keep only the photo-capture
+    // entry — the mistake ledger's biggest intake source.
+    return res.json({ locked: lock.isEnabled(), chatEnabled });
   });
 
   app.post("/api/buddy/unlock", (req: Request, res: Response) => {

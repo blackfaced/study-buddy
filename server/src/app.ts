@@ -74,6 +74,8 @@ export interface AppOptions {
   logger?: Logger;
   /** Override the 4-digit PIN for /api/buddy/unlock. Defaults to env BUDDY_PIN. Empty/null = unlocked. */
   buddyPin?: string | null;
+  /** Override the /buddy/ chat toggle. Defaults to env BUDDY_CHAT_ENABLED (unset/empty/"true" = on; "false"/"0" = off). */
+  buddyChatEnabled?: boolean;
   /** Independent credential for loopback-only provider integration APIs. */
   integrationToken?: string | null;
   /** Test seam for the socket-level loopback policy. */
@@ -118,6 +120,13 @@ export function createApp(opts: AppOptions): express.Express {
     logger.warn("BUDDY_PIN not set, /buddy/ chat is unlocked (development mode)");
   }
   const buddyLock = new BuddyLock({ pin: effectivePin });
+  // BUDDY_CHAT_ENABLED: hide the /buddy/ chat UI but keep photo capture
+  // (拍错题 stays — it is the mistake ledger's main intake). Unset,
+  // empty, or "true" → on; "false"/"0" → off.
+  const buddyChatEnabledEnv = (process.env.BUDDY_CHAT_ENABLED ?? "").trim().toLowerCase();
+  const buddyChatEnabled = opts.buddyChatEnabled !== undefined
+    ? opts.buddyChatEnabled
+    : !(buddyChatEnabledEnv === "false" || buddyChatEnabledEnv === "0");
   const deviceAuth = new DeviceAuth({
     db,
     now: opts.deviceAuthNow,
@@ -147,7 +156,7 @@ export function createApp(opts: AppOptions): express.Express {
     now: opts.deviceAuthNow,
     isSecureRequest: opts.deviceSecureTransportCheck,
   });
-  registerBuddyRoutes(app, { db, httpsPort, lock: buddyLock, logger });
+  registerBuddyRoutes(app, { db, httpsPort, lock: buddyLock, chatEnabled: buddyChatEnabled, logger });
   registerSessionRoutes(app, { db, logger, auth: deviceAuthenticator });
   registerChatRoutes(app, {
     db,

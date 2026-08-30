@@ -35,7 +35,7 @@ beforeEach(() => {
   app = express();
   app.use(express.json());
   lock = new BuddyLock({ pin: "8864" });
-  registerBuddyRoutes(app, { db, httpsPort: 3000, lock, logger: silentLogger() });
+  registerBuddyRoutes(app, { db, httpsPort: 3000, lock, chatEnabled: true, logger: silentLogger() });
 });
 
 /** A no-op logger that doesn't spam the test output. */
@@ -87,7 +87,7 @@ describe("POST /api/buddy/unlock", () => {
     const a = express();
     a.use(express.json());
     const unlockedLock = new BuddyLock({ pin: null });
-    registerBuddyRoutes(a, { db, httpsPort: 3000, lock: unlockedLock, logger: silentLogger() });
+    registerBuddyRoutes(a, { db, httpsPort: 3000, lock: unlockedLock, chatEnabled: true, logger: silentLogger() });
     const res = await request(a).post("/api/buddy/unlock").send({ pin: "anything" });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
