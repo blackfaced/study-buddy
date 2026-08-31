@@ -133,3 +133,78 @@ test("restore rejects a snapshot for a different set", () => {
   const snap = s.snapshot();
   assert.equal(restoreDictationSession({ ...SET, id: "set-2" }, snap), null);
 });
+
+// ===== issue #197: confirmed outcomes → submission payload =====
+
+test("setOutcome records language (+optional handwriting) on the revealed item only", () => {
+  const s = createDictationSession({ set: SET });
+  s.start();
+  assert.equal(s.setOutcome({ language: "wrong" }), false); // answering: not yet
+  s.submit([]);
+  assert.equal(s.setOutcome({ language: "wrong", handwriting: "poor" }), true);
+  assert.equal(s.current().language, "wrong");
+  assert.equal(s.current().handwriting, "poor");
+  // handwriting toggles independently of language (AC1)
+  s.setOutcome({ handwriting: "ok" });
+  assert.equal(s.current().language, "wrong");
+  assert.equal(s.current().handwriting, "ok");
+});
+
+test("allConfirmed gates buildSubmission; payload carries key/replays/outcomes/strokes", () => {
+  const s = createDictationSession({ set: SET });
+  s.start();
+  s.submit(["M 1 1"]);
+  s.setOutcome({ language: "wrong" });
+  assert.equal(s.allConfirmed(), false);
+  assert.equal(s.buildSubmission(), null);
+  s.next();
+  s.replay();
+  s.replay();
+  s.submit([]);
+  s.setOutcome({ language: "correct", handwriting: "poor" });
+  s.next();
+  s.submit([]);
+  s.setOutcome({ language: "pinyin" });
+  s.next(); // done
+  assert.equal(s.allConfirmed(), true);
+
+  const sub = s.buildSubmission();
+  assert.equal(typeof sub.idempotencyKey, "string");
+  assert.ok(sub.idempotencyKey.length > 0);
+  assert.equal(sub.items.length, 3);
+  assert.deepEqual(
+    sub.items.map((i) => [i.target, i.language, i.handwriting, i.replays]),
+    [
+      ["苹果", "wrong", "ok", 0],
+      ["香蕉", "correct", "poor", 2],   // 重听 2 次被记录但不计为错误
+      ["我爱吃水果。", "pinyin", "ok", 0],
+    ],
+  );
+  assert.deepEqual(sub.items[0].strokes, ["M 1 1"]);
+});
+
+test("idempotencyKey and outcomes survive snapshot/restore (reload → same key, AC4)", () => {
+  const s = createDictationSession({ set: SET });
+  s.start();
+  s.submit([]);
+  s.setOutcome({ language: "wrong", handwriting: "poor" });
+  const restored = restoreDictationSession(SET, s.snapshot());
+  assert.equal(restored.items[0].language, "wrong");
+  assert.equal(restored.items[0].handwriting, "poor");
+
+  // Drive both sessions to done; the restored session must reuse the
+  // SAME idempotency key so a retried POST is a server-side no-op.
+  for (const sess of [s, restored]) {
+    while (sess.phase !== "done") {
+      if (sess.phase === "answering") sess.submit([]);
+      if (sess.phase === "revealed") {
+        if (!sess.current().language) sess.setOutcome({ language: "correct" });
+        sess.next();
+      }
+    }
+  }
+  assert.equal(
+    restored.buildSubmission().idempotencyKey,
+    s.buildSubmission().idempotencyKey,
+  );
+});

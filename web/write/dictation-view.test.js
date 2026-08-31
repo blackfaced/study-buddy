@@ -1,7 +1,8 @@
 // web/write/dictation-view.test.js
 //
-// DOM-level behavior tests for dictation mode (issue #196), with
-// stub elements (same pattern as web/buddy/photo-only.test.js).
+// DOM-level behavior tests for dictation mode (issue #196 + #197
+// outcome confirmation), with stub elements (same pattern as
+// web/buddy/photo-only.test.js).
 //
 // Run: node --test web/write/dictation-view.test.js
 import { test } from "node:test";
@@ -18,6 +19,7 @@ const SET = {
 };
 
 function stubEl() {
+  const classes = new Set();
   return {
     style: {},
     textContent: "",
@@ -25,6 +27,11 @@ function stubEl() {
     disabled: false,
     children: [],
     appendChild(c) { this.children.push(c); },
+    classList: {
+      add: (c) => classes.add(c),
+      remove: (c) => classes.delete(c),
+      contains: (c) => classes.has(c),
+    },
   };
 }
 
@@ -41,6 +48,11 @@ function stubDom() {
     againBtn: stubEl(),
     retryBtn: stubEl(),
     prevBtn: stubEl(),
+    outcomeRow: stubEl(),
+    outcomeCorrect: stubEl(),
+    outcomeWrong: stubEl(),
+    outcomePinyin: stubEl(),
+    outcomePoor: stubEl(),
   };
 }
 
@@ -67,7 +79,7 @@ test("REAL SCENARIO: before submit no DOM element contains the target text (AC1)
   assert.match(dom.progressHeader.textContent, /第 1\/2 题/);
 });
 
-test("answering phase shows 重听/撤销/提交, hides practice-only buttons", () => {
+test("answering phase shows 重听/撤销/提交, hides practice-only buttons and the outcome row", () => {
   const dom = stubDom();
   const s = createDictationSession({ set: SET });
   s.start();
@@ -77,9 +89,10 @@ test("answering phase shows 重听/撤销/提交, hides practice-only buttons", 
   assert.equal(dom.againBtn.style.display, "none");  // 笔顺重放 is practice-only
   assert.equal(dom.retryBtn.style.display, "none");
   assert.equal(dom.nextBtn.style.display, "none");
+  assert.equal(dom.outcomeRow.style.display, "none");
 });
 
-test("AC3: after submit the reveal shows the target char by char, next appears", () => {
+test("AC3: after submit the reveal shows the target char by char", () => {
   const dom = stubDom();
   const createNode = stubCreateNode();
   const s = createDictationSession({ set: SET });
@@ -89,22 +102,56 @@ test("AC3: after submit the reveal shows the target char by char, next appears",
   assert.notEqual(dom.reveal.style.display, "none");
   const chars = dom.reveal.children.map((c) => c.textContent);
   assert.deepEqual(chars, ["苹", "果"]); // 逐字
-  assert.notEqual(dom.nextBtn.style.display, "none");
   assert.equal(dom.submitBtn.style.display, "none");
   assert.equal(dom.replayBtn.style.display, "none");
 });
 
-test("done phase: completion status, all controls hidden", () => {
+test("#197: revealed phase shows outcome buttons; 下一题 stays disabled until language confirmed", () => {
+  const dom = stubDom();
+  const createNode = stubCreateNode();
+  const s = createDictationSession({ set: SET });
+  s.start();
+  s.submit([]);
+  renderDictation({ dom, session: s, createNode });
+  assert.notEqual(dom.outcomeRow.style.display, "none");
+  assert.notEqual(dom.nextBtn.style.display, "none");
+  assert.equal(dom.nextBtn.disabled, true); // 未确认不能翻页
+
+  s.setOutcome({ language: "wrong", handwriting: "poor" });
+  renderDictation({ dom, session: s, createNode });
+  assert.equal(dom.nextBtn.disabled, false);
+  assert.ok(dom.outcomeWrong.classList.contains("selected"));
+  assert.ok(dom.outcomePoor.classList.contains("selected"));
+  assert.ok(!dom.outcomeCorrect.classList.contains("selected"));
+});
+
+test("#197 done phase: 提交结果 appears only when every item is confirmed", () => {
+  const dom = stubDom();
+  const s = createDictationSession({ set: SET });
+  s.start();
+  s.submit([]); // no outcome → not confirmed
+  s.next();
+  s.submit([]);
+  s.setOutcome({ language: "correct" });
+  s.next();
+  assert.equal(s.phase, "done");
+  renderDictation({ dom, session: s, createNode: stubCreateNode() });
+  assert.equal(dom.submitBtn.style.display, "none"); // 还有 1 项没确认
+  assert.equal(dom.nextBtn.style.display, "none");
+});
+
+test("#197 done phase: all confirmed → 提交结果 visible, status asks to submit", () => {
   const dom = stubDom();
   const s = createDictationSession({ set: SET });
   s.start();
   s.submit([]);
+  s.setOutcome({ language: "wrong" });
   s.next();
   s.submit([]);
+  s.setOutcome({ language: "correct" });
   s.next();
-  assert.equal(s.phase, "done");
   renderDictation({ dom, session: s, createNode: stubCreateNode() });
-  assert.match(dom.status.textContent, /完成/);
-  assert.equal(dom.nextBtn.style.display, "none");
-  assert.equal(dom.submitBtn.style.display, "none");
+  assert.notEqual(dom.submitBtn.style.display, "none");
+  assert.match(dom.submitBtn.textContent, /提交结果/);
+  assert.match(dom.status.textContent, /提交/);
 });
