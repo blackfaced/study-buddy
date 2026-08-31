@@ -35,6 +35,12 @@ import {
   childFacingVisualSuggestion,
 } from "./visual-review.js";
 import { presentationForAttempt } from "./attempt-presentation.js";
+import {
+  createDictationSession,
+  restoreDictationSession,
+} from "./dictation-mode.js";
+import { createSpeaker } from "./dictation-speech.js";
+import { renderDictation } from "./dictation-view.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
@@ -67,6 +73,10 @@ const exitBtn = document.getElementById("exit-btn");
 const statusEl = document.getElementById("status");
 const scoreEl = document.getElementById("score");
 const progressHeader = document.getElementById("progress-header");
+const replayAudioBtn = document.getElementById("replay-audio-btn");
+const dictationReveal = document.getElementById("dictation-reveal");
+const dictationHome = document.getElementById("dictation-home");
+const dictationSetList = document.getElementById("dictation-set-list");
 
 // ----- Session state -----
 // All session state is owned by ./session.js (refactor PR 7).
@@ -104,6 +114,10 @@ charsInput.addEventListener("input", homeView_._onInput);
 
 startBtn.onclick = () => {
   if (session.library.length === 0) return;
+  // Restore practice-mode chrome that dictation mode hides.
+  hanziTarget.style.display = "";
+  dictationReveal.style.display = "none";
+  replayAudioBtn.style.display = "none";
   session.start();
   homeView.classList.add("hidden");
   practiceView.classList.add("active");
@@ -378,8 +392,20 @@ function createAttemptProcess({ independentRetry = false, followupRetry = false 
 const kidInput = attachKidInput({
   svg: kidSvg,
   stageSize: STAGE_SIZE,
-  isWritingPhase: () => phase === "writing",
+  // Practice mode writes in phase "writing"; dictation mode (issue
+  // #196) writes while its own state machine is in "answering".
+  isWritingPhase: () =>
+    phase === "writing" || dictationSession?.phase === "answering",
   onStroke: (s) => {
+    // Dictation mode: no stroke coaching (auto-grading is #197). The
+    // ink is recorded as-is; replays/strokes ride along at submit.
+    if (dictationSession) {
+      if (dictationSession.noteStroke(s.d)) {
+        dictationStrokeEls.push(s.pathEl);
+        saveDictationSnapshot();
+      }
+      return;
+    }
     const item = session.currentItem;
     if (!item) return;
     item.reviewQueue = (item.reviewQueue ?? Promise.resolve())
@@ -395,6 +421,161 @@ const kidInput = attachKidInput({
 });
 const enableKidInput = () => kidInput.attach();
 const disableKidInput = () => kidInput.detach();
+
+// ===========================================================================
+//  Dictation mode (默写, issue #196 — part of #192)
+//
+//  Kid picks an active task set on the home view → per item the app
+//  reads it aloud (browser speechSynthesis, zh-CN — no server TTS),
+//  the kid writes in the grid (or on paper — the app may act as a pure
+//  read-aloud player), submits, then sees the target char-by-char for
+//  self-check. No auto-grading here: verdicts + closure-loop wiring
+//  are #197. Replay counts are recorded in the session snapshot only
+//  (server-side persistence is #197 too).
+//
+//  Resume (AC5): every transition snapshots to localStorage; on boot,
+//  a snapshot whose set is still active resumes mid-session.
+// ===========================================================================
+
+const DICTATION_SNAPSHOT_KEY = "write-dictation-v1";
+let dictationSession = null;
+let dictationSpeaker = null;
+// pathEls aligned with the current item's strokes, for undo. Not
+// serialised — on resume the strokes are redrawn from their d-strings.
+let dictationStrokeEls = [];
+
+function dictationDom() {
+  return {
+    progressHeader,
+    status: statusEl,
+    reveal: dictationReveal,
+    hanziTarget,
+    replayBtn: replayAudioBtn,
+    undoBtn,
+    submitBtn,
+    nextBtn,
+    againBtn,
+    retryBtn,
+    prevBtn,
+  };
+}
+
+function saveDictationSnapshot() {
+  if (!dictationSession) return;
+  try {
+    localStorage.setItem(
+      DICTATION_SNAPSHOT_KEY,
+      JSON.stringify(dictationSession.snapshot()),
+    );
+  } catch { /* storage full / private mode — resume just won't work */ }
+}
+
+function clearDictationSnapshot() {
+  try {
+    localStorage.removeItem(DICTATION_SNAPSHOT_KEY);
+  } catch { /* ignore */ }
+}
+
+async function loadDictationSets() {
+  try {
+    const data = await window.StudyBuddy.fetch("/api/dictation/sets");
+    const sets = data?.sets ?? [];
+    renderDictationSets(sets);
+    maybeResumeDictation(sets);
+  } catch {
+    // No API / no sets: hide the entry, practice mode is unaffected.
+    dictationHome.style.display = "none";
+  }
+}
+
+function renderDictationSets(sets) {
+  dictationSetList.innerHTML = "";
+  if (sets.length === 0) {
+    dictationHome.style.display = "none";
+    return;
+  }
+  for (const set of sets) {
+    const btn = document.createElement("button");
+    btn.className = "dictation-set-btn";
+    btn.type = "button";
+    btn.textContent = `🎧 默写（${set.words.length} 词 + 1 句）`;
+    btn.onclick = () => startDictation(set);
+    dictationSetList.appendChild(btn);
+  }
+  dictationHome.style.display = "";
+}
+
+function maybeResumeDictation(sets) {
+  let snap = null;
+  try {
+    const raw = localStorage.getItem(DICTATION_SNAPSHOT_KEY);
+    snap = raw ? JSON.parse(raw) : null;
+  } catch {
+    return;
+  }
+  if (!snap) return;
+  const set = sets.find((s) => s.id === snap.setId);
+  if (!set) {
+    clearDictationSnapshot(); // set retired — the task is gone
+    return;
+  }
+  startDictation(set, snap);
+}
+
+function startDictation(set, snapshot) {
+  const restored = snapshot ? restoreDictationSession(set, snapshot) : null;
+  dictationSession = restored ?? createDictationSession({ set });
+  if (!restored) dictationSession.start();
+  if (dictationSession.phase === "done") {
+    clearDictationSnapshot();
+    dictationSession = null;
+    return;
+  }
+  dictationSpeaker = createSpeaker({
+    synth: window.speechSynthesis,
+    Utterance: window.SpeechSynthesisUtterance,
+  });
+  clearPendingTimers();
+  if (scoreEl) { scoreEl.style.display = "none"; scoreEl.textContent = ""; }
+  homeView.classList.add("hidden");
+  practiceView.classList.add("active");
+  presentDictationItem();
+}
+
+function presentDictationItem() {
+  kidSvg.innerHTML = "";
+  dictationStrokeEls = [];
+  // Redraw strokes that survived a leave-and-come-back (AC5).
+  const item = dictationSession.current();
+  if (item) {
+    for (const d of item.strokes) {
+      const el = createSvgElement("path");
+      el.setAttribute("d", d);
+      el.setAttribute("stroke", "#e74c3c");
+      el.setAttribute("stroke-width", "6");
+      el.setAttribute("stroke-linecap", "round");
+      el.setAttribute("stroke-linejoin", "round");
+      el.setAttribute("fill", "none");
+      el.setAttribute("opacity", "0.85");
+      kidSvg.appendChild(el);
+      dictationStrokeEls.push(el);
+    }
+  }
+  renderDictation({
+    dom: dictationDom(),
+    session: dictationSession,
+    createNode: (tag) => document.createElement(tag),
+  });
+  if (dictationSession.phase === "answering" && item) {
+    dictationSpeaker.speakItem(dictationSession.speakText(), item.plannedPlays);
+    saveDictationSnapshot();
+  } else if (dictationSession.phase === "done") {
+    dictationSpeaker.stop();
+    clearDictationSnapshot();
+    dictationSession = null; // don't let the done session shadow practice mode
+    setTimeout(exitToHome, 2000);
+  }
+}
 
 async function reviewCompletedStroke(item, stroke) {
   const coach = await item.coachPromise;
@@ -776,11 +957,35 @@ againBtn.onclick = () => {
 };
 
 undoBtn.onclick = () => {
+  if (dictationSession) {
+    if (dictationSession.phase !== "answering") return;
+    if (dictationSession.undoStroke()) {
+      const el = dictationStrokeEls.pop();
+      if (el && el.parentNode === kidSvg) kidSvg.removeChild(el);
+      saveDictationSnapshot();
+    }
+    return;
+  }
   if (phase !== "writing") return;
   undoLastStroke();
 };
 
 submitBtn.onclick = () => {
+  if (dictationSession) {
+    if (dictationSession.phase !== "answering") return;
+    dictationSpeaker?.stop();
+    // submit() keeps the strokes recorded via noteStroke; the return
+    // payload (setId/itemIndex/replays/strokes) is the future #197
+    // submission body — persisted server-side there, not here.
+    dictationSession.submit();
+    renderDictation({
+      dom: dictationDom(),
+      session: dictationSession,
+      createNode: (tag) => document.createElement(tag),
+    });
+    saveDictationSnapshot();
+    return;
+  }
   if (phase !== "writing") return;
   submitCurrent();
 };
@@ -799,6 +1004,12 @@ retryBtn.onclick = () => {
 };
 
 nextBtn.onclick = () => {
+  if (dictationSession) {
+    if (dictationSession.phase !== "revealed") return;
+    dictationSession.next();
+    presentDictationItem();
+    return;
+  }
   if (phase !== "submitted") return;
   session.next();
   enableKidInput();
@@ -822,6 +1033,9 @@ prevBtn.onclick = () => {
 
 exitBtn.onclick = () => {
   clearPendingTimers();
+  dictationSpeaker?.stop();
+  dictationSession = null;   // snapshot stays — 离开再回来可恢复 (AC5)
+  dictationSpeaker = null;
   exitToHome();
 };
 
@@ -831,7 +1045,18 @@ function exitToHome() {
   practiceView.classList.remove("active");
   homeView.classList.remove("hidden");
   loadLibrary();
+  loadDictationSets();
 }
+
+// 默写重听 (issue #196): replay the current item once. Counted in the
+// session snapshot, never an error (AC2).
+replayAudioBtn.onclick = () => {
+  if (!dictationSession || dictationSession.phase !== "answering") return;
+  if (dictationSession.replay()) {
+    dictationSpeaker?.speakItem(dictationSession.speakText(), 1);
+    saveDictationSnapshot();
+  }
+};
 
 // v0.9 (PR #79): re-center the character on viewport resize.
 // The stage is responsive (min(560px, 92vw)), so a phone going
@@ -854,3 +1079,4 @@ enableKidInput();   // attach the input handlers; the phase check
                     // (`if (phase !== "writing") return;`) keeps them
                     // inert until the kid is allowed to draw.
 loadLibrary();
+loadDictationSets();

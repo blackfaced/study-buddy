@@ -113,6 +113,23 @@
       letter-spacing: 0;
       max-width: min(560px, 92vw);
     }
+
+    /* ===== Dictation mode (issue #196) ===== */
+    .dictation-set-list { display: flex; flex-direction: column; gap: 8px; }
+    .dictation-set-btn {
+      padding: 14px 20px; font-size: 18px; font-weight: bold;
+      background: #64b5f6; color: white; border: none; border-radius: 16px;
+      text-align: left;
+    }
+    .dictation-set-btn:active { background: #1976d2; }
+    .dictation-reveal {
+      display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
+      max-width: min(560px, 92vw);
+    }
+    .dictation-reveal-char {
+      width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
+      font-size: 28px; background: white; border: 2px solid var(--accent); border-radius: 8px;
+    }
   </style>
 </head>
 <body>
@@ -125,6 +142,12 @@
 
   <!-- ============== Home view ============== -->
   <section class="home" id="home-view">
+    <!-- v1.0 (issue #196): dictation mode entry. One button per active
+         task set from GET /api/dictation/sets (kid view = active only).
+         Hidden when there are no sets or the API is unreachable. -->
+    <div id="dictation-home" style="display:none;">
+      <div id="dictation-set-list" class="dictation-set-list"></div>
+    </div>
     <div class="entry-row">
       <input id="chars-input" type="text" placeholder="贴上要练的字，比如 一二三上口" inputmode="text" autocomplete="off" />
       <button id="add-btn" type="button">加进去</button>
@@ -155,6 +178,9 @@
       </div>
     </div>
     <div class="practice-controls">
+      <!-- issue #196: dictation mode replay button (默写重听). Hidden
+           in practice mode; dictation render owns its visibility. -->
+      <button id="replay-audio-btn" type="button" class="secondary" style="display:none;">🔊 重听</button>
       <button id="again-btn" type="button" class="secondary">笔顺重放</button>
       <button id="undo-btn" type="button" class="secondary" style="display:none;">撤销</button>
       <button id="submit-btn" type="button" class="secondary" style="display:none;">提交</button>
@@ -167,6 +193,9 @@
       <span class="status" id="status">看 3 秒后字会消失，凭记忆写</span>
     </div>
     <div class="score-line" id="score" style="display:none;"></div>
+    <!-- issue #196: dictation self-check reveal — per-char target boxes,
+         shown only after submit (dictation-view.js owns visibility). -->
+    <div class="dictation-reveal" id="dictation-reveal" style="display:none;"></div>
   </section>
 </div>
 
