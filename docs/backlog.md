@@ -1,5 +1,7 @@
 # 优化 Backlog (v1, 2026-07-27)
 
+> ⚠️ 2026-08-31：聊天已隐藏（`BUDDY_CHAT_ENABLED=false`，PR #191），项目定位转为家长运营的学习闭环（见 AGENTS.md "Positioning" + issue #192）。下方 **OPT-S1~S8（聊天改进）整体不再适用**；本文档保留作历史记录。
+>
 > 数据依据：7/27 糖果数学 1 局 (6/6, 100%) + 7/27 聊天 1 个 session 13 分钟
 >
 > 详细改动 + 估时见各 issue。原文备份：`~/Documents/study-buddy-backlog-2026-07-27.md`

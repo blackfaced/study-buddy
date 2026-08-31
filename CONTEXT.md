@@ -1,6 +1,6 @@
 # study-buddy
 
-A personal learning companion for one kid: capture wrong answers, drive them through a correction loop, and surface bounded evidence to parents.
+A parent-operated family learning-operations loop for one kid: capture real wrong answers, drive them through the Closure Loop, and surface bounded evidence to parents. Kid-facing apps are execution surfaces; the chat buddy is deprecated as a touchpoint (hidden by default, `BUDDY_CHAT_ENABLED=false`).
 
 ## Language
 
