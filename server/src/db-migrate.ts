@@ -398,6 +398,28 @@ export function migrateSchema(db: Database.Database): void {
       verified_at INTEGER
     );
 
+    -- #194 (parent-operated loop, #192): dictation task sets. Pure task
+    -- data (资源) — an ordered word list + one school-required sentence
+    -- + playback counts. Creating / editing / retiring a set never
+    -- writes to the closure tables above (资源≠证据). idempotency_key
+    -- is the retry anchor: a network retry with the same key returns
+    -- the same set instead of creating a duplicate.
+    CREATE TABLE IF NOT EXISTS dictation_sets (
+      id TEXT PRIMARY KEY,
+      child_id TEXT NOT NULL,
+      words_json TEXT NOT NULL CHECK (json_valid(words_json)),
+      sentence TEXT NOT NULL,
+      word_plays INTEGER NOT NULL DEFAULT 2 CHECK (word_plays >= 1),
+      sentence_plays INTEGER NOT NULL DEFAULT 3 CHECK (sentence_plays >= 1),
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'retired')),
+      idempotency_key TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (child_id) REFERENCES children(id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dictation_sets_idempotency
+      ON dictation_sets(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
     CREATE TABLE IF NOT EXISTS mistake_photo_confirmations (
       draft_id TEXT PRIMARY KEY,
       mistake_id INTEGER NOT NULL,

@@ -34,6 +34,7 @@ import { BuddyLock } from "./buddy-lock.js";
 import { registerPortalRoutes } from "./routes/portal.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerBuddyRoutes } from "./routes/buddy.js";
+import { registerDictationRoutes } from "./routes/dictation.js";
 import { registerSessionRoutes } from "./routes/session.js";
 import {
   registerChatRoutes,
@@ -157,6 +158,7 @@ export function createApp(opts: AppOptions): express.Express {
     isSecureRequest: opts.deviceSecureTransportCheck,
   });
   registerBuddyRoutes(app, { db, httpsPort, lock: buddyLock, chatEnabled: buddyChatEnabled, logger });
+  registerDictationRoutes(app, { db, logger });
   registerSessionRoutes(app, { db, logger, auth: deviceAuthenticator });
   registerChatRoutes(app, {
     db,
