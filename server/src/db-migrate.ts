@@ -420,6 +420,44 @@ export function migrateSchema(db: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_dictation_sets_idempotency
       ON dictation_sets(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
+    -- #197 (默写接错题闭环): submission receipts. The idempotency_key
+    -- is the retry anchor — a network retry / page reload with the
+    -- same key returns the stored result instead of double-writing
+    -- mistake cases (AC4). payload_json keeps the confirmed items for
+    -- audit; result_json is what the retry response replays.
+    CREATE TABLE IF NOT EXISTS dictation_submissions (
+      id TEXT PRIMARY KEY,
+      set_id TEXT NOT NULL,
+      child_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (set_id) REFERENCES dictation_sets(id),
+      FOREIGN KEY (child_id) REFERENCES children(id)
+    );
+
+    -- #197: Handwriting Practice Observation (#192 vocabulary) —
+    -- append-only. 字 + 问题类型 + 来源 + 时间 + 算法版本, child-scoped
+    -- for isolation, submission_id for audit. Poor handwriting on a
+    -- CORRECT char lands here and never becomes a mistake case; the
+    -- two outcomes are independent rows (AC1). UPDATE/DELETE are
+    -- blocked by trigger so the record stays an audit trail.
+    CREATE TABLE IF NOT EXISTS handwriting_observations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      child_id TEXT NOT NULL,
+      char TEXT NOT NULL,
+      issue_type TEXT NOT NULL,
+      source TEXT NOT NULL,
+      algorithm_version TEXT,
+      submission_id TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (child_id) REFERENCES children(id),
+      FOREIGN KEY (submission_id) REFERENCES dictation_submissions(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_handwriting_observations_child_char
+      ON handwriting_observations(child_id, char, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS mistake_photo_confirmations (
       draft_id TEXT PRIMARY KEY,
       mistake_id INTEGER NOT NULL,
@@ -657,6 +695,12 @@ export function migrateSchema(db: Database.Database): void {
     CREATE TRIGGER IF NOT EXISTS source_events_immutable_delete
       BEFORE DELETE ON source_events
       BEGIN SELECT RAISE(ABORT, 'source events are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS handwriting_observations_append_only_update
+      BEFORE UPDATE ON handwriting_observations
+      BEGIN SELECT RAISE(ABORT, 'handwriting observations are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS handwriting_observations_append_only_delete
+      BEFORE DELETE ON handwriting_observations
+      BEGIN SELECT RAISE(ABORT, 'handwriting observations are append-only'); END;
     CREATE TRIGGER IF NOT EXISTS sessions_device_reference_insert
       BEFORE INSERT ON sessions
       WHEN NEW.device_id IS NOT NULL AND NOT EXISTS (
