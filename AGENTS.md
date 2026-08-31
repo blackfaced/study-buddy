@@ -5,6 +5,10 @@
 Personal learning companion for a kid, deployed on a single Mac mini (M4, macOS 26.4).
 The repo holds a tiny self-hosted stack: a Node.js MCP server (agent queries) and a Node.js HTTP server (browser/iPad client) sharing one SQLite file, plus a single-page web UI. v0.1 ships a chat-only MVP; v0.5 adds VLM-based homework help (photo → MiniMax-M3 vision → coaching); **v0.5b+ turns it into an application platform (hub)**: shared mistake ledger, apps registry, first hung app is 糖果口算岛 (Candy Math Island). Cadence: ship v0.1 first, iterate from real use. No gamification, no points, no badge noise in the kid-facing UI.
 
+## Positioning (2026-08, issue #192)
+
+This is a **parent-operated family learning-operations loop**, not a kid-facing AI companion: capture real wrong answers → correction → weekend review → bounded parent evidence. Kid-facing apps (games, writing) are execution surfaces inside the loop; the chat buddy is deprecated as a touchpoint (hidden by default via `BUDDY_CHAT_ENABLED=false`, PR #191). Success metric: real Mistake Cases closed per week, not kid engagement. Chat-improvement backlog items (OPT-S1~S8) are superseded.
+
 ## Repo layout
 
 ```
