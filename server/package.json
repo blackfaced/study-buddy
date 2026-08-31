@@ -8,7 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "lint": "oxlint --config ../.oxlintrc.json src/",
-    "test": "vitest run && node --test ../web/shared/*.test.js && node --test ../web/buddy/*.test.js && node --test ../web/games/candy-math-island/*.test.js && node --test ../web/write/*.test.js && node --test ../web/capture/*.test.js && node --test ../web/review/*.test.js",
+    "test": "vitest run && node --test ../web/shared/*.test.js && node --test ../web/buddy/*.test.js && node --test ../web/games/candy-math-island/*.test.js && node --test ../web/write/*.test.js && node --test ../web/capture/*.test.js && node --test ../web/review/*.test.js && node --test ../bin/friday-weekend-reminder.test.js",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit"
