@@ -77,6 +77,11 @@ const replayAudioBtn = document.getElementById("replay-audio-btn");
 const dictationReveal = document.getElementById("dictation-reveal");
 const dictationHome = document.getElementById("dictation-home");
 const dictationSetList = document.getElementById("dictation-set-list");
+const dictationOutcomeRow = document.getElementById("dictation-outcome");
+const outcomeCorrectBtn = document.getElementById("outcome-correct");
+const outcomeWrongBtn = document.getElementById("outcome-wrong");
+const outcomePinyinBtn = document.getElementById("outcome-pinyin");
+const outcomePoorBtn = document.getElementById("outcome-poor");
 
 // ----- Session state -----
 // All session state is owned by ./session.js (refactor PR 7).
@@ -117,6 +122,7 @@ startBtn.onclick = () => {
   // Restore practice-mode chrome that dictation mode hides.
   hanziTarget.style.display = "";
   dictationReveal.style.display = "none";
+  dictationOutcomeRow.style.display = "none";
   replayAudioBtn.style.display = "none";
   session.start();
   homeView.classList.add("hidden");
@@ -457,6 +463,11 @@ function dictationDom() {
     againBtn,
     retryBtn,
     prevBtn,
+    outcomeRow: dictationOutcomeRow,
+    outcomeCorrect: outcomeCorrectBtn,
+    outcomeWrong: outcomeWrongBtn,
+    outcomePinyin: outcomePinyinBtn,
+    outcomePoor: outcomePoorBtn,
   };
 }
 
@@ -526,11 +537,6 @@ function startDictation(set, snapshot) {
   const restored = snapshot ? restoreDictationSession(set, snapshot) : null;
   dictationSession = restored ?? createDictationSession({ set });
   if (!restored) dictationSession.start();
-  if (dictationSession.phase === "done") {
-    clearDictationSnapshot();
-    dictationSession = null;
-    return;
-  }
   dictationSpeaker = createSpeaker({
     synth: window.speechSynthesis,
     Utterance: window.SpeechSynthesisUtterance,
@@ -570,10 +576,36 @@ function presentDictationItem() {
     dictationSpeaker.speakItem(dictationSession.speakText(), item.plannedPlays);
     saveDictationSnapshot();
   } else if (dictationSession.phase === "done") {
+    // done = all items compared; the snapshot STAYS so a reload can
+    // still submit the confirmed outcomes (#197). It is cleared only
+    // after the submission POST succeeds.
     dictationSpeaker.stop();
+    saveDictationSnapshot();
+  }
+}
+
+// #197: POST the confirmed outcomes. The idempotency key lives in the
+// session snapshot, so a retry after a network failure / reload replays
+// the same key and the server dedupes (AC4).
+async function submitDictationResults() {
+  const payload = dictationSession.buildSubmission();
+  if (!payload) return;
+  statusEl.textContent = "记录中…";
+  try {
+    const result = await window.StudyBuddy.fetch(
+      `/api/dictation/sets/${dictationSession.setId}/submissions`,
+      { method: "POST", body: payload },
+    );
+    dictationSpeaker?.stop();
     clearDictationSnapshot();
-    dictationSession = null; // don't let the done session shadow practice mode
+    dictationSession = null;
+    dictationSpeaker = null;
+    statusEl.textContent = `已记录 ✓ 错了 ${result.mistakeCases.length} 个`;
     setTimeout(exitToHome, 2000);
+  } catch (e) {
+    console.error("[write] dictation submission failed", e);
+    // Snapshot untouched — retrying replays the same idempotency key.
+    statusEl.textContent = "没存上，再点一次「提交结果」";
   }
 }
 
@@ -972,11 +1004,14 @@ undoBtn.onclick = () => {
 
 submitBtn.onclick = () => {
   if (dictationSession) {
+    // #197: at done the same button becomes 提交结果 (the view
+    // relabels it once every item has a confirmed outcome).
+    if (dictationSession.phase === "done") {
+      void submitDictationResults();
+      return;
+    }
     if (dictationSession.phase !== "answering") return;
     dictationSpeaker?.stop();
-    // submit() keeps the strokes recorded via noteStroke; the return
-    // payload (setId/itemIndex/replays/strokes) is the future #197
-    // submission body — persisted server-side there, not here.
     dictationSession.submit();
     renderDictation({
       dom: dictationDom(),
@@ -989,6 +1024,29 @@ submitBtn.onclick = () => {
   if (phase !== "writing") return;
   submitCurrent();
 };
+
+// #197: outcome confirmation in the compare view. Language and
+// handwriting are independent axes (AC1) — 字丑 toggles alone.
+function setDictationOutcome(outcome) {
+  if (!dictationSession || dictationSession.phase !== "revealed") return;
+  const current = dictationSession.current();
+  if (outcome.handwriting !== undefined && current) {
+    // Toggle: tapping 字丑 again flips it back off.
+    outcome = { handwriting: current.handwriting === "poor" ? "ok" : "poor" };
+  }
+  if (dictationSession.setOutcome(outcome)) {
+    renderDictation({
+      dom: dictationDom(),
+      session: dictationSession,
+      createNode: (tag) => document.createElement(tag),
+    });
+    saveDictationSnapshot();
+  }
+}
+outcomeCorrectBtn.onclick = () => setDictationOutcome({ language: "correct" });
+outcomeWrongBtn.onclick = () => setDictationOutcome({ language: "wrong" });
+outcomePinyinBtn.onclick = () => setDictationOutcome({ language: "pinyin" });
+outcomePoorBtn.onclick = () => setDictationOutcome({ handwriting: "poor" });
 
 retryBtn.onclick = () => {
   // "重练" — clear kid strokes, restart the same char (no advance).

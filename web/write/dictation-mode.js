@@ -11,9 +11,11 @@
 //                Replays are COUNTED but never an error (AC2).
 //     ↓ submit
 //   revealed   → target shown next to the kid's ink for self-check
-//                (AC3). No auto-grading here — that's #197.
+//                (AC3); the kid/parent confirms the outcome per item
+//                (language × handwriting, independent axes — #197).
 //     ↓ next
-//   … → done   → all targets visible.
+//   … → done   → 提交结果 POSTs the confirmed outcomes (one
+//                idempotency key per session, so reload-retry is safe).
 //
 // Structural AC1 guarantee: `visibleText()` returns null until the
 // item is revealed. The pre-submit audio channel (`speakText()`) is
@@ -39,6 +41,10 @@ function buildItems(set) {
     replays: 0,
     strokes: [],
     revealed: false,
+    // #197: confirmed outcomes. language: null until the kid/parent
+    // confirms in the compare view; handwriting defaults "ok".
+    language: null,
+    handwriting: "ok",
   }));
   const sentence = {
     kind: "sentence",
@@ -47,11 +53,13 @@ function buildItems(set) {
     replays: 0,
     strokes: [],
     revealed: false,
+    language: null,
+    handwriting: "ok",
   };
   return [...words, sentence];
 }
 
-function makeSession(set, items, itemIndex, phase) {
+function makeSession(set, items, itemIndex, phase, idempotencyKey) {
   function current() {
     const it = items[itemIndex];
     return it ? { ...it, strokes: [...it.strokes] } : null;
@@ -125,6 +133,43 @@ function makeSession(set, items, itemIndex, phase) {
       };
     },
 
+    // #197: confirm the revealed item's outcome. language and
+    // handwriting are independent axes — setting one never touches
+    // the other (AC1).
+    setOutcome({ language, handwriting } = {}) {
+      if (phase !== "revealed") return false;
+      const it = items[itemIndex];
+      if (language !== undefined) {
+        if (!["correct", "wrong", "pinyin"].includes(language)) return false;
+        it.language = language;
+      }
+      if (handwriting !== undefined) {
+        if (!["ok", "poor"].includes(handwriting)) return false;
+        it.handwriting = handwriting;
+      }
+      return true;
+    },
+
+    allConfirmed() {
+      return allConfirmedItems();
+    },
+
+    /** POST /api/dictation/sets/:id/submissions body; null until all confirmed. */
+    buildSubmission() {
+      if (!allConfirmedItems()) return null;
+      return {
+        idempotencyKey,
+        items: items.map((it) => ({
+          kind: it.kind,
+          target: it.text,
+          language: it.language,
+          handwriting: it.handwriting,
+          replays: it.replays,
+          strokes: [...it.strokes],
+        })),
+      };
+    },
+
     next() {
       if (phase !== "revealed") return false;
       itemIndex += 1;
@@ -137,18 +182,26 @@ function makeSession(set, items, itemIndex, phase) {
         setId: set.id,
         itemIndex,
         phase,
+        idempotencyKey,
         items: items.map((it) => ({
           replays: it.replays,
           strokes: [...it.strokes],
           revealed: it.revealed,
+          language: it.language,
+          handwriting: it.handwriting,
         })),
       };
     },
   };
+
+  function allConfirmedItems() {
+    return items.every((it) => it.language !== null);
+  }
 }
 
-export function createDictationSession({ set }) {
-  return makeSession(set, buildItems(set), 0, "idle");
+export function createDictationSession({ set, newKey } = {}) {
+  const key = typeof newKey === "function" ? newKey() : crypto.randomUUID();
+  return makeSession(set, buildItems(set), 0, "idle", key);
 }
 
 export function restoreDictationSession(set, snapshot) {
@@ -161,6 +214,11 @@ export function restoreDictationSession(set, snapshot) {
     items[i].replays = saved.replays ?? 0;
     items[i].strokes = Array.isArray(saved.strokes) ? saved.strokes.map(String) : [];
     items[i].revealed = !!saved.revealed;
+    items[i].language = saved.language ?? null;
+    items[i].handwriting = saved.handwriting ?? "ok";
   }
-  return makeSession(set, items, snapshot.itemIndex, snapshot.phase ?? "answering");
+  const key = typeof snapshot.idempotencyKey === "string" && snapshot.idempotencyKey
+    ? snapshot.idempotencyKey
+    : crypto.randomUUID();
+  return makeSession(set, items, snapshot.itemIndex, snapshot.phase ?? "answering", key);
 }

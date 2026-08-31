@@ -130,6 +130,13 @@
       width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
       font-size: 28px; background: white; border: 2px solid var(--accent); border-radius: 8px;
     }
+    /* #197: outcome confirmation row (revealed phase only) */
+    .dictation-outcome { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+    .dictation-outcome button {
+      padding: 10px 16px; font-size: 15px; border: 2px solid #e0d6c8;
+      border-radius: 12px; background: white; color: var(--text-primary); font-weight: bold;
+    }
+    .dictation-outcome button.selected { border-color: var(--accent); background: #fff3e0; }
   </style>
 </head>
 <body>
@@ -196,6 +203,15 @@
     <!-- issue #196: dictation self-check reveal — per-char target boxes,
          shown only after submit (dictation-view.js owns visibility). -->
     <div class="dictation-reveal" id="dictation-reveal" style="display:none;"></div>
+    <!-- issue #197: dictation outcome confirmation — the kid/parent
+         confirms each item in the compare view; only confirmed
+         outcomes are POSTed. -->
+    <div class="dictation-outcome" id="dictation-outcome" style="display:none;">
+      <button id="outcome-correct" type="button">✓ 写对了</button>
+      <button id="outcome-wrong" type="button">✗ 写错了</button>
+      <button id="outcome-pinyin" type="button">🔤 拼音错</button>
+      <button id="outcome-poor" type="button">✍️ 字丑</button>
+    </div>
   </section>
 </div>
 
