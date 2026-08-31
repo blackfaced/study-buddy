@@ -158,7 +158,11 @@ export function createApp(opts: AppOptions): express.Express {
     isSecureRequest: opts.deviceSecureTransportCheck,
   });
   registerBuddyRoutes(app, { db, httpsPort, lock: buddyLock, chatEnabled: buddyChatEnabled, logger });
-  registerDictationRoutes(app, { db, logger });
+  registerDictationRoutes(app, {
+    db,
+    logger,
+    beforeSourceEventAppend: opts.beforeSourceEventAppend,
+  });
   registerSessionRoutes(app, { db, logger, auth: deviceAuthenticator });
   registerChatRoutes(app, {
     db,

@@ -20,12 +20,13 @@
 // instead of creating a duplicate.
 //
 // Public API:
-//   - registerDictationRoutes(app, { db, logger })
+//   - registerDictationRoutes(app, { db, logger, beforeSourceEventAppend })
 // =====================================================================
 import type { Express, Request, Response } from "express";
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../logger.js";
+import { insertMistake } from "../capture-service.js";
 
 const DEFAULT_WORD_PLAYS = 2;
 const DEFAULT_SENTENCE_PLAYS = 3;
@@ -33,9 +34,21 @@ const MAX_WORDS = 100;
 const MAX_WORD_LEN = 20;
 const MAX_SENTENCE_LEN = 100;
 
+// #197: language outcomes of a confirmed dictation item. "wrong" =
+// 错字/错词, "pinyin" = 拼音错. Both converge into the closure loop;
+// "correct" produces nothing (AC3).
+const DICTATION_LANGUAGES = ["correct", "wrong", "pinyin"] as const;
+type DictationLanguage = (typeof DICTATION_LANGUAGES)[number];
+const LANGUAGE_ERROR_TYPE: Record<Exclude<DictationLanguage, "correct">, string> = {
+  wrong: "错字错词",
+  pinyin: "拼音错",
+};
+
 export interface DictationRouteDeps {
   db: Database.Database;
   logger: Logger;
+  /** Throw-only test seam; the real immutable writer always runs afterward. */
+  beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
 }
 
 interface DictationSetRow {
@@ -91,7 +104,7 @@ function playsError(name: string, value: unknown): string | null {
  * Mount the dictation routes on the given Express app.
  */
 export function registerDictationRoutes(app: Express, deps: DictationRouteDeps): void {
-  const { db, logger } = deps;
+  const { db, logger, beforeSourceEventAppend } = deps;
 
   app.post("/api/dictation/sets", (req: Request, res: Response) => {
     const body = req.body ?? {};
@@ -223,5 +236,115 @@ export function registerDictationRoutes(app: Express, deps: DictationRouteDeps):
       ORDER BY created_at DESC
     `).all(childId) as DictationSetRow[];
     return res.json({ sets: rows.map(toApi) });
+  });
+
+  // ============== #197: confirmed dictation results → closure loop ==============
+  // "Confirmed" means the kid/parent already confirmed each item in the
+  // dictation compare UI — the endpoint receives confirmed results and
+  // never re-confirms. Language and handwriting outcomes are written
+  // as INDEPENDENT rows (AC1):
+  //   - language wrong/pinyin → insertMistake() (unified Capture path:
+  //     Mistake Case subject=chinese + original Learning Attempt +
+  //     open Correction Obligation + Source Event, nested transaction)
+  //   - handwriting poor → append-only handwriting_observations row,
+  //     never a mistake case — legibility is not a language error
+  //   - correct + legible → nothing at all (AC3)
+  // Idempotency (AC4): idempotencyKey is UNIQUE on
+  // dictation_submissions; a retry replays the stored result.
+  app.post("/api/dictation/sets/:id/submissions", (req: Request, res: Response) => {
+    const set = db.prepare("SELECT * FROM dictation_sets WHERE id = ?").get(req.params.id) as
+      | DictationSetRow
+      | undefined;
+    if (!set) return res.status(404).json({ error: "dictation set not found" });
+
+    const body = req.body ?? {};
+    const childId = (typeof body.childId === "string" && body.childId.trim()) || set.child_id;
+    const { idempotencyKey, items } = body;
+    if (typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0 ||
+        idempotencyKey.length > 128) {
+      // The key is REQUIRED here (unlike set creation): it is the only
+      // thing that makes a confirm retry safe (AC4).
+      return res.status(400).json({ error: "idempotencyKey is required (non-empty string, ≤ 128 chars)" });
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "items must be a non-empty array" });
+    }
+    for (const item of items) {
+      if (!item || typeof item.target !== "string" || item.target.trim().length === 0 ||
+          !DICTATION_LANGUAGES.includes(item.language) ||
+          (item.handwriting !== undefined && !["ok", "poor"].includes(item.handwriting)) ||
+          (item.replays !== undefined && (!Number.isInteger(item.replays) || item.replays < 0))) {
+        return res.status(400).json({
+          error: "each item needs target (string), language (correct|wrong|pinyin), optional handwriting (ok|poor), optional replays (int ≥ 0)",
+        });
+      }
+    }
+
+    // Retry replay: same key → stored result, no double write.
+    const existing = db.prepare(
+      "SELECT result_json FROM dictation_submissions WHERE idempotency_key = ?",
+    ).get(idempotencyKey) as { result_json: string } | undefined;
+    if (existing) return res.status(200).json(JSON.parse(existing.result_json));
+
+    const submissionId = randomUUID();
+    const result = {
+      submissionId,
+      setId: set.id,
+      mistakeCases: [] as Array<{ target: string; caseId: string; created: boolean }>,
+      handwritingObservations: 0,
+      items: items.length,
+    };
+
+      db.transaction(() => {
+      // Pass 1: language outcomes (closure loop writes). Receipt comes
+      // next because handwriting_observations.submission_id FKs to it.
+      for (const item of items as Array<{
+        target: string; language: DictationLanguage; handwriting?: "ok" | "poor"; replays?: number;
+      }>) {
+        if (item.language === "correct") continue;
+        // 孩子的手写是笔画不是文本 — like the vision path, the typed
+        // user answer arrives later in review (#160).
+        const inserted = insertMistake(db, {
+          childId,
+          problem: item.target.trim(),
+          userAnswer: "",
+          correctAnswer: item.target.trim(),
+          errorType: LANGUAGE_ERROR_TYPE[item.language as Exclude<DictationLanguage, "correct">],
+          source: "dictation",
+          subject: "chinese",
+        }, beforeSourceEventAppend);
+        result.mistakeCases.push({ target: item.target.trim(), caseId: inserted.caseId, created: inserted.created });
+      }
+      result.handwritingObservations = (items as Array<{ handwriting?: string }>)
+        .filter((i) => i.handwriting === "poor").length;
+      db.prepare(`
+        INSERT INTO dictation_submissions
+          (id, set_id, child_id, idempotency_key, payload_json, result_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        submissionId, set.id, childId, idempotencyKey,
+        JSON.stringify({ items }), JSON.stringify(result), Date.now(),
+      );
+      // Pass 2: handwriting observations (independent of the cases).
+      const insertObservation = db.prepare(`
+        INSERT INTO handwriting_observations
+          (child_id, char, issue_type, source, algorithm_version, submission_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const item of items as Array<{ target: string; handwriting?: "ok" | "poor" }>) {
+        if (item.handwriting !== "poor") continue;
+        insertObservation.run(
+          childId, item.target.trim(), "poor_legibility", "dictation", "human-confirmed",
+          submissionId, Date.now(),
+        );
+      }
+    })();
+
+    logger.info("dictation submission recorded", {
+      submissionId, setId: set.id, childId,
+      mistakeCases: result.mistakeCases.length,
+      handwritingObservations: result.handwritingObservations,
+    });
+    return res.status(201).json(result);
   });
 }
