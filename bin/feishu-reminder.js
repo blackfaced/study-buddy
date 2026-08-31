@@ -103,3 +103,7 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+
+// Exported for bin/friday-weekend-reminder.js (#195), which reuses the
+// same signed-webhook sender instead of duplicating it.
+module.exports = { sendReminder };
