@@ -65,22 +65,25 @@ function makeFakeCreateNode() {
   return { createNode, calls };
 }
 
-test("home-view: renderLibrary enables the start button when library has chars", () => {
+test("home-view: renderLibrary keeps start button disabled until the kid selects a char", () => {
+  // Multi-select: even with chars in the library, the start button
+  // stays disabled until the kid picks at least one. The original
+  // "library non-empty → enabled" rule was true when start always
+  // meant "do the whole library" — but now start means "do what I
+  // picked", so picking is a precondition.
   const dom = makeDom();
   const { createNode, calls } = makeFakeCreateNode();
-  const calls2 = { fetchCount: 0, errorText: null };
-  const home = attachHomeView({
-    dom,
-    api: "/api/write",
-    createNode,
-    fetch: async () => ({ words: [{ char: "一", attemptCount: 0 }] }),
-    onLibraryLoaded: () => { calls2.fetchCount++; },
-  });
+  const home = attachHomeView({ dom, api: "/api/write", createNode });
   home.renderLibrary([{ char: "一", attemptCount: 0 }]);
-  assert.equal(dom.startBtn.disabled, false, "start should be enabled with 1 char");
+  assert.equal(dom.startBtn.disabled, true, "1 char in library but none selected → still disabled");
+  // kid ticks the checkbox
+  const cb = dom.wordList.children[0].children.find((c) => c.tagName === "input");
+  cb.checked = true;
+  cb.onchange();
+  assert.equal(dom.startBtn.disabled, false, "1 char selected → enabled");
   assert.equal(dom.wordList.children.length, 1, "should paint 1 cell");
-  // 1 cell div + 1 char span + 1 delete button = 3 createNode calls
-  assert.equal(calls.length, 3, "should construct div + span + button");
+  // 1 cell div + 1 checkbox + 1 char span + 1 delete button = 4 createNode calls
+  assert.equal(calls.length, 4, "should construct div + input + span + button");
 });
 
 test("home-view: renderLibrary disables the start button when library is empty", () => {
@@ -98,9 +101,11 @@ test("home-view: renderLibrary shows attempt count when > 0", () => {
   const home = attachHomeView({ dom, api: "/api/write", createNode });
   home.renderLibrary([{ char: "天", attemptCount: 3 }]);
   const cell = dom.wordList.children[0];
-  assert.equal(cell.children.length, 3, "char + attempts label + delete button");
-  assert.equal(cell.children[1].className, "attempts");
-  assert.equal(cell.children[1].textContent, "×3");
+  // checkbox + char span + attempts label + delete button = 4
+  assert.equal(cell.children.length, 4, "checkbox + char + attempts + delete");
+  const attemptsNode = cell.children.find((c) => c.className === "attempts");
+  assert.ok(attemptsNode, "attempts label present when count > 0");
+  assert.equal(attemptsNode.textContent, "×3");
 });
 
 test("home-view: renderLibrary does not show attempt label when count is 0", () => {
@@ -109,7 +114,8 @@ test("home-view: renderLibrary does not show attempt label when count is 0", () 
   const home = attachHomeView({ dom, api: "/api/write", createNode });
   home.renderLibrary([{ char: "一", attemptCount: 0 }]);
   const cell = dom.wordList.children[0];
-  assert.equal(cell.children.length, 2, "char + delete button (no attempts label)");
+  // checkbox + char + delete = 3 (no attempts label)
+  assert.equal(cell.children.length, 3, "checkbox + char + delete (no attempts label)");
 });
 
 test("home-view: renderLibrary constructs nodes via createNode (regression — PR #70 plain-object bug)", () => {
@@ -125,11 +131,10 @@ test("home-view: renderLibrary constructs nodes via createNode (regression — P
     { char: "一", attemptCount: 0 },
     { char: "韩", attemptCount: 2 },
   ]);
-  // 2 cells: each has div + char span + (maybe) attempts span + delete button
-  // Cell 1 (attemptCount=0): div + span + button = 3
-  // Cell 2 (attemptCount=2): div + span + span + button = 4
-  // Total = 7
-  assert.equal(calls.length, 7, "createNode called for every node built");
+  // Cell 1 (attemptCount=0): div + checkbox + span + button = 4
+  // Cell 2 (attemptCount=2): div + checkbox + span + span + button = 5
+  // Total = 9
+  assert.equal(calls.length, 9, "createNode called for every node built");
   assert.equal(dom.wordList.children.length, 2, "two cells painted");
 });
 

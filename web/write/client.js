@@ -107,6 +107,7 @@ const homeView_ = attachHomeView({
 const loadLibrary = homeView_.loadLibrary;
 const renderLibrary = homeView_.renderLibrary;
 const addChars = homeView_.addChars;
+const getSelected = homeView_.getSelected;
 
 addBtn.onclick = addChars;
 charsInput.addEventListener("keydown", (e) => {
@@ -118,13 +119,20 @@ charsInput.addEventListener("keydown", (e) => {
 charsInput.addEventListener("input", homeView_._onInput);
 
 startBtn.onclick = () => {
-  if (session.library.length === 0) return;
+  // Multi-select: the kid picks a subset of the library to practice
+  // right now. If they didn't pick any, fall back to the whole
+  // library (round-robin five-item session as before).
+  const selected = getSelected();
+  const subset = selected.length > 0
+    ? session.library.filter((w) => selected.includes(w.char))
+    : session.library;
+  if (subset.length === 0) return;
   // Restore practice-mode chrome that dictation mode hides.
   hanziTarget.style.display = "";
   dictationReveal.style.display = "none";
   dictationOutcomeRow.style.display = "none";
   replayAudioBtn.style.display = "none";
-  session.start();
+  session.start(subset);
   homeView.classList.add("hidden");
   practiceView.classList.add("active");
   presentCurrent();

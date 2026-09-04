@@ -33,17 +33,23 @@ export function createWriteSession({ initialLibrary = [] } = {}) {
   let session = [];
   let sessionIdx = 0;
 
-  function start() {
-    if (library.length === 0) {
+  function start(subset) {
+    // Multi-select (home-view): when the kid picks a subset, the
+    // practice session is just those chars. If they didn't pick any
+    // (or call start() with no argument), we use the full library.
+    // The round-robin then pulls SESSION_LENGTH from whatever set
+    // we're practicing — important so a 1-char session doesn't
+    // infinite-loop, and a 10-char session still gives the kid 5
+    // items to walk through.
+    const pool = Array.isArray(subset) && subset.length > 0 ? subset : library;
+    if (pool.length === 0) {
       session = [];
       sessionIdx = 0;
       return;
     }
-    // Round-robin: if the library has < SESSION_LENGTH chars, wrap
-    // so the kid always has a 5-item session to walk through.
     const next = [];
     for (let i = 0; i < SESSION_LENGTH; i++) {
-      const w = library[i % library.length];
+      const w = pool[i % pool.length];
       next.push({
         char: w.char,
         attemptCount: w.attemptCount ?? 0,
