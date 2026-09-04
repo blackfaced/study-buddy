@@ -37,13 +37,40 @@ function defaultCreateNode(tag) {
 export function attachHomeView({ dom, api, fetch, createNode, onLibraryLoaded, onStart }) {
   const { wordList, startBtn, charsInput, homeError } = dom;
   const _createNode = createNode || defaultCreateNode;
+  // Multi-select state: which chars the kid has checked. Re-rendering
+  // a new library preserves the selection for any char that's still
+  // present (keyed by the char itself, not the cell index).
+  const selected = new Set();
+
+  function refreshStartBtn() {
+    const n = selected.size;
+    startBtn.disabled = n === 0;
+    startBtn.textContent = n === 0 ? "开始练" : `开始练 (${n} 个字)`;
+  }
 
   function renderLibrary(library) {
     wordList.innerHTML = "";
+    // Drop any selected chars that aren't in the new library — a
+    // deleted char shouldn't stay "checked" in our state.
+    const inNew = new Set(library.map((w) => w.char));
+    for (const c of [...selected]) if (!inNew.has(c)) selected.delete(c);
     for (const w of library) {
       const cell = _createNode("div");
       cell.className = "word-cell";
       cell.title = `练过 ${w.attemptCount} 次`;
+      const cb = _createNode("input");
+      cb.type = "checkbox";
+      // Tag the checkbox with the char it represents. We use a direct
+      // property (not dataset, which the test's plain-object fake
+      // doesn't implement) so getSelected can look it up later.
+      cb.char = w.char;
+      cb.checked = selected.has(w.char);
+      // The change handler reads `this.checked` off the DOM node we
+      // just built, so the test's "simulate a click" pattern (set
+      // checked = true, call onchange) works without touching the
+      // native HTMLInputElement prototype.
+      cb.onchange = function () { onToggle(w.char, this.checked); };
+      cell.appendChild(cb);
       const ch = _createNode("span");
       ch.textContent = w.char;
       cell.appendChild(ch);
@@ -66,7 +93,27 @@ export function attachHomeView({ dom, api, fetch, createNode, onLibraryLoaded, o
       cell.appendChild(del);
       wordList.appendChild(cell);
     }
-    startBtn.disabled = library.length === 0;
+    refreshStartBtn();
+  }
+
+  function onToggle(char, isChecked) {
+    if (isChecked) selected.add(char);
+    else selected.delete(char);
+    refreshStartBtn();
+  }
+
+  function getSelected() {
+    // Preserve the order in which the chars appear in the rendered
+    // library, not the order in which the kid clicked (so the practice
+    // session is deterministic across re-clicks). We key the cell
+    // lookup by the checkbox's `char` property instead of fragile
+    // DOM order (a checkbox's nextSibling could be an "attempts" label
+    // if the char has been practiced, not the char span itself).
+    const checked = wordList.children
+      .map((cell) => cell.children.find((c) => c.tagName === "input" && c.checked))
+      .filter(Boolean)
+      .map((cb) => cb.char);
+    return checked.length > 0 ? checked : [...selected];
   }
 
   // Issue #80: homeError wears .error-msg by default (red), so even
@@ -137,5 +184,5 @@ export function attachHomeView({ dom, api, fetch, createNode, onLibraryLoaded, o
     clearError();
   }
 
-  return { renderLibrary, loadLibrary, addChars, _onInput };
+  return { renderLibrary, loadLibrary, addChars, _onInput, getSelected };
 }
