@@ -11,18 +11,58 @@
 // web/buddy/index.html (applyPhotoOnlyMode) and web/index.html
 // (portalEntry).
 (function () {
+  // Kid-facing copy in photo-only mode. The chat branding (小书童) must
+  // not leak through: the portal entry says 拍错题, so the page, the PIN
+  // gate and the camera-permission prompt all speak photo capture.
+  var COPY = {
+    title: "拍错题",
+    name: "拍错题",
+    avatar: "📷",
+    pinHint: "拍错题要大人先开个门",
+    permTitle: "拍错题要用摄像头",
+    permHint: "需要打开摄像头才能拍题哦",
+    photoStatus: "确认清楚后，点「分析题目」。",
+    serverTitle: "连不上服务器",
+  };
+
+  function setText(el, text) {
+    if (el) el.textContent = text;
+  }
+
+  function hide(el) {
+    if (el) el.style.display = "none";
+  }
+
   /**
-   * Hide the chat UI and flag the app root so CSS can make the 📷
-   * button the prominent, centered action. Keeps #photo-btn, .btn-row
-   * (翻转/写完啦), the header and the camera preview untouched.
+   * Hide the chat UI, flag the app root so CSS can make the 📷 button
+   * the prominent centered action, and swap the chat-era branding for
+   * 拍错题 copy. Keeps #photo-btn and #flip-btn (aiming the rear camera
+   * at a worksheet needs it); hides #video-toggle (homework posture
+   * loop) and #end-btn (chat-session teardown). All element lookups are
+   * optional so a minimal caller never crashes.
    *
-   * @param {{app: Element, chat: Element, input: Element, sendBtn: Element}} els
+   * @param {{app: Element, chat: Element, input: Element, sendBtn: Element,
+   *   videoToggle?: Element, endBtn?: Element, name?: Element,
+   *   avatar?: Element, pinHint?: Element, permTitle?: Element,
+   *   permHint?: Element, photoStatus?: Element, serverTitle?: Element,
+   *   doc?: Document}} els
    */
   function applyPhotoOnlyMode(els) {
     els.app.classList.add("photo-only");
-    els.chat.style.display = "none";
-    els.input.style.display = "none";
-    els.sendBtn.style.display = "none";
+    hide(els.chat);
+    hide(els.input);
+    hide(els.sendBtn);
+    hide(els.videoToggle);
+    hide(els.endBtn);
+
+    setText(els.name, COPY.name);
+    setText(els.avatar, COPY.avatar);
+    setText(els.pinHint, COPY.pinHint);
+    setText(els.permTitle, COPY.permTitle);
+    setText(els.permHint, COPY.permHint);
+    setText(els.photoStatus, COPY.photoStatus);
+    setText(els.serverTitle, COPY.serverTitle);
+    if (els.doc) els.doc.title = COPY.title;
   }
 
   /**
