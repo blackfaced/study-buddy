@@ -180,7 +180,7 @@
 <div class="perm-overlay" id="pin-overlay">
   <div class="card">
     <h2>🔒 大人来</h2>
-    <p style="font-size:14px;color:#666;">这个聊天要大人先开个门</p>
+    <p id="pin-hint" style="font-size:14px;color:#666;">这个聊天要大人先开个门</p>
     <input
       type="password"
       id="pin-input"
@@ -250,8 +250,8 @@
 
 <div class="perm-overlay" id="perm-overlay" style="display:none;">
   <div class="card">
-    <h2>小书童想看你~</h2>
-    <p>需要打开摄像头才能陪你写作业哦</p>
+    <h2 id="perm-title">小书童想看你~</h2>
+    <p id="perm-hint">需要打开摄像头才能陪你写作业哦</p>
     <button onclick="Buddy.chat.requestPerm()">好的</button>
   </div>
 </div>
@@ -273,7 +273,7 @@
 
 <div class="perm-overlay" id="server-config" style="display:none;">
   <div class="card">
-    <h2>连不上小书童服务器</h2>
+    <h2 id="server-config-title">连不上小书童服务器</h2>
     <p>请确认：</p>
     <ol style="text-align:left;font-size:14px;color:#666;line-height:1.6;">
       <li>Mac mini 跑着 server（<code>npm start</code>）</li>
@@ -300,6 +300,15 @@ const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const statusEl = document.getElementById('status');
 const avatarEl = document.getElementById('avatar');
+
+// Status-line copy for a restored finished session. Photo-only mode
+// (BUDDY_CHAT_ENABLED=false) must not invite the kid back to a chat
+// that no longer exists.
+function doneSessionCopy() {
+  return window.Buddy.state.chatEnabled === false
+    ? '可以拍错题啦'
+    : '可以继续跟小书童聊天';
+}
 
 // 调试模式：URL 带 ?debug=1 开启
 const DEBUG_MODE = new URLSearchParams(location.search).get('debug') === '1';
@@ -407,16 +416,9 @@ function unlockBuddyUI() {
   pinUnlocked = true;
   pinOverlay.style.display = 'none';
   document.querySelector('.app').classList.remove('hidden');
-  // Photo-only mode (BUDDY_CHAT_ENABLED=false): hide the chat UI, keep
-  // the 📷 mistake-capture button. Chat code stays loaded, just hidden.
-  if (window.Buddy.state.chatEnabled === false) {
-    window.BuddyPhotoOnly.applyPhotoOnlyMode({
-      app: document.querySelector('.app'),
-      chat: chatEl,
-      input: inputEl,
-      sendBtn: document.getElementById('send-btn'),
-    });
-  }
+  // Photo-only mode (BUDDY_CHAT_ENABLED=false) is applied in
+  // beginBuddyGate as soon as /api/buddy/status lands, so the PIN gate
+  // copy is already swapped by the time the parent sees it.
   // A restored free-chat epoch has no camera loop, so keep its preview
   // hidden. Homework startup will reveal it before requesting permission.
   const camEl = document.getElementById('cam-preview');
@@ -521,7 +523,7 @@ async function start() {
   // A conversation epoch resumes as free chat. Do not silently turn it
   // into homework or start camera/posture processing after refresh.
   if (window.Buddy.state.sessionId && window.Buddy.state.state === 'done') {
-    statusEl.textContent = '可以继续跟小书童聊天';
+    statusEl.textContent = doneSessionCopy();
     return;
   }
 
@@ -539,10 +541,39 @@ async function start() {
 async function beginBuddyGate() {
   try {
     const status = await window.StudyBuddy.fetch('/api/buddy/status');
-    // BUDDY_CHAT_ENABLED: surfaced for unlockBuddyUI (photo-only mode)
-    // regardless of which gate path we take — PIN or dev-mode直通.
+    // BUDDY_CHAT_ENABLED: surfaced for the photo-only mode applied
+    // below — regardless of which gate path we take, PIN or dev直通.
     if (status && typeof status.chatEnabled === 'boolean') {
       window.Buddy.state.chatEnabled = status.chatEnabled;
+    }
+    // Photo-only mode (BUDDY_CHAT_ENABLED=false): hide the chat UI, keep
+    // the 📷 mistake-capture button, swap the 小书童 branding. Applied
+    // here — before the PIN gate shows — so the gate copy says 拍错题,
+    // and so both gate paths (PIN / dev-mode直通) get it. Chat code
+    // stays loaded, just hidden.
+    if (window.Buddy.state.chatEnabled === false) {
+      window.BuddyPhotoOnly.applyPhotoOnlyMode({
+        app: document.querySelector('.app'),
+        chat: chatEl,
+        input: inputEl,
+        sendBtn: document.getElementById('send-btn'),
+        videoToggle: document.getElementById('video-toggle'),
+        endBtn: document.getElementById('end-btn'),
+        name: document.querySelector('.app .name'),
+        avatar: document.getElementById('avatar'),
+        pinHint: document.getElementById('pin-hint'),
+        permTitle: document.getElementById('perm-title'),
+        permHint: document.getElementById('perm-hint'),
+        photoStatus: document.getElementById('mistake-photo-status'),
+        serverTitle: document.getElementById('server-config-title'),
+        doc: document,
+      });
+      // A session restored above (before this status fetch) may already
+      // have set chat-era copy on the status line — chatEnabled was
+      // still the default true then. Fix it up now that we know.
+      if (statusEl.textContent === '可以继续跟小书童聊天') {
+        statusEl.textContent = doneSessionCopy();
+      }
     }
     if (status && status.locked === false) {
       // dev mode: skip the gate, go straight to the chat.
@@ -577,7 +608,7 @@ async function ensurePairedDevice() {
         window.Buddy.state.sessionId = active.session.sessionId;
         window.Buddy.state.state = window.Buddy.state.restoredState(active.session.subject);
         statusEl.textContent = window.Buddy.state.state === 'done'
-          ? '可以继续跟小书童聊天'
+          ? doneSessionCopy()
           : '可以继续上次的作业';
       }
     } catch (err) {
@@ -595,7 +626,7 @@ async function ensurePairedDevice() {
       window.Buddy.state.sessionId = active.session.sessionId;
       window.Buddy.state.state = window.Buddy.state.restoredState(active.session.subject);
       statusEl.textContent = window.Buddy.state.state === 'done'
-        ? '可以继续跟小书童聊天'
+        ? doneSessionCopy()
         : '可以继续上次的作业';
     }
     pairOverlay.style.display = 'none';
