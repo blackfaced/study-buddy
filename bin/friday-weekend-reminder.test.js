@@ -82,6 +82,23 @@ test("webhook URL unset → quiet skip: exit 0, nothing sent, skip logged (AC4)"
   assert.ok(logger.lines.some((l) => /skip|未配置/.test(l)), "skip must be logged");
 });
 
+test("real scenario: app-bot credentials alone (no webhook) also send — personal-edition Feishu has no custom bots", async () => {
+  const logger = stubLogger();
+  const sentArgs = [];
+  const code = await run({
+    env: { FEISHU_APP_ID: "cli_x", FEISHU_APP_SECRET: "s", FEISHU_CHAT_ID: "oc_x" },
+    logger,
+    fetchJson: async () => SUMMARY,
+    send: async (args) => { sentArgs.push(args); return true; },
+  });
+  assert.equal(code, 0);
+  assert.equal(sentArgs.length, 1);
+  assert.equal(sentArgs[0].appId, "cli_x");
+  assert.equal(sentArgs[0].appSecret, "s");
+  assert.equal(sentArgs[0].chatId, "oc_x");
+  assert.ok(sentArgs[0].text.endsWith(ENDING_QUESTION));
+});
+
 test("happy path: summary is fetched and the formatted text is pushed to the webhook", async () => {
   const logger = stubLogger();
   const sentTexts = [];

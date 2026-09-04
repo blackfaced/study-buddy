@@ -5,22 +5,24 @@
 // part of the parent-operated loop #192).
 //
 // Reads the bounded parent summary (GET /api/capture/parent-summary),
-// formats an aggregate-only Chinese text, and pushes it to the Feishu
-// custom-bot webhook via bin/feishu-reminder.js's sendReminder. The
-// message ends with exactly one question — 要不要安排周末复习？ It
-// only asks: it never processes materials, never generates handouts,
+// formats an aggregate-only Chinese text, and pushes it to Feishu via
+// bin/feishu-reminder.js's sendReminder (custom-bot webhook or app
+// bot). The message ends with exactly one question — 要不要安排周末复习？
+// It only asks: it never processes materials, never generates handouts,
 // and never writes any learning state (AC3 — this script performs one
-// GET and one webhook POST, nothing else).
+// GET and one send, nothing else).
 //
 // Content boundary (AC2): aggregate counts + error-type labels only.
 // No problem text, no images, no case ids, no child identity.
 //
-// Webhook unset (AC4): logs a skip line and exits 0 — cron stays quiet.
+// Feishu unset (AC4): logs a skip line and exits 0 — cron stays quiet.
 //
 // Scheduling — configured on the Mac mini deploy host, NOT in this
 // repo. Mavis cron example (Asia/Shanghai):
 //   cron: 13 20 * * 5     # every Friday 20:13 (off the :00 herd)
-//   env:  FEISHU_WEBHOOK_URL / FEISHU_WEBHOOK_SECRET,
+//   env:  FEISHU_WEBHOOK_URL / FEISHU_WEBHOOK_SECRET  (custom bot), or
+//         FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_CHAT_ID (app bot,
+//         e.g. the Mavis Feishu app — personal edition has no custom bots),
 //         STUDY_BUDDY_SUMMARY_URL (default http://localhost:3000/...)
 // or a launchd StartCalendarInterval { Weekday=5, Hour=20, Minute=13 }.
 // =====================================================================
@@ -77,8 +79,15 @@ async function run({
   fetchJson = defaultFetchJson,
 } = {}) {
   const webhookUrl = env.FEISHU_WEBHOOK_URL || "";
-  if (!webhookUrl) {
-    logger.info("FEISHU_WEBHOOK_URL 未配置，跳过本次提醒");
+  const appId = env.FEISHU_APP_ID || "";
+  const appSecret = env.FEISHU_APP_SECRET || "";
+  const chatId = env.FEISHU_CHAT_ID || "";
+  // Two transports: custom-bot webhook, or app bot (the Mavis Feishu
+  // app — personal-edition accounts can't create custom bots). Skip
+  // only when neither is configured.
+  const hasAppBot = appId && appSecret && chatId;
+  if (!webhookUrl && !hasAppBot) {
+    logger.info("飞书未配置（FEISHU_WEBHOOK_URL 或 FEISHU_APP_ID/SECRET/CHAT_ID），跳过本次提醒");
     return 0;
   }
   const summaryUrl = env.STUDY_BUDDY_SUMMARY_URL || DEFAULT_SUMMARY_URL;
@@ -94,6 +103,9 @@ async function run({
     text,
     url: webhookUrl,
     secret: env.FEISHU_WEBHOOK_SECRET || "",
+    appId,
+    appSecret,
+    chatId,
   });
   if (!ok) {
     logger.error("飞书推送失败");
