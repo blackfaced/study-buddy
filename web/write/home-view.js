@@ -109,8 +109,11 @@ export function attachHomeView({ dom, api, fetch, createNode, onLibraryLoaded, o
     // lookup by the checkbox's `char` property instead of fragile
     // DOM order (a checkbox's nextSibling could be an "attempts" label
     // if the char has been practiced, not the char span itself).
-    const checked = wordList.children
-      .map((cell) => cell.children.find((c) => c.tagName === "input" && c.checked))
+    // Array.from: a real HTMLCollection has no .map/.find — calling
+    // them threw in the browser and made 开始练 a dead button, while
+    // the array-based test fakes never noticed.
+    const checked = Array.from(wordList.children)
+      .map((cell) => Array.from(cell.children).find((c) => c.tagName === "input" && c.checked))
       .filter(Boolean)
       .map((cb) => cb.char);
     return checked.length > 0 ? checked : [...selected];
