@@ -2,11 +2,16 @@
 // =====================================================================
 // The Attempt module seed. Owns:
 //
-//   - answersMatch / normalizeAnswer: THE single answer-comparison
-//     semantics for correction attempts (routes/capture.ts
-//     handleAttempt) AND reinforcement attempts
+//   - answersMatch / normalizeAnswer: THE single exact-text
+//     answer-comparison semantics for correction attempts
+//     (routes/capture.ts handleAttempt) AND reinforcement attempts
 //     (reinforcement-workflow.ts submitReinforcementAnswer). No other
-//     module may grow its own comparator.
+//     module may grow its own exact comparator. One sanctioned
+//     exception (issue #229): when a case has NO stored correct_answer
+//     (vision-sourced captures), handleAttempt falls back to the LLM
+//     judge in answer-judge.ts — that is a judge of last resort, not a
+//     second text comparator, and a judged-correct answer is backfilled
+//     as the case's correct_answer so later rounds return here.
 //
 //   - recordCorrectionAttempt: the post-validation core of a
 //     correction attempt against a mistake case. Extracted from
@@ -42,10 +47,11 @@ import type Database from "better-sqlite3";
  * Pure function. Whitespace-stripped + case-folded.
  * Returns false if either side is missing/empty.
  *
- * THE single answer-comparison semantics for correction AND
+ * THE single exact-text answer-comparison semantics for correction AND
  * reinforcement attempts — both routes/capture.ts and
  * reinforcement-workflow.ts import this. Do not grow a second
- * comparator elsewhere.
+ * comparator elsewhere. Exception (issue #229): cases with no stored
+ * correct_answer are judged by the LLM in answer-judge.ts, not here.
  *
  * v0.1 limitation: this is a textual comparison. Math problems where
  * the kid writes "5+3=8" vs the canonical "8" won't match — the spec
@@ -79,6 +85,16 @@ export interface RecordCorrectionAttemptInput {
    * game adapter uses "review-game". Defaults to "review-self".
    */
   attemptIdPrefix?: string;
+  /**
+   * Issue #229: when a vision-sourced case has no stored correct_answer
+   * and the LLM judge (answer-judge.ts) proved the kid's answer right,
+   * the route passes the kid's answer here so it becomes the case's
+   * canonical correct_answer — later review rounds then use the exact
+   * answersMatch comparator instead of paying for another LLM call.
+   * Applied only when isCorrect and the stored correct_answer is empty;
+   * ignored otherwise (a stored canonical answer always wins).
+   */
+  correctAnswerBackfill?: string;
 }
 
 export type RecordCorrectionAttemptResult =
@@ -143,6 +159,17 @@ export function recordCorrectionAttempt(
     const occurredAt = Date.now();
     const attemptId = `${prefix}:${input.caseId}:${occurredAt}`;
 
+    // Issue #229: an LLM-judged-correct answer on a case that never had
+    // a canonical answer becomes the canonical answer — and this closing
+    // attempt's own row should record it too, not the pre-backfill "".
+    const backfilling =
+      input.isCorrect &&
+      input.correctAnswerBackfill !== undefined &&
+      (row.correctAnswer === null || row.correctAnswer === "");
+    const effectiveCorrectAnswer = backfilling
+      ? (input.correctAnswerBackfill ?? null)
+      : row.correctAnswer;
+
     db.prepare(`
       INSERT OR IGNORE INTO learning_attempts
         (attempt_id, case_id, attempt_kind, mistake_id, child_id, problem,
@@ -153,7 +180,7 @@ export function recordCorrectionAttempt(
       input.caseId,
       input.childId,
       input.userAnswer,
-      row.correctAnswer,
+      effectiveCorrectAnswer,
       input.isCorrect ? 1 : 0,
       occurredAt,
       row.source,
@@ -162,6 +189,11 @@ export function recordCorrectionAttempt(
     let verifiedAt: number | null = null;
     let obligationStatus = row.obligationStatus;
     if (input.isCorrect) {
+      if (backfilling) {
+        db.prepare(
+          "UPDATE mistake_cases SET correct_answer = ? WHERE case_id = ?",
+        ).run(input.correctAnswerBackfill, input.caseId);
+      }
       // First independent correct closes the obligation (T05 semantics).
       verifiedAt = Date.now();
       db.prepare(
