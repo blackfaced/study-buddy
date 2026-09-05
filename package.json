@@ -6,6 +6,7 @@
   "scripts": {
     "lint": "oxlint server/src/ && cd mcp-server && oxlint src/ || true",
     "lint:type-aware": "oxlint --type-aware server/src/ || true",
+    "test:e2e": "node --test e2e/*.test.js",
     "prepare": "husky || true"
   },
   "devDependencies": {
@@ -13,6 +14,7 @@
     "lint-staged": "^17.3.0",
     "oxlint": "^1.78.0",
     "oxlint-tsgolint": "^7.0.2001",
+    "playwright": "^1.63.0",
     "prettier": "^3.9.6"
   },
   "lint-staged": {
