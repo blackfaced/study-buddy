@@ -22,7 +22,7 @@ const caseId = params.get("caseId") || "";
 const childId = params.get("childId") || "default";
 
 if (!caseId) {
-  ROOT.innerHTML = `<p class="error-msg">缺少 caseId 参数。请从<a href="/capture/">收件箱</a>进入。</p>`;
+  ROOT.innerHTML = `<p class="error-msg">缺少 caseId 参数。请从<a href="/buddy/">错题收件箱</a>进入。</p>`;
 } else {
   loadCase();
 }

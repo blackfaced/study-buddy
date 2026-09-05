@@ -25,3 +25,4 @@ server.key
 
 # Coverage output
 coverage/
+node_modules

@@ -47,6 +47,8 @@ import {
   ReviewNotFoundError,
 } from "../review-workflow.js";
 import { aggregateParentSummary } from "../parent-summary.js";
+import type { VisionClient } from "../vision.js";
+import { buildOrganizePrompt, parseOrganizeResponse } from "../capture-organize.js";
 
 /**
  * Helper used by the confirm / reject / modify endpoints above.
@@ -118,6 +120,8 @@ function publicHypothesis(h: HypothesisRow): {
 export interface CaptureRouteDeps {
   db: Database.Database;
   beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
+  /** LLM client for POST /api/capture/organize. Null/absent → 503. */
+  visionClient?: VisionClient | null;
 }
 
 interface ManualRequestBody {
@@ -219,6 +223,45 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
     res
       .status(result.created ? 201 : 200)
       .json({ id: result.id, caseId: result.caseId, created: result.created });
+  });
+
+  // ============== LLM-organized text intake ==============
+  // POST /api/capture/organize
+  // Body: { text } — the parent's messy 1-500 char description.
+  // Response: 200 { problem, userAnswer, correctAnswer, subject, errorType }
+  //           400 text missing / empty / over 500 chars
+  //           503 no visionClient configured (no MINIMAX_API_KEY)
+  //           502 LLM call failed or returned non-JSON
+  //
+  // Fields the LLM can't fill come back as "" — the parent edits them in
+  // the buddy preview UI, then 确认录入 POSTs to /api/capture/manual.
+  // This endpoint only organizes; it never writes to the ledger.
+  app.post("/api/capture/organize", async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { text?: unknown };
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (text.length < 1 || text.length > 500) {
+      res.status(400).json({ error: "text 需要 1~500 个字符" });
+      return;
+    }
+    const visionClient = deps.visionClient ?? null;
+    if (!visionClient) {
+      res.status(503).json({ error: "文字整理不可用：服务器未配置 MINIMAX_API_KEY" });
+      return;
+    }
+    const { system, user } = buildOrganizePrompt(text);
+    let content: string;
+    try {
+      ({ content } = await visionClient.chat({ system, user }));
+    } catch {
+      res.status(502).json({ error: "整理失败，请稍后重试" });
+      return;
+    }
+    const organized = parseOrganizeResponse(content);
+    if (!organized) {
+      res.status(502).json({ error: "模型返回格式异常，请重试" });
+      return;
+    }
+    res.json(organized);
   });
 
   // ============== Inbox list ==============

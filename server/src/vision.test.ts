@@ -89,7 +89,7 @@ describe("parseVisionResponse", () => {
 
 describe("analyzeMistakeImage", () => {
   it("sends the system + user prompt and image to the client", async () => {
-    let captured: { system: string; user: string; imageBase64: string } | null = null;
+    let captured: { system: string; user: string; imageBase64?: string } | null = null;
     const client: VisionClient = {
       async chat(params) {
         captured = params;
