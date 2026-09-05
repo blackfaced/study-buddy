@@ -74,7 +74,9 @@
     .photo-review-overlay .card { width: min(420px, 100%); max-height: 90vh; overflow-y: auto; }
     #mistake-preview { width: 100%; max-height: 42vh; object-fit: contain; border-radius: 12px; background: #f4f1eb; }
     #mistake-problem {
-      width: 100%; min-height: 110px; margin-top: 12px; padding: 12px;
+      /* 110px was too small to review a recognized problem (acceptance
+       * 9/5); 30vh gives a real paragraph of room, still resizable. */
+      width: 100%; min-height: 30vh; margin-top: 12px; padding: 12px;
       border: 2px solid #ffb84d; border-radius: 12px; font: inherit; resize: vertical;
     }
     .photo-actions { display: flex; gap: 8px; margin-top: 12px; }
