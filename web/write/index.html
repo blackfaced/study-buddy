@@ -43,10 +43,19 @@
     .success-msg { color: #2e7d32; font-size: 14px; min-height: 18px; }
 
     /* ===== Practice view (Apple Pencil + Hanzi Writer) ===== */
-    .practice { display: none; flex: 1; flex-direction: column; align-items: center; gap: 12px; }
+    .practice { display: none; flex: 1; min-height: 0; flex-direction: column; align-items: center; gap: 12px; overflow-y: auto; }
     .practice.active { display: flex; }
     .home.hidden { display: none; }
-    .practice-stage { position: relative; width: min(560px, 92vw); aspect-ratio: 1; background: white; border: 2px solid var(--accent); border-radius: 12px; touch-action: none; }
+    /* Reserve space for the actual controls and feedback first. The
+       drawing surface fits the remaining width AND height on rotation. */
+    .practice-workspace { flex: 1; min-height: 160px; width: 100%; container-type: size; display: flex; justify-content: center; align-items: flex-start; overflow-y: auto; }
+    .practice > :not(.practice-workspace) { flex-shrink: 0; }
+    .practice-stage { position: relative; flex-shrink: 0; width: min(560px, 100cqw, calc(100cqh * var(--sheet-ratio, 1))); aspect-ratio: var(--sheet-ratio, 1); background: white; border: 2px solid var(--accent); border-radius: 12px; touch-action: none; }
+    /* Long sheets scroll without shrinking the handwriting. The gutter
+       remains touch-scrollable while the sheet captures drawing input. */
+    .practice-stage.dictation-sheet { width: min(560px, calc(100cqw - 24px)); margin-right: 24px; }
+    #dictation-guides { z-index: 2; fill: none; stroke: rgba(23, 88, 200, 0.3); stroke-width: 2; }
+    #kid-svg.dictation-ink path { vector-effect: non-scaling-stroke; stroke-width: 3px; }
     /* v0.8.3 (issue #81): persistent header above the stage.
        Stays visible across all phases so the kid always knows
        "第 N/M 字 · X". */
@@ -130,6 +139,10 @@
       width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
       font-size: 28px; background: white; border: 2px solid var(--accent); border-radius: 8px;
     }
+    .dictation-reveal.dictation-reveal-sentence {
+      display: block; width: min(560px, 92vw); max-height: 120px; overflow-y: auto;
+      font-size: 20px; line-height: 1.6; overflow-wrap: anywhere;
+    }
     /* #197: outcome confirmation row (revealed phase only) */
     .dictation-outcome { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
     .dictation-outcome button {
@@ -171,7 +184,9 @@
          the 5-item session. The phase status (bottom-right) changes
          per phase, but this header does NOT. -->
     <div class="progress-header" id="progress-header" aria-live="polite"></div>
+    <div class="practice-workspace" tabindex="0" aria-label="书写区，可沿纸张旁边上下滑动">
     <div class="practice-stage" id="stage">
+      <svg id="dictation-guides" style="display:none;" aria-hidden="true"></svg>
       <div class="grid-overlay"><div class="diagonal"></div><div class="diag2"></div></div>
       <!-- character-layer: a single wrapper so char-center can
            translate+scale BOTH the HanziWriter reference and the
@@ -183,6 +198,7 @@
         <div id="hanzi-target" style="position:absolute; inset:0;"></div>
         <svg id="kid-svg" class="interactive" viewBox="0 0 600 600" preserveAspectRatio="xMidYMid meet" aria-label="孩子写字区"></svg>
       </div>
+    </div>
     </div>
     <div class="practice-controls">
       <!-- issue #196: dictation mode replay button (默写重听). Hidden

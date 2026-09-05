@@ -37,6 +37,9 @@ function markSelected(el, selected) {
 export function renderDictation({ dom, session, createNode }) {
   const phase = session.phase;
   const item = session.current();
+  if (item?.kind === "sentence")
+    dom.reveal.classList.add("dictation-reveal-sentence");
+  else dom.reveal.classList.remove("dictation-reveal-sentence");
 
   // Dictation never shows the HanziWriter reference (AC1: the target
   // stays hidden until the kid submits).
@@ -46,8 +49,14 @@ export function renderDictation({ dom, session, createNode }) {
     dom.progressHeader.textContent = "";
     show(dom.reveal, false);
     show(dom.outcomeRow, false);
-    for (const btn of [dom.replayBtn, dom.undoBtn, dom.nextBtn,
-                       dom.againBtn, dom.retryBtn, dom.prevBtn]) {
+    for (const btn of [
+      dom.replayBtn,
+      dom.undoBtn,
+      dom.nextBtn,
+      dom.againBtn,
+      dom.retryBtn,
+      dom.prevBtn,
+    ]) {
       show(btn, false);
     }
     // #197: done = all items compared. The final 提交结果 posts the
@@ -68,7 +77,10 @@ export function renderDictation({ dom, session, createNode }) {
   dom.progressHeader.textContent = `听写 第 ${session.itemIndex + 1}/${total} 题（${label}）`;
 
   if (phase === "answering") {
-    dom.status.textContent = "仔细听 🔊 写在格子里（或纸上），写好点提交";
+    dom.status.textContent =
+      item.kind === "sentence"
+        ? "仔细听 🔊 写在横线上，可以换行（或写在纸上），写好点提交"
+        : "仔细听 🔊 每个格子写一个字（或写在纸上），写好点提交";
     show(dom.reveal, false);
     dom.reveal.innerHTML = "";
     show(dom.outcomeRow, false);
@@ -87,11 +99,15 @@ export function renderDictation({ dom, session, createNode }) {
   dom.status.textContent = "对照一下，一样吗？";
   dom.reveal.innerHTML = "";
   const text = session.visibleText() ?? "";
-  for (const ch of text) {
-    const box = createNode("span");
-    box.className = "dictation-reveal-char";
-    box.textContent = ch;
-    dom.reveal.appendChild(box);
+  if (item.kind === "sentence") {
+    dom.reveal.textContent = text;
+  } else {
+    for (const ch of text) {
+      const box = createNode("span");
+      box.className = "dictation-reveal-char";
+      box.textContent = ch;
+      dom.reveal.appendChild(box);
+    }
   }
   show(dom.reveal, true);
   show(dom.replayBtn, false);

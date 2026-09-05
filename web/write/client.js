@@ -41,16 +41,19 @@ import {
 } from "./dictation-mode.js";
 import { createSpeaker } from "./dictation-speech.js";
 import { renderDictation } from "./dictation-view.js";
+import { renderDictationSheet } from "./dictation-sheet.js";
 
 const HanziWriter = window.HanziWriter;
 if (!HanziWriter) {
-  console.error("[write] HanziWriter global not found — check the CDN <script> tag");
+  console.error(
+    "[write] HanziWriter global not found — check the CDN <script> tag",
+  );
 }
 
 const API = "/api/write";
-const STAGE_SIZE = 600;            // SVG viewBox size (matches HanziWriter default 600)
-const SHOW_MS = 3000;              // how long the reference shows at full opacity
-const COOLDOWN_MS = 30_000;        // matches grade.js default
+const STAGE_SIZE = 600; // SVG viewBox size (matches HanziWriter default 600)
+const SHOW_MS = 3000; // how long the reference shows at full opacity
+const COOLDOWN_MS = 30_000; // matches grade.js default
 
 // ----- DOM refs -----
 const homeView = document.getElementById("home-view");
@@ -61,6 +64,13 @@ const homeError = document.getElementById("home-error");
 const wordList = document.getElementById("word-list");
 const startBtn = document.getElementById("start-btn");
 const stage = document.getElementById("stage");
+const sheetDom = {
+  stage,
+  guides: document.getElementById("dictation-guides"),
+  grid: stage.querySelector(".grid-overlay"),
+  kidSvg: document.getElementById("kid-svg"),
+  characterLayer: document.getElementById("character-layer"),
+};
 const hanziTarget = document.getElementById("hanzi-target");
 const kidSvg = document.getElementById("kid-svg");
 const againBtn = document.getElementById("again-btn");
@@ -89,8 +99,8 @@ const outcomePoorBtn = document.getElementById("outcome-poor");
 // / .currentItem / .isDone) and mutates via .start() / .next()
 // / .retry().
 const session = createWriteSession({ initialLibrary: [] });
-let phase = null;   // 'animating' | 'showing' | 'writing' | 'submitted'
-let pendingTimers = [];  // {kind: 'showing'|'animate', timer} so we can cancel on retry
+let phase = null; // 'animating' | 'showing' | 'writing' | 'submitted'
+let pendingTimers = []; // {kind: 'showing'|'animate', timer} so we can cancel on retry
 
 // ===========================================================================
 //  Home view — load + render library (refactored to ./home-view.js)
@@ -123,11 +133,13 @@ startBtn.onclick = () => {
   // right now. If they didn't pick any, fall back to the whole
   // library (round-robin five-item session as before).
   const selected = getSelected();
-  const subset = selected.length > 0
-    ? session.library.filter((w) => selected.includes(w.char))
-    : session.library;
+  const subset =
+    selected.length > 0
+      ? session.library.filter((w) => selected.includes(w.char))
+      : session.library;
   if (subset.length === 0) return;
   // Restore practice-mode chrome that dictation mode hides.
+  renderDictationSheet(sheetDom, null);
   hanziTarget.style.display = "";
   dictationReveal.style.display = "none";
   dictationOutcomeRow.style.display = "none";
@@ -212,7 +224,7 @@ function setPhase(next) {
     againBtn.textContent = "笔顺重放";
     undoBtn.style.display = "";
     submitBtn.style.display = "";
-    submitBtn.classList.add("cta");   // prompt the kid to submit
+    submitBtn.classList.add("cta"); // prompt the kid to submit
   } else if (next === "submitted") {
     againBtn.style.display = "none";
     undoBtn.style.display = "none";
@@ -244,9 +256,12 @@ async function startWord(item, opts = {}) {
   // Clear previous instance + kid's strokes
   hanziTarget.innerHTML = "";
   kidSvg.innerHTML = "";
-  if (scoreEl) { scoreEl.textContent = ""; scoreEl.style.display = "none"; }
+  if (scoreEl) {
+    scoreEl.textContent = "";
+    scoreEl.style.display = "none";
+  }
   if (!keepStrokes) {
-    item.strokes = [];   // [{pathEl, d, points}] for the current attempt
+    item.strokes = []; // [{pathEl, d, points}] for the current attempt
     item.process = createAttemptProcess({
       independentRetry: !!opts.independentRetry,
       followupRetry: !!opts.followupRetry,
@@ -290,7 +305,10 @@ async function startWord(item, opts = {}) {
       )
       .catch((error) => {
         console.warn("[write] reference unavailable", error);
-        return createHandwritingCoach({ reference: { strokes: [] }, stageSize: STAGE_SIZE });
+        return createHandwritingCoach({
+          reference: { strokes: [] },
+          stageSize: STAGE_SIZE,
+        });
       });
     item.reviewQueue = Promise.resolve();
   }
@@ -344,7 +362,7 @@ async function startWord(item, opts = {}) {
   // character is actually static. Tested in show-flow.test.js.
   setPhase(presentation.initialPhase);
   statusEl.textContent = presentation.status;
-  applyCharacterOpacity(1.0);  // start fully visible during animation
+  applyCharacterOpacity(1.0); // start fully visible during animation
   const animDone = new Promise((resolve) => {
     writer.animateCharacter({ onComplete: () => resolve() });
   });
@@ -387,7 +405,10 @@ function applyCharacterOpacity(opacity) {
 const SVG_NS = "http://www.w3.org/2000/svg";
 const createSvgElement = (tag) => document.createElementNS(SVG_NS, tag);
 
-function createAttemptProcess({ independentRetry = false, followupRetry = false } = {}) {
+function createAttemptProcess({
+  independentRetry = false,
+  followupRetry = false,
+} = {}) {
   return {
     orderErrors: 0,
     directionErrors: 0,
@@ -486,13 +507,17 @@ function saveDictationSnapshot() {
       DICTATION_SNAPSHOT_KEY,
       JSON.stringify(dictationSession.snapshot()),
     );
-  } catch { /* storage full / private mode — resume just won't work */ }
+  } catch {
+    /* storage full / private mode — resume just won't work */
+  }
 }
 
 function clearDictationSnapshot() {
   try {
     localStorage.removeItem(DICTATION_SNAPSHOT_KEY);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 async function loadDictationSets() {
@@ -550,7 +575,10 @@ function startDictation(set, snapshot) {
     Utterance: window.SpeechSynthesisUtterance,
   });
   clearPendingTimers();
-  if (scoreEl) { scoreEl.style.display = "none"; scoreEl.textContent = ""; }
+  if (scoreEl) {
+    scoreEl.style.display = "none";
+    scoreEl.textContent = "";
+  }
   homeView.classList.add("hidden");
   practiceView.classList.add("active");
   presentDictationItem();
@@ -561,6 +589,7 @@ function presentDictationItem() {
   dictationStrokeEls = [];
   // Redraw strokes that survived a leave-and-come-back (AC5).
   const item = dictationSession.current();
+  renderDictationSheet(sheetDom, item);
   if (item) {
     for (const d of item.strokes) {
       const el = createSvgElement("path");
@@ -650,22 +679,28 @@ async function reviewCompletedStroke(item, stroke) {
       scoreEl.textContent = "";
       scoreEl.title = "";
     }
-    statusEl.textContent = decision.status === "uncertain"
-      ? decision.reason.message
-      : `第 ${item.strokes.length} 笔写好了`;
+    statusEl.textContent =
+      decision.status === "uncertain"
+        ? decision.reason.message
+        : `第 ${item.strokes.length} 笔写好了`;
     return;
   }
 
   removeStrokeElement(stroke);
   const index = decision.expectedStrokeIndex;
-  process.errorsByStroke[index] = Number(process.errorsByStroke[index] ?? 0) + 1;
+  process.errorsByStroke[index] =
+    Number(process.errorsByStroke[index] ?? 0) + 1;
   process.rejectedStrokes++;
   process.hintCounts[index] = decision.hint?.level ?? 1;
   if (decision.reason.code === "stroke_order_wrong") process.orderErrors++;
-  if (decision.reason.code === "stroke_direction_reversed") process.directionErrors++;
+  if (decision.reason.code === "stroke_direction_reversed")
+    process.directionErrors++;
   renderCoachHint(decision);
   statusEl.textContent = decision.reason.message;
-  if (decision.hint?.animate && typeof item.writer?.animateStroke === "function") {
+  if (
+    decision.hint?.animate &&
+    typeof item.writer?.animateStroke === "function"
+  ) {
     item.writer.animateStroke(index);
   }
 }
@@ -675,7 +710,8 @@ function removeStrokeElement(stroke) {
 }
 
 function clearCoachOverlay() {
-  for (const node of kidSvg.querySelectorAll("[data-coach-overlay]")) node.remove();
+  for (const node of kidSvg.querySelectorAll("[data-coach-overlay]"))
+    node.remove();
 }
 
 function renderCoachHint(decision) {
@@ -686,13 +722,18 @@ function renderCoachHint(decision) {
   path.setAttribute("data-coach-overlay", "true");
   path.setAttribute(
     "d",
-    points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" "),
+    points
+      .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+      .join(" "),
   );
   path.setAttribute("fill", "none");
   path.setAttribute("stroke", "#ff9800");
   path.setAttribute("stroke-width", "12");
   path.setAttribute("stroke-linecap", "round");
-  path.setAttribute("stroke-dasharray", decision.hint.level === 1 ? "18 14" : "none");
+  path.setAttribute(
+    "stroke-dasharray",
+    decision.hint.level === 1 ? "18 14" : "none",
+  );
   path.setAttribute("opacity", "0.75");
   kidSvg.appendChild(path);
 
@@ -709,7 +750,10 @@ function renderCoachHint(decision) {
   }
 
   if (decision.hint.showDirection && points.length > 1) {
-    const end = points[Math.min(points.length - 1, Math.max(1, Math.floor(points.length / 3)))];
+    const end =
+      points[
+        Math.min(points.length - 1, Math.max(1, Math.floor(points.length / 3)))
+      ];
     const start = points[0];
     const angle = Math.atan2(end.y - start.y, end.x - start.x);
     const tip = { x: end.x, y: end.y };
@@ -720,9 +764,17 @@ function renderCoachHint(decision) {
       "points",
       [
         tip,
-        { x: tip.x - wing * Math.cos(angle - 0.55), y: tip.y - wing * Math.sin(angle - 0.55) },
-        { x: tip.x - wing * Math.cos(angle + 0.55), y: tip.y - wing * Math.sin(angle + 0.55) },
-      ].map((point) => `${point.x},${point.y}`).join(" "),
+        {
+          x: tip.x - wing * Math.cos(angle - 0.55),
+          y: tip.y - wing * Math.sin(angle - 0.55),
+        },
+        {
+          x: tip.x - wing * Math.cos(angle + 0.55),
+          y: tip.y - wing * Math.sin(angle + 0.55),
+        },
+      ]
+        .map((point) => `${point.x},${point.y}`)
+        .join(" "),
     );
     arrow.setAttribute("fill", "#ff9800");
     kidSvg.appendChild(arrow);
@@ -784,7 +836,9 @@ async function submitCurrent() {
     nextAction: assessment.nextAction,
     retryOutcome: assessment.retryOutcome,
     reviewNeeded: assessment.reviewNeeded,
-    modelReview: { status: assessment.reviewRecommended ? "pending" : "skipped" },
+    modelReview: {
+      status: assessment.reviewRecommended ? "pending" : "skipped",
+    },
   };
 
   let attemptId = null;
@@ -836,8 +890,10 @@ async function submitCurrent() {
 function renderAssessment(assessment) {
   if (!scoreEl) return;
   scoreEl.style.display = "";
-  const messages = [assessment.primaryReason?.message, assessment.secondaryReason?.message]
-    .filter(Boolean);
+  const messages = [
+    assessment.primaryReason?.message,
+    assessment.secondaryReason?.message,
+  ].filter(Boolean);
   scoreEl.textContent = [assessment.band, ...messages].join(" · ");
   scoreEl.title = messages.join("；") || assessment.band;
   renderAssessmentOverlay(assessment.primaryReason?.overlay);
@@ -875,7 +931,10 @@ function renderAssessmentOverlay(overlay) {
     }
   } else if (overlay.kind === "character") {
     appendBoundsOverlay(overlay.expected, "#ff9800", "18 12");
-  } else if (overlay.kind === "stroke-order" || overlay.kind === "stroke-direction") {
+  } else if (
+    overlay.kind === "stroke-order" ||
+    overlay.kind === "stroke-direction"
+  ) {
     renderCoachHint({
       hint: {
         level: overlay.kind === "stroke-direction" ? 2 : 1,
@@ -980,7 +1039,12 @@ function captureAttemptImage(strokes) {
 
 againBtn.onclick = () => {
   // "笔顺重放" — re-animate the current character on demand.
-  if (phase === "writing" || phase === "animating" || phase === "showing" || phase === "submitted") {
+  if (
+    phase === "writing" ||
+    phase === "animating" ||
+    phase === "showing" ||
+    phase === "submitted"
+  ) {
     const item = session.currentItem;
     if (item && item.writer) {
       // Re-show reference at full opacity during the replay, then drop
@@ -1060,7 +1124,7 @@ retryBtn.onclick = () => {
   // "重练" — clear kid strokes, restart the same char (no advance).
   if (phase !== "submitted") return;
   const item = session.currentItem;
-  if (item) item.attemptCount = (item.attemptCount || 0) + 1;  // attempts++; opacity goes down next time
+  if (item) item.attemptCount = (item.attemptCount || 0) + 1; // attempts++; opacity goes down next time
   const independentRetry = !!item?.requiresIndependentRetry;
   const followupRetry = !!item?.requiresRewrite;
   if (item) item.requiresIndependentRetry = false;
@@ -1100,7 +1164,7 @@ prevBtn.onclick = () => {
 exitBtn.onclick = () => {
   clearPendingTimers();
   dictationSpeaker?.stop();
-  dictationSession = null;   // snapshot stays — 离开再回来可恢复 (AC5)
+  dictationSession = null; // snapshot stays — 离开再回来可恢复 (AC5)
   dictationSpeaker = null;
   exitToHome();
 };
@@ -1136,13 +1200,14 @@ let resizeTimer = null;
 window.addEventListener("resize", () => {
   if (resizeTimer) clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    centerCharacter({ stage, hanziTarget, kidSvg, margin: 0.1 });
+    if (!dictationSession)
+      centerCharacter({ stage, hanziTarget, kidSvg, margin: 0.1 });
   }, 120);
 });
 
 // ----- Boot -----
-enableKidInput();   // attach the input handlers; the phase check
-                    // (`if (phase !== "writing") return;`) keeps them
-                    // inert until the kid is allowed to draw.
+enableKidInput(); // attach the input handlers; the phase check
+// (`if (phase !== "writing") return;`) keeps them
+// inert until the kid is allowed to draw.
 loadLibrary();
 loadDictationSets();
