@@ -79,5 +79,19 @@
     return { emoji: "📷", title: "拍错题", desc: "把做错的题拍下来" };
   }
 
-  window.BuddyPhotoOnly = { applyPhotoOnlyMode, portalEntry };
+  /**
+   * Session-start welcome. Photo-only mode returns null — the chat
+   * area is hidden but requestPerm used to speak the 小书童 greeting
+   * out loud anyway (found in acceptance 9/5). Callers skip both the
+   * chat message and the TTS when this returns null.
+   *
+   * @param {boolean} chatEnabled
+   * @returns {string | null}
+   */
+  function welcomeCopy(chatEnabled) {
+    if (chatEnabled === false) return null;
+    return "你好呀！我是小书童，我们开始写作业吧";
+  }
+
+  window.BuddyPhotoOnly = { applyPhotoOnlyMode, portalEntry, welcomeCopy };
 })();

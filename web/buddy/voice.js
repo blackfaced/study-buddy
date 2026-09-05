@@ -202,7 +202,10 @@
         S.sessionId = data.sessionId;
       }
       S.state = window.Buddy.state.nextState(S.state, 'start');
-      window.Buddy.chat.addMsg('agent', '你好呀！我是小书童，文字模式陪你写作业~');
+      // Photo-only mode: no 小书童 greeting in the hidden chat area.
+      if (window.BuddyPhotoOnly.welcomeCopy(S.chatEnabled)) {
+        window.Buddy.chat.addMsg('agent', '你好呀！我是小书童，文字模式陪你写作业~');
+      }
     } catch (e) {
       if (window.Buddy.debugMode) window.Buddy.chat.addSystem('文字模式启动失败: ' + e.message);
     }

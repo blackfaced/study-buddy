@@ -262,9 +262,14 @@
         S.sessionId = data.sessionId;
       }
       S.state = window.Buddy.state.nextState(S.state, 'start');
-      if (_statusEl) _statusEl.textContent = '写作业中...';
-      this.addMsg('agent', '你好呀！我是小书童，我们开始写作业吧~');
-      this.speak('你好呀！我是小书童，我们开始写作业吧');
+      // Photo-only mode (chatEnabled === false): welcomeCopy is null —
+      // no chat message (area hidden anyway) and no 小书童 TTS.
+      const welcome = window.BuddyPhotoOnly.welcomeCopy(S.chatEnabled);
+      if (_statusEl) _statusEl.textContent = welcome ? '写作业中...' : '可以拍错题啦';
+      if (welcome) {
+        this.addMsg('agent', welcome + '~');
+        this.speak(welcome);
+      }
     } catch (e) {
       if (_statusEl) _statusEl.textContent = '会话启动失败';
       return;
