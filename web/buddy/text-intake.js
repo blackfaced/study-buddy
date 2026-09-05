@@ -85,22 +85,37 @@
    * One inbox <li>. The whole entry links to the review workspace;
    * childId is hardcoded to "default" (same convention as the old
    * /capture/ inbox — the PIN gate already scopes this device to one kid).
+   * The opened date is shown because the inbox lists ALL open
+   * obligations (no date filter) — the parent must see how old an
+   * entry is instead of assuming it's today's work.
    */
   function renderInboxEntry(c) {
     var subject = c.subject ? SUBJECT_LABELS[c.subject] || c.subject : "未分科";
     var errorType = c.errorType ? " · " + escapeHtml(c.errorType) : "";
+    var opened = c.openedAt ? " · " + formatOpenedDay(c.openedAt) + " 录" : "";
     var reviewUrl = "/review/?caseId=" + encodeURIComponent(c.caseId) + "&childId=default";
     return (
       '<li class="ti-inbox-entry">' +
       '<a class="ti-inbox-link" href="' + reviewUrl + '">' +
       "<div>" + escapeHtml(c.problem || "(无题目)") + "</div>" +
-      '<div class="meta"><span>' + escapeHtml(subject) + "</span>" + errorType + "</div>" +
+      '<div class="meta"><span>' + escapeHtml(subject) + "</span>" + errorType + opened + "</div>" +
       "</a></li>"
     );
   }
 
+  function formatOpenedDay(ts) {
+    var d = new Date(ts);
+    return (d.getMonth() + 1) + "月" + d.getDate() + "日";
+  }
+
+  // The inbox API returns every open obligation regardless of date, so
+  // neither the title nor the empty state may claim 今日/今天.
+  function inboxTitle() {
+    return "待订正";
+  }
+
   function emptyInboxCopy() {
-    return "今天还没有待订正的错题";
+    return "没有待订正的错题";
   }
 
   // ---------------- DOM wiring (e2e-covered, not unit-tested) ----------------
@@ -229,6 +244,8 @@
       if (organizeBtn) organizeBtn.addEventListener("click", onOrganize);
       if (confirmBtn) confirmBtn.addEventListener("click", onConfirm);
       if (cancelBtn) cancelBtn.addEventListener("click", function () { hidePreview(); setStatus("", false); });
+      var title = $("ti-inbox-title");
+      if (title) title.textContent = inboxTitle();
     }
     loadInbox();
   }
@@ -240,6 +257,7 @@
     validateFields: validateFields,
     buildManualBody: buildManualBody,
     renderInboxEntry: renderInboxEntry,
+    inboxTitle: inboxTitle,
     emptyInboxCopy: emptyInboxCopy,
     onUnlock: onUnlock,
   };

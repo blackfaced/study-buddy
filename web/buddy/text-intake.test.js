@@ -120,3 +120,26 @@ test("emptyInboxCopy is a non-empty Chinese hint", () => {
   const TI = loadModule();
   assert.ok(TI.emptyInboxCopy().length > 0);
 });
+
+test("inbox copy never says 今日 — the API returns ALL open obligations, not today's", () => {
+  // Codex architecture review (9/5): GET /api/capture/inbox has no date
+  // filter, so calling the list 今日待订正 misrepresents old backlog as
+  // today's work. The label and the empty-state hint must not claim 今日.
+  const TI = loadModule();
+  assert.ok(!TI.inboxTitle().includes("今日"), "title must not say 今日");
+  assert.ok(!TI.emptyInboxCopy().includes("今天"), "empty hint must not say 今天");
+});
+
+test("renderInboxEntry shows the opened date so old backlog is visibly old", () => {
+  const TI = loadModule();
+  // 1757000000000 = 2025-09-04 local — the exact day string doesn't
+  // matter, the parent just needs to see it's not from today.
+  const html = TI.renderInboxEntry({ caseId: "case:x", problem: "1+1", subject: "math", openedAt: 1757000000000 });
+  assert.ok(/9月4日/.test(html), `entry should show the opened date, got: ${html}`);
+});
+
+test("renderInboxEntry without openedAt still renders (old rows)", () => {
+  const TI = loadModule();
+  const html = TI.renderInboxEntry({ caseId: "case:x", problem: "1+1", subject: "math" });
+  assert.ok(html.includes("1+1"));
+});

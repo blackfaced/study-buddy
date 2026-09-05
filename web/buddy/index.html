@@ -159,7 +159,7 @@
      * scroll for the text-intake + inbox sections. */
     .app.photo-only { overflow-y: auto; }
 
-    /* 文字描述 intake + 今日待订正 inbox (photo-only mode only — the
+    /* 文字描述 intake + 待订正 inbox (photo-only mode only — the
      * sections stay hidden while chat is enabled). */
     .ti-section { display: none; }
     .app.photo-only .ti-section { display: block; }
@@ -265,7 +265,7 @@
     <button class="danger" id="end-btn" onclick="Buddy.chat.endSession()">✅ 写完啦</button>
   </div>
 
-  <!-- 文字描述 intake + 今日待订正 inbox. Parent-operated; only visible
+  <!-- 文字描述 intake + 待订正 inbox. Parent-operated; only visible
        in photo-only mode (CSS gates on .app.photo-only). Replaces the
        standalone /capture/ page. -->
   <section class="ti-section" id="text-intake" aria-label="文字描述录入">
@@ -292,8 +292,8 @@
       </div>
     </div>
   </section>
-  <section class="ti-section" id="inbox-section" aria-label="今日待订正">
-    <h2>今日待订正</h2>
+  <section class="ti-section" id="inbox-section" aria-label="待订正">
+    <h2 id="ti-inbox-title">待订正</h2>
     <ul id="ti-inbox"></ul>
   </section>
 </div>
