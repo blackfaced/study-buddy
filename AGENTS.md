@@ -44,6 +44,14 @@ Server logs go to `data/logs/study-buddy-server.log` (5MB rotation, 3 generation
 
 The mcp-server is a child of the mavis daemon (`mavis mcp add`); don't manage it from the script. See `docs/deploy.md` for the full reference, env vars, and a launchd plist for boot-time start.
 
+### Two instances on the Mac mini (2026-09)
+
+- **3000 = production.** Managed by `bin/study-buddy-server.sh`, DB at `data/study.db`. This is the one the kid's iPad uses.
+- **3002 = test.** A second long-running `server/src/index.ts` process (`HTTPS_PORT=3002`, `HTTP_PORT=3003`, `STUDY_DB=data/test-runtime/study.db`) running from the same checkout. Test data goes to the separate test-runtime DB — never point it at `data/study.db`.
+- Note: both serve the same working tree, so a code pull changes what 3002 serves too (after restart). Don't treat 3002 as a frozen version.
+
+There is also a stale launchd plist `com.studybuddy.server` pointing at the old `/Users/mac/study-buddy` path — the real server is the script-managed one above; don't "fix" the plist by pointing it at the repo without checking with the user first.
+
 ## Platform architecture (v0.5b+)
 
 study-buddy is a **hub**: one shared backend (HTTP server + mcp-server + SQLite) + multiple hung apps under `web/<app-dir>/`. The portal page (`web/index.html`) lists all `status: "ready"` apps; kid clicks one to enter.
