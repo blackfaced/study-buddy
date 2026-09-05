@@ -114,6 +114,15 @@ test("buddy 文字描述: 整理 → preview → 确认录入 → 今日待订�
   await page.fill("#pin-input", pin);
   await page.waitForSelector(".app:not(.hidden)", { timeout: 8000 });
 
+  // The camera-permission overlay blocks the intake section — a parent
+  // taps 好的 once to dismiss it (headless WebKit never gets real video,
+  // but the overlay closes and the intake is usable without a camera).
+  const permOverlay = page.locator("#perm-overlay");
+  if (await permOverlay.isVisible()) {
+    await permOverlay.locator("button").click();
+    await permOverlay.waitFor({ state: "hidden", timeout: 8000 });
+  }
+
   // Photo-only mode shows the intake section.
   await page.waitForSelector("#text-intake", { state: "visible", timeout: 8000 });
   await page.fill("#ti-text", "昨天小宝算 8+5 写成 12");
