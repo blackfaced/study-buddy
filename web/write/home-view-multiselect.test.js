@@ -126,6 +126,43 @@ test("home-view: getSelected() on empty library / no clicks returns []", () => {
   assert.deepEqual(home.getSelected(), []);
 });
 
+// The browser's HTMLCollection has length + indexing + iteration but
+// NO .map/.find — unlike the array fakes above. This wrapper keeps the
+// same nodes but strips the array methods, matching the real DOM.
+function asHTMLCollection(nodes) {
+  const hc = { length: nodes.length };
+  nodes.forEach((n, i) => {
+    hc[i] = n;
+  });
+  hc[Symbol.iterator] = function* () {
+    yield* nodes;
+  };
+  return hc;
+}
+
+test("real scenario: getSelected works with a real HTMLCollection — 开始练 must not be a dead button", () => {
+  // Regression (found in acceptance 9/5): kid selected two chars and
+  // 开始练 did nothing — getSelected called wordList.children.map,
+  // which throws "not a function" on a real HTMLCollection, aborting
+  // the start handler silently.
+  const dom = makeDom();
+  const { createNode } = makeFakeCreateNode();
+  const home = attachHomeView({ dom, api: "/api/write", createNode });
+  home.renderLibrary([
+    { char: "房", attemptCount: 0 },
+    { char: "椅", attemptCount: 0 },
+    { char: "饼", attemptCount: 0 },
+  ]);
+  for (const cell of dom.wordList.children) {
+    cell.children.find((c) => c.tagName === "input").checked = true;
+    cell.children.find((c) => c.tagName === "input").onchange();
+    // Cells' children are also HTMLCollections in the real DOM.
+    cell.children = asHTMLCollection(cell.children);
+  }
+  dom.wordList.children = asHTMLCollection(dom.wordList.children);
+  assert.deepEqual(home.getSelected(), ["房", "椅", "饼"]);
+});
+
 test("home-view: re-render preserves selection for chars still in the library", () => {
   // After kid selects 房/椅, parent deletes a different char and
   // the library re-renders. 房/椅 should stay selected (state is
