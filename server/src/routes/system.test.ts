@@ -69,3 +69,28 @@ describe("GET /api/health", () => {
     empty.close();
   });
 });
+
+describe("GET /api/health env marker (test-instance badge)", () => {
+  it("defaults to env=prod", async () => {
+    const saved = process.env.STUDY_BUDDY_ENV;
+    delete process.env.STUDY_BUDDY_ENV;
+    try {
+      const res = await request(app).get("/api/health");
+      expect(res.body.env).toBe("prod");
+    } finally {
+      if (saved !== undefined) process.env.STUDY_BUDDY_ENV = saved;
+    }
+  });
+
+  it("reports env=test when STUDY_BUDDY_ENV=test (the 3002 instance)", async () => {
+    const saved = process.env.STUDY_BUDDY_ENV;
+    process.env.STUDY_BUDDY_ENV = "test";
+    try {
+      const res = await request(app).get("/api/health");
+      expect(res.body.env).toBe("test");
+    } finally {
+      if (saved === undefined) delete process.env.STUDY_BUDDY_ENV;
+      else process.env.STUDY_BUDDY_ENV = saved;
+    }
+  });
+});

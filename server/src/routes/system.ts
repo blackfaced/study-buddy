@@ -31,6 +31,10 @@ export function registerSystemRoutes(app: Express, db: Database.Database): void 
       version: "0.1.0",
       childrenCount: children.c,
       sessionsCount: sessions.c,
+      // "test" only on the 3002 test instance (bin/study-buddy-test-server.sh
+      // sets it); pages show a 测试环境 badge so a screenshot of the test
+      // instance can't be mistaken for the kid's real data.
+      env: process.env.STUDY_BUDDY_ENV === "test" ? "test" : "prod",
     });
   });
 }

@@ -374,6 +374,9 @@ const inputEl = document.getElementById('input');
 const statusEl = document.getElementById('status');
 const avatarEl = document.getElementById('avatar');
 
+// Test-instance marker (3002): pin a 测试环境 badge when applicable.
+window.StudyBuddy.applyEnvBadge();
+
 // Status-line copy for a restored finished session. Photo-only mode
 // (BUDDY_CHAT_ENABLED=false) must not invite the kid back to a chat
 // that no longer exists.

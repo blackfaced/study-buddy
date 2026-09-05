@@ -106,6 +106,7 @@ cmd_start() {
       STUDY_DB="$DB_PATH" \
       MISTAKES_DIR="$MISTAKES_DIR" \
       LOG_FILE="$LOGFILE" \
+      STUDY_BUDDY_ENV="test" \
     nohup ./server/node_modules/.bin/tsx server/src/index.ts \
       >"$STDOUT_LOG" 2>&1 &
   local pid=$!
