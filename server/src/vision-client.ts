@@ -40,23 +40,28 @@ export class MiniMaxVisionClient implements VisionClient {
     this.signal = opts.signal;
   }
 
-  async chat(params: { system: string; user: string; imageBase64: string; signal?: AbortSignal }): Promise<{
+  async chat(params: { system: string; user: string; imageBase64?: string; signal?: AbortSignal }): Promise<{
     content: string;
     raw: unknown;
   }> {
+    // Text-only calls (e.g. /api/capture/organize) send a plain string
+    // content; vision calls keep the OpenAI-compatible content array.
+    const userContent = params.imageBase64
+      ? [
+          { type: "text", text: params.user },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${params.imageBase64}` },
+          },
+        ]
+      : params.user;
     const body = {
       model: this.model,
       messages: [
         { role: "system", content: params.system },
         {
           role: "user",
-          content: [
-            { type: "text", text: params.user },
-            {
-              type: "image_url",
-              image_url: { url: `data:image/jpeg;base64,${params.imageBase64}` },
-            },
-          ],
+          content: userContent,
         },
       ],
       temperature: 0.3,

@@ -16,13 +16,13 @@
 export interface VisionClient {
   /**
    * Send a vision chat request. `imageBase64` is the raw base64 of the image
-   * (no data: prefix). Returns the assistant's content + the raw response
-   * for logging / debugging.
+   * (no data: prefix); omit it for text-only calls (e.g. /api/capture/organize).
+   * Returns the assistant's content + the raw response for logging / debugging.
    */
   chat(params: {
     system: string;
     user: string;
-    imageBase64: string;
+    imageBase64?: string;
     signal?: AbortSignal;
   }): Promise<{ content: string; raw: unknown }>;
 }

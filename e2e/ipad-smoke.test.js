@@ -86,6 +86,77 @@ test("buddy photo-only: PIN gate speaks 拍错题; after unlock no chat UI, only
   await page.close();
 });
 
+// 文字描述 intake (capture app merged into /buddy/). Skips explicitly
+// when the served instance predates /api/capture/organize — e.g. the
+// 3002 test instance serves the main checkout, so an unmerged branch
+// can't be exercised end-to-end; the skip note says exactly that.
+async function serverSupportsOrganize() {
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+  try {
+    const res = await ctx.request.post(BASE + "/api/capture/organize", { data: {} });
+    return res.status() !== 404;
+  } finally {
+    await ctx.close();
+  }
+}
+
+test("buddy 文字描述: 整理 → preview → 确认录入 → 今日待订正 shows the new item", async (t) => {
+  if (!(await serverSupportsOrganize())) {
+    t.skip("this instance has no POST /api/capture/organize yet (unmerged branch) — re-run after the branch lands on the served checkout");
+    return;
+  }
+  const pin = readPin();
+  assert.ok(pin, "BUDDY_PIN missing from .env — buddy e2e needs it");
+
+  const page = await newIpadPage();
+  await page.goto(BASE + "/buddy/", { waitUntil: "networkidle" });
+  await page.waitForSelector("#pin-overlay", { state: "visible", timeout: 8000 });
+  await page.fill("#pin-input", pin);
+  await page.waitForSelector(".app:not(.hidden)", { timeout: 8000 });
+
+  // Photo-only mode shows the intake section.
+  await page.waitForSelector("#text-intake", { state: "visible", timeout: 8000 });
+  await page.fill("#ti-text", "昨天小宝算 8+5 写成 12");
+
+  // The LLM call can be slow/flaky: generous timeout, one retry.
+  async function organizeOnce() {
+    await page.click("#ti-organize");
+    await page.waitForSelector("#ti-preview", { state: "visible", timeout: 30000 });
+  }
+  try {
+    await organizeOnce();
+  } catch {
+    await organizeOnce();
+  }
+
+  // The 5 structured fields are editable inputs, and the LLM filled the
+  // problem. If the model left a required field blank (that's a legal
+  // response — the parent edits), fill it so the flow can complete.
+  const problem = await page.inputValue("#ti-field-problem");
+  if (!problem) {
+    console.log("  [note] LLM left problem empty; filling fallback for the e2e flow");
+    await page.fill("#ti-field-problem", "8+5=?");
+  }
+  if (!(await page.inputValue("#ti-field-userAnswer"))) await page.fill("#ti-field-userAnswer", "12");
+  if (!(await page.inputValue("#ti-field-correctAnswer"))) await page.fill("#ti-field-correctAnswer", "13");
+  if (!(await page.inputValue("#ti-field-subject"))) await page.selectOption("#ti-field-subject", "math");
+
+  await page.click("#ti-confirm");
+  await page.waitForFunction(
+    () => document.getElementById("ti-status").textContent.includes("已录入"),
+    { timeout: 8000 },
+  );
+  // Textarea cleared + inbox refreshed with the new case.
+  assert.equal(await page.inputValue("#ti-text"), "");
+  const expected = await page.inputValue("#ti-field-problem").catch(() => "8+5=?");
+  await page.waitForFunction(
+    (p) => document.getElementById("ti-inbox").textContent.includes(p),
+    expected || "8+5=?",
+    { timeout: 8000 },
+  );
+  await page.close();
+});
+
 test("write app: select two chars → 开始练 actually starts (real-HTMLCollection regression)", async () => {
   // Seed the TEST library via API (3002 has its own DB).
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true });

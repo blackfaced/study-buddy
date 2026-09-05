@@ -155,6 +155,44 @@
     .app.photo-only #send-btn { display: none; }
     .app.photo-only .input-row { justify-content: center; }
     .app.photo-only #photo-btn { flex: 1; padding: 18px; font-size: 28px; }
+    /* In photo-only mode the chat (flex:1) is gone, so let the page
+     * scroll for the text-intake + inbox sections. */
+    .app.photo-only { overflow-y: auto; }
+
+    /* 文字描述 intake + 今日待订正 inbox (photo-only mode only — the
+     * sections stay hidden while chat is enabled). */
+    .ti-section { display: none; }
+    .app.photo-only .ti-section { display: block; }
+    .ti-section {
+      margin: 0 16px 16px;
+      padding: var(--space-4);
+      border-radius: var(--radius-card);
+      background: var(--bg-card);
+      box-shadow: var(--shadow-card);
+    }
+    .ti-section h2 { margin: 0 0 var(--space-3); font-size: var(--text-body); }
+    .ti-section textarea, .ti-section input, .ti-section select {
+      width: 100%; box-sizing: border-box;
+      padding: var(--space-2) var(--space-3);
+      border: 2px solid #ffb84d; border-radius: 12px;
+      font: inherit; background: #fff; outline: none;
+    }
+    #ti-text { min-height: 4.5em; resize: vertical; }
+    #ti-organize { margin-top: var(--space-2); width: 100%; padding: 12px; font-size: 16px; border: none; border-radius: 24px; background: #ffb84d; color: #fff; font-weight: bold; }
+    #ti-organize:disabled { background: #ddd; color: #888; }
+    #ti-status { min-height: 20px; margin-top: var(--space-2); font-size: 14px; }
+    .ti-preview { margin-top: var(--space-3); display: grid; gap: var(--space-2); }
+    .ti-preview label { display: grid; gap: 4px; font-size: var(--text-caption); color: var(--text-secondary); }
+    .ti-preview textarea { min-height: 3em; resize: vertical; }
+    .ti-actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
+    .ti-actions button { flex: 1; padding: 12px; font-size: 15px; border: none; border-radius: 20px; background: #ffb84d; color: #fff; font-weight: bold; }
+    .ti-actions button.secondary { background: #8d8d8d; }
+    .ti-actions button:disabled { background: #ddd; color: #888; }
+    #ti-inbox { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-2); }
+    .ti-inbox-entry { border-radius: 12px; background: #fff; }
+    .ti-inbox-link { display: grid; gap: 4px; padding: var(--space-3); color: inherit; text-decoration: none; }
+    .ti-inbox-entry .meta { font-size: 12px; color: var(--text-secondary); }
+    .ti-inbox-empty { color: var(--text-secondary); font-size: var(--text-caption); list-style: none; }
   </style>
 </head>
 <body>
@@ -226,6 +264,38 @@
     <button id="flip-btn" onclick="Buddy.camera.flipCamera()">🔄 翻转</button>
     <button class="danger" id="end-btn" onclick="Buddy.chat.endSession()">✅ 写完啦</button>
   </div>
+
+  <!-- 文字描述 intake + 今日待订正 inbox. Parent-operated; only visible
+       in photo-only mode (CSS gates on .app.photo-only). Replaces the
+       standalone /capture/ page. -->
+  <section class="ti-section" id="text-intake" aria-label="文字描述录入">
+    <h2>✍️ 文字描述</h2>
+    <textarea id="ti-text" maxlength="500" placeholder="例如：昨天小宝算 8+5 写成 12"></textarea>
+    <button id="ti-organize" type="button">整理</button>
+    <div id="ti-status" role="status"></div>
+    <div class="ti-preview" id="ti-preview" style="display:none;">
+      <label>题目<textarea id="ti-field-problem" maxlength="200"></textarea></label>
+      <label>孩子写的答案<input id="ti-field-userAnswer" maxlength="100"></label>
+      <label>正确答案<input id="ti-field-correctAnswer" maxlength="100"></label>
+      <label>学科
+        <select id="ti-field-subject">
+          <option value="">请选择</option>
+          <option value="math">数学</option>
+          <option value="chinese">语文</option>
+          <option value="english">英语</option>
+        </select>
+      </label>
+      <label>错因（可选）<input id="ti-field-errorType" maxlength="64"></label>
+      <div class="ti-actions">
+        <button class="secondary" id="ti-cancel" type="button">取消</button>
+        <button id="ti-confirm" type="button">确认录入</button>
+      </div>
+    </div>
+  </section>
+  <section class="ti-section" id="inbox-section" aria-label="今日待订正">
+    <h2>今日待订正</h2>
+    <ul id="ti-inbox"></ul>
+  </section>
 </div>
 
 <video id="cam-preview" autoplay muted playsinline></video>
@@ -293,6 +363,7 @@
 <script src="./chat.js"></script>
 <script src="./photo-flow.js"></script>
 <script src="./photo-only.js"></script>
+<script src="./text-intake.js"></script>
 <script src="./voice.js"></script>
 <script>
 // ===== Buddy top-level orchestrator =====
@@ -430,6 +501,12 @@ function unlockBuddyUI() {
       : 'none';
   }
   void window.Buddy.voice.restorePendingMistake();
+  // 文字描述 + inbox are parent tools for photo-only mode. onUnlock is
+  // a no-op bind + inbox load; the sections themselves stay CSS-hidden
+  // whenever chat is enabled.
+  if (window.Buddy.state.chatEnabled === false && window.BuddyTextIntake) {
+    window.BuddyTextIntake.onUnlock();
+  }
 }
 
 function lockBuddyUI() {
