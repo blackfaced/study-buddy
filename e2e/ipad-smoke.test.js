@@ -56,6 +56,29 @@ test("portal: buddy entry shows the 拍错题 photo-only copy", async () => {
   await page.close();
 });
 
+test("portal: test instance pins a 测试环境 badge (3002 screenshots must not look like prod)", async (t) => {
+  // Self-skip until the served instance reports the env marker (the 3002
+  // test instance runs the main checkout — a pre-merge run can't see it).
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const health = await ctx.request.get(BASE + "/api/health");
+  const body = await health.json();
+  await ctx.close();
+  if (body.env === undefined) {
+    t.skip("served /api/health has no env field yet — re-run after this branch lands on the served checkout");
+    return;
+  }
+  const page = await newIpadPage();
+  await page.goto(BASE + "/", { waitUntil: "networkidle" });
+  if (body.env === "test") {
+    await page.waitForSelector("#env-badge", { state: "visible", timeout: 8000 });
+    assert.equal(await page.textContent("#env-badge"), "测试环境");
+  } else {
+    // prod must NOT show the badge
+    assert.equal(await page.locator("#env-badge").count(), 0);
+  }
+  await page.close();
+});
+
 test("buddy photo-only: PIN gate speaks 拍错题; after unlock no chat UI, only 📷 + 翻转", async () => {
   const page = await newIpadPage();
   await page.goto(BASE + "/buddy/", { waitUntil: "networkidle" });

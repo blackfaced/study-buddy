@@ -71,8 +71,12 @@
       </a>
     </section>
   </main>
+  <script src="/shared/app.js"></script>
   <script src="/buddy/photo-only.js"></script>
   <script>
+    // Test-instance marker: /api/health env=test → 测试环境 badge
+    // (3002 shares this code but not the kid's data).
+    window.StudyBuddy.applyEnvBadge();
     // BUDDY_CHAT_ENABLED=false: swap the buddy entry to a photo-capture
     // entry. Fetch failure keeps the static copy (chat assumed on).
     async function loadBuddyEntry() {

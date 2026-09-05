@@ -328,3 +328,11 @@ test("cameraPause: throws when triggerEl is missing", () => {
     /triggerEl is required/,
   );
 });
+
+test("envBadgeText: test → 测试环境, prod/undefined → null", () => {
+  const { window } = loadFresh();
+  const SB = window.StudyBuddy;
+  assert.equal(SB.envBadgeText("test"), "测试环境");
+  assert.equal(SB.envBadgeText("prod"), null);
+  assert.equal(SB.envBadgeText(undefined), null);
+});

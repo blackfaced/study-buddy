@@ -206,4 +206,38 @@
       clearTimer();
     };
   };
+
+  // ---- 3. test-instance env badge -------------------------------------
+  // The 3002 test instance shares this code but not the kid's data
+  // (AGENTS.md "Two instances"). A screenshot of the test instance once
+  // got mistaken for production data (Codex review 9/5), so every page
+  // that calls applyEnvBadge() shows a small 测试环境 pill when
+  // /api/health reports env=test.
+
+  /** Pure: badge text for a health-env value, or null for none. */
+  SB.envBadgeText = function (env) {
+    return env === "test" ? "测试环境" : null;
+  };
+
+  /** Fetch /api/health and pin a 测试环境 badge on test instances.
+   *  No-op on prod, on fetch failure, or without a DOM. */
+  SB.applyEnvBadge = async function () {
+    if (typeof document === "undefined" || !document.body) return;
+    let health;
+    try {
+      health = await SB.fetch("/api/health");
+    } catch {
+      return;
+    }
+    const text = SB.envBadgeText(health && health.env);
+    if (!text || document.getElementById("env-badge")) return;
+    const badge = document.createElement("div");
+    badge.id = "env-badge";
+    badge.textContent = text;
+    badge.style.cssText =
+      "position:fixed;top:4px;left:50%;transform:translateX(-50%);" +
+      "background:#ff9800;color:#fff;font-size:12px;font-weight:bold;" +
+      "padding:2px 12px;border-radius:10px;z-index:1000;pointer-events:none;";
+    document.body.appendChild(badge);
+  };
 })();
