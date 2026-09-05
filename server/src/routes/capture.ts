@@ -40,6 +40,7 @@ import {
   MaxAttemptsReachedError,
 } from "../reinforcement-workflow.js";
 import { generateSimilarProblems } from "../similar-problems.js";
+import { judgeAnswer } from "../answer-judge.js";
 import {
   createReviewSchedule,
   completeReviewAttempt,
@@ -396,9 +397,15 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
   // obligation (status='verified', drop mistakes mirror). History is
   // always preserved in learning_attempts — verified cases keep their
   // timeline for the parent / analytics view.
-  app.post("/api/capture/case/:caseId/attempt", (req: Request, res: Response) => {
+  //
+  // Issue #229: vision-sourced cases have no stored correct_answer
+  // (confirmMistakePhotoDraft writes ""), so the exact comparator could
+  // never pass and the obligation could never close. When correct_answer
+  // is empty the route falls back to the LLM judge (answer-judge.ts);
+  // a judged-correct answer also backfills correct_answer.
+  app.post("/api/capture/case/:caseId/attempt", async (req: Request, res: Response) => {
     try {
-      handleAttempt(db, req, res);
+      await handleAttempt(db, deps.visionClient ?? null, req, res);
     } catch (err) {
       res.status(500).json({ error: `attempt handler failed: ${(err as Error).message}` });
     }
@@ -877,7 +884,12 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
   registerParentSummaryRoute(app, { db });
 }
 
-function handleAttempt(db: Database.Database, req: Request, res: Response): void {
+async function handleAttempt(
+  db: Database.Database,
+  visionClient: VisionClient | null,
+  req: Request,
+  res: Response,
+): Promise<void> {
   const caseId = String(req.params.caseId);
   const body = (req.body ?? {}) as { childId?: unknown; answer?: unknown };
 
@@ -892,13 +904,15 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
     return;
   }
 
-  // Validation fetch: 404 / 403 / the canonical correctAnswer for
-  // answersMatch. recordCorrectionAttempt re-fetches authoritatively
-  // inside its transaction for the verified-idempotency check.
+  // Validation fetch: 404 / 403 / the problem text + canonical
+  // correctAnswer for judging. recordCorrectionAttempt re-fetches
+  // authoritatively inside its transaction for the
+  // verified-idempotency check.
   const row = db
     .prepare(
       `SELECT mc.case_id AS caseId,
               mc.child_id AS childId,
+              mc.problem,
               mc.correct_answer AS correctAnswer,
               co.status AS obligationStatus
          FROM mistake_cases mc
@@ -909,6 +923,7 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
     | {
         caseId: string;
         childId: string;
+        problem: string | null;
         correctAnswer: string | null;
         obligationStatus: string;
       }
@@ -922,12 +937,30 @@ function handleAttempt(db: Database.Database, req: Request, res: Response): void
     return;
   }
 
-  const isCorrect = answersMatch(String(body.answer), row.correctAnswer ?? "");
+  const submitted = String(body.answer);
+  const expected = row.correctAnswer ?? "";
+  let isCorrect: boolean;
+  let judgedByLlm = false;
+  if (expected) {
+    isCorrect = answersMatch(submitted, expected);
+  } else if (visionClient && row.obligationStatus === "open") {
+    // LLM judge of last resort (#229). null (unparseable / 无法判断)
+    // is treated as "not proven correct".
+    let judged: boolean | null;
+    judged = await judgeAnswer(visionClient, row.problem ?? "", submitted);
+    isCorrect = judged === true;
+    judgedByLlm = true;
+  } else {
+    // No canonical answer and no LLM configured: keep the pre-#229
+    // conservative behavior (judged wrong, obligation stays open).
+    isCorrect = false;
+  }
   const result = recordCorrectionAttempt(db, {
     caseId,
     childId,
     isCorrect,
-    userAnswer: String(body.answer),
+    userAnswer: submitted,
+    correctAnswerBackfill: judgedByLlm && isCorrect ? submitted : undefined,
   });
 
   // Already verified (race with another device closing the same
