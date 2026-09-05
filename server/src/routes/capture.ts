@@ -947,7 +947,14 @@ async function handleAttempt(
     // LLM judge of last resort (#229). null (unparseable / 无法判断)
     // is treated as "not proven correct".
     let judged: boolean | null;
-    judged = await judgeAnswer(visionClient, row.problem ?? "", submitted);
+    try {
+      judged = await judgeAnswer(visionClient, row.problem ?? "", submitted);
+    } catch {
+      // Infra failure is not a wrong answer: debit nothing, let the
+      // kid retry. (Beyond #229's letter — see PR note.)
+      res.status(502).json({ error: "判题失败，请稍后重试" });
+      return;
+    }
     isCorrect = judged === true;
     judgedByLlm = true;
   } else {

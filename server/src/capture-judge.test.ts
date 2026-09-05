@@ -148,4 +148,28 @@ describe("POST /api/capture/case/:caseId/attempt with empty correct_answer (issu
     expect(res.body.isCorrect).toBe(true);
     expect(spy.calls).toBe(0);
   });
+
+  it("J6: LLM call throws → 502, no attempt recorded, obligation stays open", async () => {
+    const caseId = seedVisionCase("J6: 判题服务挂了的题");
+    const failing: VisionClient = {
+      async chat() {
+        throw new Error("network down");
+      },
+    };
+    const app = makeApp(failing);
+    const res = await request(app)
+      .post(`/api/capture/case/${caseId}/attempt`)
+      .send({ childId: CHILD, answer: "任何答案" });
+    expect(res.status).toBe(502);
+    const count = (
+      db
+        .prepare("SELECT COUNT(*) AS c FROM learning_attempts WHERE case_id = ?")
+        .get(caseId) as { c: number }
+    ).c;
+    expect(count).toBe(1); // only the original attempt
+    const ob = db
+      .prepare("SELECT status FROM correction_obligations WHERE case_id = ?")
+      .get(caseId) as { status: string };
+    expect(ob.status).toBe("open");
+  });
 });
