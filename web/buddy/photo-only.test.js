@@ -136,3 +136,17 @@ test("portalEntry(undefined) returns null — an old server without the field ke
   const BuddyPhotoOnly = loadModule();
   assert.equal(BuddyPhotoOnly.portalEntry(undefined), null);
 });
+
+test("welcomeCopy(false) returns null — photo-only mode must not greet the kid as 小书童", () => {
+  const BuddyPhotoOnly = loadModule();
+  // Found in acceptance 9/5: after the PIN gate the camera-permission
+  // flow still spoke "你好呀！我是小书童" out loud — the chat area is
+  // hidden but the TTS played anyway.
+  assert.equal(BuddyPhotoOnly.welcomeCopy(false), null);
+});
+
+test("welcomeCopy(true/undefined) returns the chat welcome", () => {
+  const BuddyPhotoOnly = loadModule();
+  assert.ok(BuddyPhotoOnly.welcomeCopy(true).includes("小书童"));
+  assert.ok(BuddyPhotoOnly.welcomeCopy(undefined).includes("小书童"));
+});
