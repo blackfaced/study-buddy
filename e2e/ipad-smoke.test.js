@@ -79,6 +79,18 @@ test("portal: test instance pins a 测试环境 badge (3002 screenshots must not
   await page.close();
 });
 
+test("buddy: PIN gate offers a way back to the portal", async () => {
+  // Acceptance 9/5: the PIN gate is a dead end — .app (which holds the
+  // 🏠 back link) is hidden until unlock, so a kid/parent who landed
+  // here by mistake can only use the browser back button.
+  const page = await newIpadPage();
+  await page.goto(BASE + "/buddy/", { waitUntil: "networkidle" });
+  await page.waitForSelector("#pin-overlay", { state: "visible", timeout: 8000 });
+  const back = page.locator("#pin-overlay a[href='/']");
+  assert.ok(await back.isVisible(), "PIN gate must show a visible link back to /");
+  await page.close();
+});
+
 test("buddy photo-only: PIN gate speaks 拍错题; after unlock no chat UI, only 📷 + 翻转", async () => {
   const page = await newIpadPage();
   await page.goto(BASE + "/buddy/", { waitUntil: "networkidle" });
@@ -173,6 +185,9 @@ test("buddy 文字描述: 整理 → preview → 确认录入 → 今日待订�
   if (!(await page.inputValue("#ti-field-correctAnswer"))) await page.fill("#ti-field-correctAnswer", "13");
   if (!(await page.inputValue("#ti-field-subject"))) await page.selectOption("#ti-field-subject", "math");
 
+  // Capture the expected problem BEFORE confirming — the preview fields
+  // may be cleared when the preview hides after a successful submit.
+  const expected = (await page.inputValue("#ti-field-problem")) || "8+5=?";
   await page.click("#ti-confirm");
   await page.waitForFunction(
     () => document.getElementById("ti-status").textContent.includes("已录入"),
@@ -180,10 +195,9 @@ test("buddy 文字描述: 整理 → preview → 确认录入 → 今日待订�
   );
   // Textarea cleared + inbox refreshed with the new case.
   assert.equal(await page.inputValue("#ti-text"), "");
-  const expected = await page.inputValue("#ti-field-problem").catch(() => "8+5=?");
   await page.waitForFunction(
     (p) => document.getElementById("ti-inbox").textContent.includes(p),
-    expected || "8+5=?",
+    expected,
     { timeout: 8000 },
   );
   await page.close();
