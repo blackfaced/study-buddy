@@ -73,12 +73,35 @@
     .photo-review-overlay { z-index: 180; }
     .photo-review-overlay .card { width: min(420px, 100%); max-height: 90vh; overflow-y: auto; }
     #mistake-preview { width: 100%; max-height: 42vh; object-fit: contain; border-radius: 12px; background: #f4f1eb; }
-    #mistake-problem {
-      /* 110px was too small to review a recognized problem (acceptance
-       * 9/5); 30vh gives a real paragraph of room, still resizable. */
-      width: 100%; min-height: 30vh; margin-top: 12px; padding: 12px;
-      border: 2px solid #ffb84d; border-radius: 12px; font: inherit; resize: vertical;
+    /* Multi-item 拍错题 review cards (one per wrong spot). Field values
+     * are read-only; the parent fixes a card via the AI 改 instruction
+     * box, and the subject select is the only direct control. */
+    .ti-photo-items { display: grid; gap: var(--space-3); margin-top: 12px; }
+    .ti-photo-item {
+      display: grid; gap: var(--space-2);
+      padding: var(--space-3);
+      border: 2px solid #ffb84d; border-radius: 12px; background: #fff;
     }
+    .ti-photo-item.confirmed { border-color: #ddd; background: #f7f5f1; opacity: 0.75; }
+    .ti-photo-field { display: grid; gap: 4px; font-size: var(--text-caption); color: var(--text-secondary); }
+    .ti-photo-field .ti-photo-value { font-size: var(--text-body); color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
+    .ti-photo-item select {
+      width: 100%; box-sizing: border-box;
+      padding: var(--space-2) var(--space-3);
+      border: 2px solid #ffb84d; border-radius: 12px;
+      font: inherit; background: #fff; outline: none;
+    }
+    .ti-photo-revise { display: flex; gap: var(--space-2); }
+    .ti-photo-revise input {
+      flex: 1; padding: var(--space-2) var(--space-3);
+      border: 2px solid #ffb84d; border-radius: 12px;
+      font: inherit; background: #fff; outline: none;
+    }
+    .ti-photo-revise button { padding: var(--space-2) var(--space-3); border: none; border-radius: 12px; background: #64b5f6; color: #fff; font-weight: bold; }
+    .ti-photo-revise button:disabled, .ti-photo-confirm:disabled { background: #ddd; color: #888; }
+    .ti-photo-item-error { color: #c62828; font-size: 14px; }
+    .ti-photo-confirm { padding: 12px; font-size: 15px; border: none; border-radius: 20px; background: #ffb84d; color: #fff; font-weight: bold; }
+    .ti-photo-done { color: #2e7d32; font-weight: bold; text-align: center; }
     .photo-actions { display: flex; gap: 8px; margin-top: 12px; }
     .photo-actions button { flex: 1; margin-top: 0; padding: 11px 8px; }
     .photo-actions .secondary { background: #8d8d8d; }
@@ -309,7 +332,8 @@
     <h2 id="mistake-photo-title">先看看拍清楚了吗</h2>
     <img id="mistake-preview" alt="刚拍的题目预览" />
     <p id="mistake-photo-status" style="font-size:14px;color:#666;">确认清楚后，再让小书童读题。</p>
-    <textarea id="mistake-problem" aria-label="识别出的题目文字" style="display:none;"></textarea>
+    <!-- 多错误点识别结果：每个错误点一张卡片，逐条记录或全部记录。 -->
+    <div id="mistake-items" class="ti-photo-items" style="display:none;"></div>
     <div id="mistake-photo-error" role="alert"></div>
     <div class="photo-actions" id="mistake-preview-actions">
       <button class="secondary" id="mistake-preview-cancel" type="button" onclick="Buddy.voice.cancelPhoto()">取消</button>
@@ -318,7 +342,7 @@
     </div>
     <div class="photo-actions" id="mistake-review-actions" style="display:none;">
       <button class="secondary" id="mistake-review-cancel" type="button" onclick="Buddy.voice.cancelPhoto()">取消</button>
-      <button id="mistake-confirm" type="button" onclick="Buddy.voice.confirmPhoto()">确认记录</button>
+      <button id="mistake-confirm-all" type="button" onclick="Buddy.voice.confirmAllItems()">全部记录</button>
     </div>
   </div>
 </div>
@@ -365,6 +389,7 @@
 <script src="./camera.js"></script>
 <script src="./chat.js"></script>
 <script src="./photo-flow.js"></script>
+<script src="./photo-items.js"></script>
 <script src="./photo-only.js"></script>
 <script src="./text-intake.js"></script>
 <script src="./voice.js"></script>

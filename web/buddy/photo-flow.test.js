@@ -6,13 +6,16 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "photo-flow.js"), "utf8");
+const itemsSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "photo-items.js"), "utf8");
 
 function setup(overrides = {}) {
   const events = [];
   const calls = { upload: 0, confirm: 0, cancel: 0, revoke: 0, saved: [], cleared: 0 };
   const window = {};
+  vm.runInNewContext(itemsSource, vm.createContext({ window }));
   vm.runInNewContext(source, vm.createContext({ window }));
   const deps = {
+    extractItems: window.BuddyPhotoItems.extractItems,
     onState: (state) => events.push(state),
     revokePreview: () => { calls.revoke += 1; },
     newDraftId: () => "draft_frontend_1",
@@ -24,9 +27,9 @@ function setup(overrides = {}) {
       calls.upload += 1;
       return { draftId: "draft_frontend_1", problemText: "2 + 2", expiresAt: 10 };
     },
-    confirmDraft: async (_sessionId, _draftId, problemText) => {
+    confirmDraft: async (_sessionId, _draftId, itemIndex) => {
       calls.confirm += 1;
-      return { state: "confirmed", problemText };
+      return { state: "confirmed", itemIndex };
     },
     cancelDraft: async () => { calls.cancel += 1; },
     restoreDraft: async () => ({
@@ -84,8 +87,8 @@ test("double taps do not duplicate analyze or confirm calls", async () => {
   await first;
   assert.equal(env.calls.upload, 1);
 
-  const accepted = env.flow.confirm("session-1", "2 + 2");
-  const duplicate = await env.flow.confirm("session-1", "2 + 2");
+  const accepted = env.flow.confirmItem("session-1", 0);
+  const duplicate = await env.flow.confirmItem("session-1", 0);
   assert.equal(duplicate, false);
   await accepted;
   assert.equal(env.calls.confirm, 1);
@@ -183,4 +186,180 @@ test("analyze result without confidence field defaults to 'ok' (backward compat)
   flow.preview({}, "blob:preview");
   assert.equal(await flow.analyze("session-1"), true);
   assert.equal(flow.state.confidence, "ok");
+});
+
+// --- Multi-item review state (拍错题 v2: one card per wrong spot) ---
+
+test("analyze stores every split item on the review state", async () => {
+  const { flow } = setup({
+    upload: async () => ({
+      draftId: "draft_frontend_1",
+      problemText: "8+5=?",
+      expiresAt: 10,
+      items: [
+        { problem: "8+5=?", userAnswer: "12", correctAnswer: "13", subject: "math", errorType: "进位错误", reasoning: "个位满十未进位" },
+        { problem: "9+7=?", userAnswer: "15", correctAnswer: "16", subject: "math", errorType: "", reasoning: "" },
+      ],
+    }),
+  });
+  flow.preview({}, "blob:preview");
+  assert.equal(await flow.analyze("session-1"), true);
+  assert.equal(flow.state.items.length, 2);
+  assert.equal(flow.state.items[0].problem, "8+5=?");
+  assert.equal(flow.state.items[1].correctAnswer, "16");
+});
+
+test("analyze without an items array falls back to one item from problemText (legacy draft)", async () => {
+  const { flow } = setup();
+  flow.preview({}, "blob:preview");
+  assert.equal(await flow.analyze("session-1"), true);
+  assert.equal(flow.state.items.length, 1);
+  assert.equal(flow.state.items[0].problem, "2 + 2");
+});
+
+test("restore stores the draft's items so a refresh re-renders every card", async () => {
+  const { flow } = setup({
+    restoreDraft: async () => ({
+      state: "review",
+      draftId: "draft_frontend_1",
+      problemText: "8+5=?",
+      expiresAt: 10,
+      items: [
+        { problem: "8+5=?", subject: "math" },
+        { problem: "9+7=?", subject: "math" },
+      ],
+    }),
+  });
+  assert.equal(await flow.restore("session-1", "draft_frontend_1"), true);
+  assert.equal(flow.state.items.length, 2);
+  assert.equal(flow.state.items[1].problem, "9+7=?");
+});
+
+// --- confirmItem: per-item confirm keeps the draft open until all done ---
+
+function setupTwoItems(overrides = {}) {
+  const confirmCalls = [];
+  const env = setup({
+    upload: async () => ({
+      draftId: "draft_frontend_1",
+      problemText: "8+5=?",
+      expiresAt: 10,
+      items: [
+        { problem: "8+5=?", userAnswer: "12", correctAnswer: "13", subject: "math" },
+        { problem: "9+7=?", userAnswer: "15", correctAnswer: "16", subject: "math" },
+      ],
+    }),
+    confirmDraft: async (sessionId, draftId, itemIndex) => {
+      confirmCalls.push({ sessionId, draftId, itemIndex });
+      return { state: "confirmed", itemIndex };
+    },
+    ...overrides,
+  });
+  return { ...env, confirmCalls };
+}
+
+test("confirmItem posts the right itemIndex and greys only that card; the draft stays open", async () => {
+  const env = setupTwoItems();
+  env.flow.preview({}, "blob:preview");
+  await env.flow.analyze("session-1");
+
+  assert.equal(await env.flow.confirmItem("session-1", 1), true);
+  assert.deepEqual(env.confirmCalls, [{ sessionId: "session-1", draftId: "draft_frontend_1", itemIndex: 1 }]);
+  assert.equal(env.flow.state.phase, "review", "one item still open — draft must stay in review");
+  assert.equal(env.flow.state.items[1].confirmed, true);
+  assert.equal(env.flow.state.items[0].confirmed, undefined);
+  assert.equal(env.calls.cleared, 0, "sessionStorage draft stays until every item is recorded");
+});
+
+test("confirming the last open item closes the draft and clears the saved draft", async () => {
+  const env = setupTwoItems();
+  env.flow.preview({}, "blob:preview");
+  await env.flow.analyze("session-1");
+  await env.flow.confirmItem("session-1", 0);
+  assert.equal(await env.flow.confirmItem("session-1", 1), true);
+  assert.equal(env.flow.state.phase, "confirmed");
+  assert.equal(env.calls.cleared, 1);
+  assert.equal(env.calls.revoke, 1, "preview object URL released");
+});
+
+test("confirmItem failure keeps the card open and stores the error copy on that item", async () => {
+  const env = setupTwoItems({
+    confirmDraft: async () => { throw new Error("boom"); },
+  });
+  env.flow.preview({}, "blob:preview");
+  await env.flow.analyze("session-1");
+  assert.equal(await env.flow.confirmItem("session-1", 0), false);
+  assert.equal(env.flow.state.phase, "review");
+  assert.equal(env.flow.state.items[0].confirmed, undefined);
+  assert.equal(env.flow.state.items[0].error, "分析失败，请重试");
+  assert.equal(env.flow.state.items[1].error, undefined, "the other card is untouched");
+});
+
+test("confirmItem on an already-confirmed item is a no-op (防重复点)", async () => {
+  const env = setupTwoItems();
+  env.flow.preview({}, "blob:preview");
+  await env.flow.analyze("session-1");
+  await env.flow.confirmItem("session-1", 0);
+  assert.equal(await env.flow.confirmItem("session-1", 0), false);
+  assert.equal(env.confirmCalls.length, 1);
+});
+
+test("confirmItem outside the review phase is rejected", async () => {
+  const env = setupTwoItems();
+  assert.equal(await env.flow.confirmItem("session-1", 0), false);
+  assert.equal(env.confirmCalls.length, 0);
+});
+
+// --- reviseItem: 家长输入"要求"，LLM 改写这一条（issue #220） ---
+
+function setupOneItemToRevise(overrides = {}) {
+  const reviseCalls = [];
+  const env = setup({
+    upload: async () => ({
+      draftId: "draft_frontend_1",
+      problemText: "8+5=?",
+      expiresAt: 10,
+      items: [{ problem: "8+5=?", userAnswer: "12", correctAnswer: "13", subject: "math", reasoning: "" }],
+    }),
+    reviseDraft: async (sessionId, draftId, index, instruction) => {
+      reviseCalls.push({ sessionId, draftId, index, instruction });
+      return { index, item: { problem: "8+5=?", userAnswer: "12", correctAnswer: "13", subject: "chinese", reasoning: "改好了" } };
+    },
+    ...overrides,
+  });
+  return { ...env, reviseCalls };
+}
+
+test("reviseItem posts the instruction and swaps in the revised item fields", async () => {
+  const env = setupOneItemToRevise();
+  env.flow.preview({}, "blob:preview");
+  await env.flow.analyze("session-1");
+  assert.equal(await env.flow.reviseItem("session-1", 0, "学科改成语文"), true);
+  assert.deepEqual(env.reviseCalls, [
+    { sessionId: "session-1", draftId: "draft_frontend_1", index: 0, instruction: "学科改成语文" },
+  ]);
+  assert.equal(env.flow.state.items[0].subject, "chinese");
+  assert.equal(env.flow.state.items[0].reasoning, "改好了");
+  assert.equal(env.flow.state.phase, "review");
+});
+
+test("reviseItem failure keeps the old fields and shows the error copy on that card", async () => {
+  const env = setupOneItemToRevise({
+    reviseDraft: async () => { throw new Error("502"); },
+  });
+  env.flow.preview({}, "blob:preview");
+  await env.flow.analyze("session-1");
+  assert.equal(await env.flow.reviseItem("session-1", 0, "改"), false);
+  assert.equal(env.flow.state.items[0].subject, "math", "fields unchanged after a failed revise");
+  assert.equal(env.flow.state.items[0].error, "分析失败，请重试");
+});
+
+test("reviseItem on a confirmed item is a no-op", async () => {
+  const env = setupOneItemToRevise();
+  env.flow.preview({}, "blob:preview");
+  await env.flow.analyze("session-1");
+  await env.flow.confirmItem("session-1", 0);
+  assert.equal(env.flow.state.phase, "confirmed");
+  assert.equal(await env.flow.reviseItem("session-1", 0, "改"), false);
+  assert.equal(env.reviseCalls.length, 0);
 });

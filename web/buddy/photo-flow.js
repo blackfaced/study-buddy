@@ -16,6 +16,11 @@
       if (current.previewUrl) deps.revokePreview(current.previewUrl);
     }
 
+    function setItem(index, patch) {
+      const items = current.items.map((it, i) => (i === index ? { ...it, ...patch } : it));
+      replace({ ...current, items });
+    }
+
     return {
       get state() { return { ...current }; },
 
@@ -39,7 +44,7 @@
       },
 
       async cancel(sessionId) {
-        if (current.phase === "confirming" || current.phase === "idle") return false;
+        if (current.phase === "idle") return false;
         const draftId = current.draftId;
         replace({ ...current, phase: "cancelling" });
         activeAbort?.abort();
@@ -73,6 +78,7 @@
             phase: "review",
             draftId: result.draftId,
             problemText: result.problemText,
+            items: deps.extractItems(result),
             confidence: result.confidence ?? "ok",
             expiresAt: result.expiresAt,
             error: "",
@@ -88,17 +94,28 @@
         }
       },
 
-      async confirm(sessionId, problemText) {
+      // Multi-item 拍错题: confirm one split item at a time. The draft
+      // (and its sessionStorage restore key) stays alive until every
+      // item is recorded; only then does the overlay close.
+      async confirmItem(sessionId, itemIndex) {
         if (current.phase !== "review") return false;
-        replace({ ...current, phase: "confirming", error: "" });
+        const item = current.items[itemIndex];
+        if (!item || item.confirmed || item.confirming) return false;
+        setItem(itemIndex, { confirming: true, error: "" });
         try {
-          const result = await deps.confirmDraft(sessionId, current.draftId, problemText);
-          releaseLocal();
-          deps.clearDraft();
-          replace({ ...emptyState(), phase: "confirmed", result });
+          const result = await deps.confirmDraft(sessionId, current.draftId, itemIndex);
+          const items = current.items.map((it, i) =>
+            i === itemIndex ? { ...it, confirming: false, confirmed: true, error: "" } : it);
+          if (items.every((it) => it.confirmed)) {
+            releaseLocal();
+            deps.clearDraft();
+            replace({ ...emptyState(), phase: "confirmed", result });
+          } else {
+            replace({ ...current, items, error: "" });
+          }
           return true;
         } catch (error) {
-          replace({ ...current, phase: "review", error: deps.errorMessage(error) });
+          setItem(itemIndex, { confirming: false, error: deps.errorMessage(error) });
           return false;
         }
       },
@@ -117,6 +134,7 @@
             phase: "review",
             draftId: result.draftId,
             problemText: result.problemText,
+            items: deps.extractItems(result),
             confidence: result.confidence ?? "ok",
             expiresAt: result.expiresAt,
           });
@@ -124,6 +142,24 @@
         } catch {
           deps.clearDraft();
           replace(emptyState());
+          return false;
+        }
+      },
+
+      // 家长不手改字段（issue #220）：输入自然语言"要求"，由 LLM 改写
+      // 这一条；成功后该卡片的字段整体换成服务端返回的 revised item。
+      async reviseItem(sessionId, itemIndex, instruction) {
+        if (current.phase !== "review") return false;
+        const item = current.items[itemIndex];
+        if (!item || item.confirmed || item.revising) return false;
+        setItem(itemIndex, { revising: true, error: "" });
+        try {
+          const result = await deps.reviseDraft(sessionId, current.draftId, itemIndex, instruction);
+          const revised = result && result.item ? result.item : {};
+          setItem(itemIndex, { ...revised, revising: false, error: "" });
+          return true;
+        } catch (error) {
+          setItem(itemIndex, { revising: false, error: deps.errorMessage(error) });
           return false;
         }
       },
@@ -141,6 +177,7 @@
       previewUrl: "",
       draftId: "",
       problemText: "",
+      items: [],
       confidence: "ok",
       expiresAt: 0,
       error: "",
