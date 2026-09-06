@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { GAME_ONLY_SESSION_SUBJECT } from "./session-kind.js";
 import { appendLearningAttemptSourceEvent } from "./source-events.js";
 import { inferMistakeLevel } from "./mistake-level.js";
+import { normalizeSubject } from "./capture-organize.js";
 import type { DevicePrincipal } from "./device-auth.js";
 import {
   findOwnedActiveSession,
@@ -317,6 +318,18 @@ export interface ConfirmMistakePhotoDraftInput {
   sessionId: string;
   childId: string;
   deviceId: string;
+  /**
+   * Multi-item 拍错题: which item of the draft is being confirmed
+   * (default 0, the legacy whole-draft behavior). Idempotency is per
+   * (draftId, itemIndex): a retried confirm of the same item replays
+   * the first result.
+   */
+  itemIndex?: number;
+  /** Item fields from the vision split; subject falls back to "math". */
+  subject?: string | null;
+  userAnswer?: string;
+  correctAnswer?: string;
+  errorType?: string;
 }
 
 export interface ConfirmMistakePhotoDraftResult {
@@ -351,6 +364,7 @@ export function confirmMistakePhotoDraft(
     childId: input.childId,
     deviceId: input.deviceId,
   };
+  const itemIndex = input.itemIndex ?? 0;
   const method: ConfirmMistakePhotoDraftResult["confirmationMethod"] =
     input.problemText === input.proposedProblem
       ? "explicit_acceptance"
@@ -358,6 +372,17 @@ export function confirmMistakePhotoDraft(
   const confirmedAt = Date.now();
 
   return db.transaction(() => {
+    // Per-item idempotent replay: a retried confirm of the same
+    // (draftId, itemIndex) returns the first result without writing.
+    const existing = findMistakePhotoConfirmation(db, input.draftId, itemIndex);
+    if (existing) {
+      return {
+        caseId: existing.caseId,
+        mistakeId: existing.mistakeId,
+        problemText: existing.problemText,
+        confirmationMethod: existing.confirmationMethod as ConfirmMistakePhotoDraftResult["confirmationMethod"],
+      };
+    }
     const current = findOwnedActiveSession(db, input.sessionId, principal);
     if (current.status !== "ok") throw new SessionChangedError(current.status);
     // T10 mirror work (issue #166): vision confirm writes the
@@ -368,20 +393,21 @@ export function confirmMistakePhotoDraft(
     // row (to keep `mistake_photo_confirmations.mistake_id` FK
     // satisfied until PR-D v2.4 drops the column), and appends
     // the learning_attempt source event.
+    //
+    // Multi-item 拍错题: subject / answers / errorType come from the
+    // confirmed item when present; subject falls back to "math" for
+    // empty or unrecognized values.
+    const subject = normalizeSubject(input.subject) || "math";
     const insertResult = insertMistake(
       db,
       {
         childId: input.childId,
         problem: input.problemText,
-        // Vision path has no typed user/correct answer — the
-        // closure loop contract is "we have a wrong answer
-        // worth tracking"; typed answer text arrives later
-        // (issue #160 capture user answer in review).
-        userAnswer: "",
-        correctAnswer: "",
-        errorType: "confirmed",
+        userAnswer: input.userAnswer ?? "",
+        correctAnswer: input.correctAnswer ?? "",
+        errorType: input.errorType || "confirmed",
         source: "vision",
-        subject: "math",
+        subject,
       },
       beforeSourceEventAppend,
     );
@@ -392,7 +418,7 @@ export function confirmMistakePhotoDraft(
           confirmation_method, confirmed_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      input.draftId,
+      receiptKey(input.draftId, itemIndex),
       mistakeId,
       input.sessionId,
       input.childId,
@@ -410,13 +436,25 @@ export function confirmMistakePhotoDraft(
 }
 
 /**
- * Look up the confirmation receipt for a draftId (idempotent replay of
- * the photo confirm route). Returns null when the draft has not been
- * confirmed.
+ * Receipt key for one item of a draft. The confirmations table predates
+ * multi-item capture and keys on draft_id alone (TEXT PRIMARY KEY);
+ * rather than rebuild the table we key item 0 by the bare draftId
+ * (legacy-compatible) and later items by `draftId#index`.
+ */
+function receiptKey(draftId: string, itemIndex: number): string {
+  return itemIndex === 0 ? draftId : `${draftId}#${itemIndex}`;
+}
+
+/**
+ * Look up the confirmation receipt for one item of a draft (idempotent
+ * replay of the photo confirm route). `itemIndex` defaults to 0 — the
+ * legacy whole-draft receipt. Returns null when that item of the draft
+ * has not been confirmed.
  */
 export function findMistakePhotoConfirmation(
   db: Database.Database,
   draftId: string,
+  itemIndex = 0,
 ): MistakePhotoConfirmationReceipt | null {
   const row = db.prepare(
     `SELECT c.session_id AS sessionId, mc.case_id AS caseId, m.id AS mistakeId,
@@ -426,6 +464,6 @@ export function findMistakePhotoConfirmation(
        JOIN mistakes m ON m.id = c.mistake_id
        JOIN mistake_cases mc ON mc.original_mistake_id = m.id
       WHERE c.draft_id = ?`,
-  ).get(draftId) as MistakePhotoConfirmationReceipt | undefined;
+  ).get(receiptKey(draftId, itemIndex)) as MistakePhotoConfirmationReceipt | undefined;
   return row ?? null;
 }
