@@ -154,19 +154,7 @@
   @keyframes shake-good { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
   @keyframes shake-bad { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
 
-  /* ===== Keypad ===== */
-  .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); }
-  .keypad button {
-    background: white;
-    border-radius: 16px;
-    padding: var(--space-4) 0;
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text-primary);
-    box-shadow: var(--shadow-button);
-  }
-  .keypad button:active { transform: scale(0.94); background: var(--accent-soft); }
-  .keypad .key-w { background: var(--accent-soft); color: var(--accent); }
+  /* ===== Keypad: styles live in /shared/theme.css (issue #233) ===== */
 
   /* ===== Result ===== */
   .result { text-align: center; padding-top: 4vh; }
@@ -239,7 +227,7 @@
       <div class="q-scenario" id="q-scenario" style="display:none"></div>
       <div class="q-text" id="q-text">1 + 1 = ?</div>
     </div>
-    <input class="answer-input" id="answer-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="?" />
+    <input class="answer-input" id="answer-input" type="text" inputmode="none" pattern="[0-9]*" autocomplete="off" placeholder="?" />
     <!-- v0.8 (#116, T4 = #34b): inline wrong-answer card. Shown on wrong
          answers, hidden on correct / next question / session end. -->
     <div class="explanation-card" id="explanation-card">
@@ -536,6 +524,10 @@ let state = {
   correctCount: 0,
   currentQuestion: null,
   currentAnswer: "",
+  // #233: auto-submit fires the moment the digit count is met; this
+  // guard blocks extra keypad taps while the answer is being judged.
+  // Reset in nextQuestion().
+  acceptingAnswer: true,
   questionStartedAt: 0,
   startedAt: 0,
   endedAt: 0,
@@ -658,8 +650,7 @@ async function startQuiz() {
   nextQuestion();
   if (state.tickHandle) clearInterval(state.tickHandle);
   state.tickHandle = setInterval(tick, 100);
-  // 焦点让数字键盘弹起（iPad Safari）
-  setTimeout(() => document.getElementById("answer-input").focus(), 100);
+  // #233: 屏幕数字键盘是主输入路径，不再 focus 输入框弹系统键盘
 }
 
 /** Update the "L1/L2/L3" badge in the quiz topbar. */
@@ -682,6 +673,7 @@ function flashLevelEvent(event) {
 function nextQuestion() {
   state.currentQuestion = pickGen();
   state.currentAnswer = "";
+  state.acceptingAnswer = true;
   state.questionStartedAt = Date.now();
   // v0.8 (#116, T4 = #34b): hide the explanation card for the new
   // question. The card was either dismissed by the "下一题" button
@@ -721,6 +713,12 @@ async function submitAnswer() {
   if (!state.currentQuestion) return;
   const raw = state.currentAnswer.trim();
   if (raw === "") return;  // 忽略空提交
+  // #233: parse before arming the guard — invalid input (e.g. a lone
+  // "-" from a hardware keyboard) must not lock the question.
+  const user = parseInt(raw, 10);
+  if (isNaN(user)) return;
+  if (!state.acceptingAnswer) return;  // #233: 自动提交触发后挡住多余按键
+  state.acceptingAnswer = false;
   // v0.8.x: delegate the comparison to the answer-compare module.
   // The picker can return a Number (regular gen) or a String
   // (mistake review, where /api/game/quiz-context returns the
@@ -729,8 +727,6 @@ async function submitAnswer() {
   // Lazy-load the module on first answer; fallback to legacy
   // strict-equals if the module fails to import (defence).
   await loadAnswerCompare();
-  const user = parseInt(raw, 10);
-  if (isNaN(user)) return;
   const correct = state.currentQuestion.answer;
   const isCorrect = _isAnswerCorrect
     ? _isAnswerCorrect(user, correct)
@@ -885,11 +881,40 @@ document.addEventListener("visibilitychange", () => {
 });
 
 // ============== 数字键盘 / 输入 ==============
+// #233: shared digit-cap + auto-submit logic lives in /shared/numpad.js
+// (ESM). This is a classic script, so the module is lazy-loaded like
+// answer-compare; until it arrives the fallbacks inline the same rule.
+let _numpad = null;
+import("/shared/numpad.js")
+  .then((m) => { _numpad = m; })
+  .catch(() => { /* fallbacks below keep the keypad working */ });
+
+function answerMaxLen() {
+  const ans = state.currentQuestion && state.currentQuestion.answer;
+  if (_numpad) return _numpad.expectedAnswerLength(ans) ?? 4;
+  // Fallback inlines the same rule; note ans == null (question not yet
+  // picked) falls through to the 4-digit cap like a non-numeric answer.
+  if (ans == null) return 4;
+  const n = Number(ans);
+  return Number.isInteger(n) && n >= 0 && String(ans).trim() !== "" ? String(n).length : 4;
+}
+
+function maybeAutoSubmit() {
+  const v = state.currentAnswer;
+  const ans = state.currentQuestion && state.currentQuestion.answer;
+  const hit = _numpad
+    ? _numpad.shouldAutoSubmit(v, ans)
+    : (/^\d+$/.test(v) && v.length === answerMaxLen());
+  // 位数齐自动提交；非数字答案（错题复习的 TEXT 答案）仍走 ✓ 手动提交
+  if (hit) submitAnswer();
+}
+
 const inputEl = document.getElementById("answer-input");
 inputEl.addEventListener("input", (e) => {
   const v = e.target.value.replace(/[^\d-]/g, "");
   e.target.value = v;
   state.currentAnswer = v;
+  maybeAutoSubmit();
 });
 inputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); submitAnswer(); }
@@ -908,9 +933,12 @@ document.querySelectorAll("#keypad button").forEach(btn => {
       submitAnswer();
       return;
     } else {
-      // 限制最大 4 位
-      if (state.currentAnswer.length >= 4) return;
+      // #233: 按当前题答案位数限长（非常规答案兜底 4 位）
+      if (state.currentAnswer.length >= answerMaxLen()) return;
       state.currentAnswer += k;
+      inputEl.value = state.currentAnswer;
+      maybeAutoSubmit();
+      return;
     }
     inputEl.value = state.currentAnswer;
   });

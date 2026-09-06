@@ -288,3 +288,18 @@ img {
   color: var(--accent);
   font-size: 22px;
 }
+
+/* ===== On-screen number pad (issue #233, shared by the kid games) ===== */
+/* border/cursor/touch-action/disabled come from the global button reset. */
+.keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); margin-top: var(--space-4); }
+.keypad button {
+  background: white;
+  border-radius: 16px;
+  padding: var(--space-4) 0;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary);
+  box-shadow: var(--shadow-button);
+}
+.keypad button:active { transform: scale(0.94); background: var(--accent-soft); }
+.keypad .key-w { background: var(--accent-soft); color: var(--accent); }
