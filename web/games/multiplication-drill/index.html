@@ -118,12 +118,20 @@
     </div>
     <div class="quiz-card">
       <div class="problem" id="q-problem">3 × 4 = ?</div>
-      <input id="q-input" class="answer-input" type="tel" inputmode="numeric"
+      <input id="q-input" class="answer-input" type="tel" inputmode="none"
              pattern="[0-9]*" autocomplete="off" maxlength="3" />
       <div id="q-feedback" style="display:none">
         <div class="wrong-mark" id="q-wrong"></div>
         <div class="table-hint" id="q-table"></div>
       </div>
+    </div>
+    <!-- #233: 屏幕数字键盘（样式在 /shared/theme.css）。位数齐自动提交，
+         ✓ 是手动兜底；inputmode="none" 让 iPad 不再弹系统键盘。 -->
+    <div class="keypad" id="q-keypad">
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="0">0</button><button data-k="back" class="key-w">⌫</button><button data-k="ok" class="key-w">✓</button>
     </div>
   </div>
 
@@ -148,6 +156,7 @@
 <script src="/shared/app.js"></script>
 <script type="module">
 import { pickMultiplicationQuestion, makeMultiplicationTable } from "./pick-gen.js";
+import { expectedAnswerLength, shouldAutoSubmit, appendDigit, backspace } from "/shared/numpad.js";
 
 const APP_ID = "multiplication-drill";
 const DURATION_SEC = 60;
@@ -188,6 +197,8 @@ function startQuiz() {
   startTimer();
   const input = document.getElementById("q-input");
   input.value = "";
+  // #233: input is inputmode="none", so focus never pops the iPad system
+  // keyboard; keeping it lets a hardware keyboard's Enter still work.
   setTimeout(() => input.focus(), 50);
 }
 
@@ -247,6 +258,30 @@ function handleAnswer() {
 
 document.getElementById("q-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") handleAnswer();
+});
+
+// #233: on-screen number pad. Digits append (capped at the answer's
+// digit count); reaching the digit count auto-submits via the same
+// handleAnswer() path as Enter — mistake recording is unchanged.
+document.querySelectorAll("#q-keypad button").forEach((btn) => {
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();  // suppress the synthesized click + focus jump
+    const input = document.getElementById("q-input");
+    const k = btn.dataset.k;
+    if (k === "back") {
+      input.value = backspace(input.value);
+      return;
+    }
+    if (k === "ok") {
+      handleAnswer();
+      return;
+    }
+    const maxLen = expectedAnswerLength(state.current && state.current.answer) ?? 3;
+    input.value = appendDigit(input.value, k, maxLen);
+    if (shouldAutoSubmit(input.value, state.current && state.current.answer)) {
+      handleAnswer();
+    }
+  });
 });
 
 async function endQuiz() {
