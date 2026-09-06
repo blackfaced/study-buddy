@@ -195,6 +195,7 @@ export function createApp(opts: AppOptions): express.Express {
     db,
     beforeSourceEventAppend: opts.beforeSourceEventAppend,
     visionClient: opts.visionClient === undefined ? null : opts.visionClient,
+    logger,
   });
   const pagePhotoWorkflow = opts.pagePhotoWorkflow ?? new MistakePagePhotoWorkflow({ db });
   registerMistakePagePhotoRoutes(app, {

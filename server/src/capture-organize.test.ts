@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { createApp } from "./app.js";
 import { migrateSchema } from "./db-migrate.js";
+import { createLogger, memorySink, type Logger } from "./logger.js";
 import type { VisionClient } from "./vision.js";
 import { buildOrganizePrompt, parseOrganizeResponse } from "./capture-organize.js";
 
@@ -115,13 +116,19 @@ describe("POST /api/capture/organize", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function appWith(visionClient: VisionClient | null) {
+  function appWith(visionClient: VisionClient | null, logger?: Logger) {
     return createApp({
       db,
       httpsPort: 3000,
       outboxPath: join(tmpDir, "outbox.jsonl"),
       visionClient,
+      logger,
     });
+  }
+
+  function testLogger() {
+    const { sink, entries } = memorySink();
+    return { logger: createLogger({ level: "info", sinks: [sink] }), entries };
   }
 
   it("happy path: messy parent text → 200 with the 5 structured fields", async () => {
@@ -168,6 +175,20 @@ describe("POST /api/capture/organize", () => {
     expect(res.body).toHaveProperty("error");
   });
 
+  it("LLM garbage → logs the non-JSON content preview (first 200 chars)", async () => {
+    const { logger, entries } = testLogger();
+    const garbage = "这不是 JSON".padEnd(300, "！");
+    const app = appWith(stubVisionClient(garbage), logger);
+    const res = await request(app)
+      .post("/api/capture/organize")
+      .send({ text: "昨天小宝算 8+5 写成 12" });
+    expect(res.status).toBe(502);
+    const log = entries().find((e) => e.level === "error");
+    expect(log).toBeDefined();
+    expect(log!.msg).toContain("organize");
+    expect(log!.meta?.contentPreview).toBe(garbage.slice(0, 200));
+  });
+
   it("LLM request failure → 502", async () => {
     const failing: VisionClient = {
       chat: async () => {
@@ -180,6 +201,24 @@ describe("POST /api/capture/organize", () => {
       .send({ text: "昨天小宝算 8+5 写成 12" });
     expect(res.status).toBe(502);
     expect(res.body).toHaveProperty("error");
+  });
+
+  it("LLM request failure → logs the thrown error message", async () => {
+    const { logger, entries } = testLogger();
+    const failing: VisionClient = {
+      chat: async () => {
+        throw new Error("vision API 500: boom");
+      },
+    };
+    const app = appWith(failing, logger);
+    const res = await request(app)
+      .post("/api/capture/organize")
+      .send({ text: "昨天小宝算 8+5 写成 12" });
+    expect(res.status).toBe(502);
+    const log = entries().find((e) => e.level === "error");
+    expect(log).toBeDefined();
+    expect(log!.msg).toContain("organize");
+    expect(String(log!.meta?.error)).toContain("boom");
   });
 
   it("text-only call: the stub receives no image", async () => {

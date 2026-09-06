@@ -49,6 +49,7 @@ import {
 } from "../review-workflow.js";
 import { aggregateParentSummary } from "../parent-summary.js";
 import type { VisionClient } from "../vision.js";
+import type { Logger } from "../logger.js";
 import { buildOrganizePrompt, parseOrganizeResponse } from "../capture-organize.js";
 
 /**
@@ -123,6 +124,8 @@ export interface CaptureRouteDeps {
   beforeSourceEventAppend?: (recordType: "learning_attempt") => void;
   /** LLM client for POST /api/capture/organize. Null/absent → 503. */
   visionClient?: VisionClient | null;
+  /** Optional; when present, organize failures log the failure detail. */
+  logger?: Logger;
 }
 
 interface ManualRequestBody {
@@ -253,12 +256,22 @@ export function registerCaptureRoutes(app: Express, deps: CaptureRouteDeps): voi
     let content: string;
     try {
       ({ content } = await visionClient.chat({ system, user }));
-    } catch {
+    } catch (err) {
+      // Log the thrown detail — a bare 502 leaves no way to tell an API
+      // outage from a timeout when investigating after the fact.
+      deps.logger?.error("capture organize LLM call failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
       res.status(502).json({ error: "整理失败，请稍后重试" });
       return;
     }
     const organized = parseOrganizeResponse(content);
     if (!organized) {
+      // Log the first 200 chars so a "model went off-script" failure is
+      // distinguishable from an API failure in the server log.
+      deps.logger?.error("capture organize returned non-JSON", {
+        contentPreview: content.slice(0, 200),
+      });
       res.status(502).json({ error: "模型返回格式异常，请重试" });
       return;
     }
