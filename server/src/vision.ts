@@ -13,6 +13,8 @@
 //   - analyzeMistakeImage()  : takes a VisionClient + base64 image, returns
 //                              a structured MistakeAnalysis.
 
+import { normalizeSubject } from "./capture-organize.js";
+
 export interface VisionClient {
   /**
    * Send a vision chat request. `imageBase64` is the raw base64 of the image
@@ -216,4 +218,187 @@ export async function extractCharsImage(
   const { content, raw } = await client.chat({ system, user, imageBase64 });
   const words = parseCharsResponse(content);
   return { words, raw };
+}
+
+// =====================================================================
+// Multi-item mistake photo analysis (拍错题 v2). Unlike
+// analyzeMistakeImage above — which stays untouched for the page-photo
+// path (ADR-0001) — this path asks the model to split EVERY wrong spot
+// on the homework photo into its own structured item, so the parent can
+// confirm them one by one instead of hand-editing a single blob.
+// =====================================================================
+
+export interface MistakeItem {
+  problem: string;
+  userAnswer: string;
+  correctAnswer: string;
+  subject: string;
+  errorType: string;
+  reasoning: string;
+}
+
+const MISTAKE_ITEMS_SYSTEM_PROMPT = `你是错题整理助手。家长拍了一张孩子的作业照片，你要把照片里**每一个错误点**拆成一条独立记录。
+
+输出严格的 JSON（不要 markdown 代码块，不要任何解释）：
+{
+  "mistakes": [
+    {
+      "problem": "该错误点对应的题目原文",
+      "userAnswer": "孩子写的错误答案，尽量从照片里的笔迹读出来；读不出留空字符串",
+      "correctAnswer": "正确答案（你能确定就填，不确定留空字符串）",
+      "subject": "学科，只能是 math / chinese / english 之一；判断不了留空字符串",
+      "errorType": "错因（如 进位加法错误、形近字混淆）；判断不了留空字符串",
+      "reasoning": "一句话说明为什么错，给家长看"
+    }
+  ]
+}
+
+规则：
+- 只输出 JSON，第一个字符是 {，最后一个字符是 }
+- 照片里有几个错误点，mistakes 数组就有几条；一条都不能漏，也不要把多个错误点合并
+- 任何字段判断不了就用空字符串 ""，家长会逐条确认和修改
+- 如果照片模糊 / 不是作业 / 看不清，返回 {"mistakes": []}`;
+
+export function buildMistakeItemsPrompt(): { system: string; user: string } {
+  return {
+    system: MISTAKE_ITEMS_SYSTEM_PROMPT,
+    user: "请把这张作业照片里的每个错误点拆成一条记录。",
+  };
+}
+
+function asItemString(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/**
+ * Parse the model's reply into one MistakeItem per wrong spot. Tolerant of:
+ *   - ```json fences and leading/trailing prose (takes the first {...} block)
+ *   - missing fields (filled with "")
+ *   - Chinese subject names (数学 → math, …); unknown subjects drop to ""
+ *   - non-object entries in the mistakes array (silently skipped)
+ * Strict in:
+ *   - the reply must contain a JSON object with a mistakes array —
+ *     anything else is []
+ */
+export function parseMistakeItems(content: string): MistakeItem[] {
+  const trimmed = (content ?? "").trim();
+  if (!trimmed) return [];
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start < 0 || end <= start) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed.slice(start, end + 1));
+  } catch {
+    return [];
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
+  const mistakes = (parsed as Record<string, unknown>).mistakes;
+  if (!Array.isArray(mistakes)) return [];
+  const items: MistakeItem[] = [];
+  for (const entry of mistakes) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+    const obj = entry as Record<string, unknown>;
+    items.push({
+      problem: asItemString(obj.problem),
+      userAnswer: asItemString(obj.userAnswer),
+      correctAnswer: asItemString(obj.correctAnswer),
+      subject: normalizeSubject(obj.subject),
+      errorType: asItemString(obj.errorType),
+      reasoning: asItemString(obj.reasoning),
+    });
+  }
+  return items;
+}
+
+export interface MistakeItemsAnalysis {
+  items: MistakeItem[];
+  model: string;
+  raw: unknown;
+  /** "low" when no item could be parsed — the parent should retake. */
+  confidence: VisionConfidence;
+}
+
+export async function analyzeMistakeItems(
+  client: VisionClient,
+  imageBase64: string,
+  signal?: AbortSignal,
+): Promise<MistakeItemsAnalysis> {
+  const { system, user } = buildMistakeItemsPrompt();
+  const { content, raw } = await client.chat({ system, user, imageBase64, signal });
+  const items = parseMistakeItems(content);
+  return {
+    items,
+    model: "MiniMax-M3",
+    raw,
+    confidence: items.length > 0 ? "ok" : "low",
+  };
+}
+
+// Text-only revise: the parent asks in natural language to fix one item
+// ("学科改成语文"), the model returns the corrected item in the same
+// single-object JSON shape. No image is re-sent.
+
+const REVISE_ITEM_SYSTEM_PROMPT = `你是错题整理助手。家长会给你一条已经拆好的错题记录（JSON）和一句修改要求，你要按修改要求更新这条记录。
+
+输出严格的 JSON（不要 markdown 代码块，不要任何解释），字段与输入完全一致：
+{
+  "problem": "题目原文",
+  "userAnswer": "孩子写的错误答案",
+  "correctAnswer": "正确答案",
+  "subject": "学科，只能是 math / chinese / english 之一；判断不了留空字符串",
+  "errorType": "错因",
+  "reasoning": "一句话说明为什么错"
+}
+
+规则：
+- 只输出 JSON，第一个字符是 {，最后一个字符是 }
+- 只按家长的要求改对应字段，其他字段原样保留
+- 任何字段判断不了就用空字符串 ""`;
+
+export function buildReviseItemPrompt(
+  item: MistakeItem,
+  instruction: string,
+): { system: string; user: string } {
+  return {
+    system: REVISE_ITEM_SYSTEM_PROMPT,
+    user: `当前记录：${JSON.stringify(item)}\n\n家长的修改要求：${instruction}`,
+  };
+}
+
+/**
+ * Revise one draft item from the parent's natural-language instruction.
+ * Throws when the model call fails or the reply isn't a parseable item —
+ * the route maps that to 502 (same contract as /api/capture/organize).
+ */
+export async function reviseMistakeItem(
+  client: VisionClient,
+  item: MistakeItem,
+  instruction: string,
+): Promise<MistakeItem> {
+  const { system, user } = buildReviseItemPrompt(item, instruction);
+  const { content } = await client.chat({ system, user });
+  const trimmed = (content ?? "").trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed.slice(start, end + 1));
+    } catch {
+      parsed = undefined;
+    }
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const obj = parsed as Record<string, unknown>;
+      return {
+        problem: asItemString(obj.problem),
+        userAnswer: asItemString(obj.userAnswer),
+        correctAnswer: asItemString(obj.correctAnswer),
+        subject: normalizeSubject(obj.subject),
+        errorType: asItemString(obj.errorType),
+        reasoning: asItemString(obj.reasoning),
+      };
+    }
+  }
+  throw new Error("revise returned non-JSON");
 }

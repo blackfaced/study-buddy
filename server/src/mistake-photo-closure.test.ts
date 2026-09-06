@@ -29,7 +29,18 @@ let validJpeg: Buffer;
 const logMemory = memorySink();
 const logger = createLogger({ sinks: [logMemory.sink] });
 
-function fakeVisionClient(content = "题目：1 + 1"): VisionClient {
+function fakeVisionClient(
+  content = JSON.stringify({
+    mistakes: [{
+      problem: "1 + 1",
+      userAnswer: "",
+      correctAnswer: "",
+      subject: "math",
+      errorType: "",
+      reasoning: "",
+    }],
+  }),
+): VisionClient {
   return {
     async chat() {
       providerCalls += 1;

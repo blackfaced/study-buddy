@@ -1,5 +1,6 @@
 import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { MistakeItem } from "./vision.js";
 
 export const MISTAKE_PHOTO_MAX_BYTES = 500 * 1024;
 export const MISTAKE_PHOTO_TTL_MS = 10 * 60_000;
@@ -13,6 +14,14 @@ export interface MistakePhotoDraft {
   deviceId: string;
   proposedProblem: string;
   model: string;
+  /**
+   * One entry per wrong spot the vision model split out of the photo
+   * (multi-item capture). Analyzers that predate items get a single
+   * derived item so confirm/revise always have something to work on.
+   */
+  items: MistakeItem[];
+  /** Indexes into `items` already confirmed into the ledger. */
+  confirmedIndexes: number[];
   /**
    * Heuristic confidence signal from the vision analysis ("ok" | "low").
    * "low" means the parent portal should surface a "重拍或手改"
@@ -42,7 +51,13 @@ interface AnalyzeInput {
   deviceId: string;
   bytes: Buffer;
   extension: string;
-  analyze: (signal: AbortSignal) => Promise<{ problemText: string; model: string; confidence?: "ok" | "low" }>;
+  analyze: (signal: AbortSignal) => Promise<{
+    problemText: string;
+    model: string;
+    confidence?: "ok" | "low";
+    /** Multi-item capture: one entry per wrong spot on the photo. */
+    items?: MistakeItem[];
+  }>;
 }
 
 export class MistakePhotoWorkflow {
@@ -80,6 +95,8 @@ export class MistakePhotoWorkflow {
       deviceId: input.deviceId,
       proposedProblem: "",
       model: "",
+      items: [],
+      confirmedIndexes: [],
       // Default to "ok"; the analyze() result will overwrite if the
       // provider returned a confidence signal. This keeps existing
       // test fakes (which return only { problemText, model }) working.
@@ -110,6 +127,17 @@ export class MistakePhotoWorkflow {
         ]);
         draft.proposedProblem = normalizeProblemText(analysis.problemText);
         draft.model = analysis.model;
+        draft.items = analysis.items
+          ?? (draft.proposedProblem
+            ? [{
+              problem: draft.proposedProblem,
+              userAnswer: "",
+              correctAnswer: "",
+              subject: "",
+              errorType: "",
+              reasoning: "",
+            }]
+            : []);
         if (analysis.confidence) draft.confidence = analysis.confidence;
         draft.state = "review";
         delete draft.pending;
@@ -131,6 +159,33 @@ export class MistakePhotoWorkflow {
   get(id: string): MistakePhotoDraft | null {
     this.sweepExpired();
     return this.#drafts.get(id) ?? null;
+  }
+
+  /**
+   * Replace one item on a review draft with the LLM-revised version.
+   * `revise` does the actual model call (injected by the route, same
+   * seam style as analyze()); it may throw — the route logs and maps
+   * to 502. Returns null when the draft or index doesn't exist.
+   */
+  async reviseItem(
+    id: string,
+    index: number,
+    revise: (item: MistakeItem) => Promise<MistakeItem>,
+  ): Promise<MistakeItem | null> {
+    this.sweepExpired();
+    const draft = this.#drafts.get(id);
+    if (!draft || index < 0 || index >= draft.items.length) return null;
+    const updated = await revise(draft.items[index]);
+    draft.items[index] = updated;
+    return updated;
+  }
+
+  /** Record that an item was confirmed into the ledger (idempotent). */
+  markConfirmed(id: string, index: number): void {
+    const draft = this.#drafts.get(id);
+    if (draft && !draft.confirmedIndexes.includes(index)) {
+      draft.confirmedIndexes.push(index);
+    }
   }
 
   cancel(id: string): boolean {

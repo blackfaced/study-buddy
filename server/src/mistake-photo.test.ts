@@ -20,7 +20,18 @@ let validJpeg: Buffer;
 const logMemory = memorySink();
 const logger = createLogger({ sinks: [logMemory.sink] });
 
-function fakeVisionClient(content = "题目：1 + 1\n思路：不会持久化的模型推理"): VisionClient {
+function fakeVisionClient(
+  content = JSON.stringify({
+    mistakes: [{
+      problem: "1 + 1",
+      userAnswer: "",
+      correctAnswer: "",
+      subject: "math",
+      errorType: "",
+      reasoning: "不会持久化的模型推理",
+    }],
+  }),
+): VisionClient {
   return {
     async chat() {
       providerCalls += 1;
@@ -186,9 +197,10 @@ describe("confirmed mistake-photo workflow", () => {
     expect(confirmation?.confirmation_method).toBe("explicit_correction");
   });
 
-  it("exposes confidence 'low' on the draft response when VLM returns 无法识别", async () => {
+  it("exposes confidence 'low' on the draft response when VLM returns no items", async () => {
+    // 无法识别 → the multi-item contract is an empty mistakes array.
     const app = makeApp({
-      visionClient: fakeVisionClient("无法识别"),
+      visionClient: fakeVisionClient(JSON.stringify({ mistakes: [] })),
     });
     const sessionId = await startSession(app);
     const draftId = "draft_low_conf";
@@ -197,7 +209,8 @@ describe("confirmed mistake-photo workflow", () => {
     expect(response.body).toMatchObject({
       draftId,
       state: "review",
-      problemText: "无法识别",
+      problemText: "",
+      items: [],
       confidence: "low",
     });
   });
@@ -489,3 +502,181 @@ describe("confirmed mistake-photo workflow", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM mistakes").get()).toEqual({ count: 1 });
   });
 });
+
+describe("multi-item mistake photo (拍错题 v2)", () => {
+  const TWO_ITEMS_JSON = JSON.stringify({
+    mistakes: [
+      {
+        problem: "8 + 5 = ?",
+        userAnswer: "12",
+        correctAnswer: "13",
+        subject: "math",
+        errorType: "进位加法错误",
+        reasoning: "个位相加满十要进一",
+      },
+      {
+        problem: "抄写「已」",
+        userAnswer: "己",
+        correctAnswer: "已",
+        subject: "chinese",
+        errorType: "形近字混淆",
+        reasoning: "「已」和「己」字形相近",
+      },
+    ],
+  });
+
+  /** Analyze replies with itemsJson; revise calls (text-only) reply with reviseContent. */
+  function itemsVisionClient(itemsJson: string, reviseContent: string | (() => string) = ""): VisionClient {
+    return {
+      async chat(params) {
+        providerCalls += 1;
+        if (params.imageBase64 === undefined) {
+          const content = typeof reviseContent === "function" ? reviseContent() : reviseContent;
+          return { content, raw: {} };
+        }
+        return { content: itemsJson, raw: {} };
+      },
+    };
+  }
+
+  it("splits a photo into per-mistake items and confirms each into the inbox", async () => {
+    const app = makeApp({ visionClient: itemsVisionClient(TWO_ITEMS_JSON) });
+    const sessionId = await startSession(app);
+
+    const draft = await analyze(app, sessionId, "draft_multi");
+    expect(draft.status).toBe(200);
+    expect(draft.body.state).toBe("review");
+    expect(draft.body.items).toHaveLength(2);
+    expect(draft.body.items[0]).toMatchObject({
+      problem: "8 + 5 = ?",
+      userAnswer: "12",
+      correctAnswer: "13",
+      subject: "math",
+      errorType: "进位加法错误",
+      reasoning: "个位相加满十要进一",
+    });
+    expect(draft.body.items[1]).toMatchObject({ problem: "抄写「已」", subject: "chinese" });
+
+    // Confirm item 0 — the draft must survive for item 1.
+    const confirm0 = await request(app)
+      .post("/api/mistake-photo/draft_multi/confirm")
+      .send({ sessionId, itemIndex: 0 });
+    expect(confirm0.status).toBe(200);
+    expect(confirm0.body.confirmationMethod).toBe("explicit_acceptance");
+
+    const confirm1 = await request(app)
+      .post("/api/mistake-photo/draft_multi/confirm")
+      .send({ sessionId, itemIndex: 1 });
+    expect(confirm1.status).toBe(200);
+    expect(confirm1.body.caseId).not.toBe(confirm0.body.caseId);
+
+    // Both items land in the inbox with their own subjects.
+    const inbox = await request(app).get("/api/capture/inbox?childId=default");
+    expect(inbox.status).toBe(200);
+    const visionCases = inbox.body.cases.filter((c: any) => c.source === "vision");
+    expect(visionCases).toHaveLength(2);
+    const byProblem = new Map(visionCases.map((c: any) => [c.problem, c]));
+    expect(byProblem.get("8 + 5 = ?")).toMatchObject({
+      subject: "math",
+      userAnswer: "12",
+      correctAnswer: "13",
+      errorType: "进位加法错误",
+    });
+    expect(byProblem.get("抄写「已」")).toMatchObject({ subject: "chinese" });
+
+    // Retried confirm of the same item replays the first result.
+    const replay = await request(app)
+      .post("/api/mistake-photo/draft_multi/confirm")
+      .send({ sessionId, itemIndex: 0 });
+    expect(replay.status).toBe(200);
+    expect(replay.body.caseId).toBe(confirm0.body.caseId);
+    expect(
+      db.prepare("SELECT COUNT(*) AS c FROM mistake_cases WHERE source = 'vision'").get(),
+    ).toEqual({ c: 2 });
+  });
+
+  it("revises an item per parent instruction and confirms the revised subject", async () => {
+    const app = makeApp({
+      visionClient: itemsVisionClient(
+        TWO_ITEMS_JSON,
+        // The LLM answers the revise request with the same item but
+        // subject changed (alias 语文 — normalization is server's job).
+        JSON.stringify({
+          problem: "8 + 5 = ?",
+          userAnswer: "12",
+          correctAnswer: "13",
+          subject: "语文",
+          errorType: "进位加法错误",
+          reasoning: "个位相加满十要进一",
+        }),
+      ),
+    });
+    const sessionId = await startSession(app);
+    await analyze(app, sessionId, "draft_revise");
+
+    const revised = await request(app)
+      .post("/api/mistake-photo/draft_revise/items/0/revise")
+      .send({ sessionId, instruction: "学科改成语文" });
+    expect(revised.status).toBe(200);
+    expect(revised.body.item.subject).toBe("chinese");
+    expect(revised.body.item.problem).toBe("8 + 5 = ?");
+
+    // The GET draft reflects the revision…
+    const restored = await request(app)
+      .get("/api/mistake-photo/draft_revise?sessionId=" + sessionId);
+    expect(restored.body.items[0].subject).toBe("chinese");
+
+    // …and confirm of that item lands with the revised subject.
+    const confirmed = await request(app)
+      .post("/api/mistake-photo/draft_revise/confirm")
+      .send({ sessionId, itemIndex: 0 });
+    expect(confirmed.status).toBe(200);
+    const row = db
+      .prepare("SELECT subject FROM mistake_cases WHERE case_id = ?")
+      .get(confirmed.body.caseId) as { subject: string } | undefined;
+    expect(row?.subject).toBe("chinese");
+  });
+
+  it("returns 502 when the revise LLM reply is not parseable", async () => {
+    const app = makeApp({ visionClient: itemsVisionClient(TWO_ITEMS_JSON, "随便聊几句") });
+    const sessionId = await startSession(app);
+    await analyze(app, sessionId, "draft_revise_bad");
+
+    const response = await request(app)
+      .post("/api/mistake-photo/draft_revise_bad/items/0/revise")
+      .send({ sessionId, instruction: "学科改成语文" });
+    expect(response.status).toBe(502);
+    // The failed revise must not have touched the draft item.
+    const restored = await request(app)
+      .get("/api/mistake-photo/draft_revise_bad?sessionId=" + sessionId);
+    expect(restored.body.items[0].subject).toBe("math");
+  });
+
+  it("validates revise input and item index", async () => {
+    const app = makeApp({ visionClient: itemsVisionClient(TWO_ITEMS_JSON) });
+    const sessionId = await startSession(app);
+    await analyze(app, sessionId, "draft_revise_val");
+
+    const noInstruction = await request(app)
+      .post("/api/mistake-photo/draft_revise_val/items/0/revise")
+      .send({ sessionId });
+    expect(noInstruction.status).toBe(400);
+
+    const tooLong = await request(app)
+      .post("/api/mistake-photo/draft_revise_val/items/0/revise")
+      .send({ sessionId, instruction: "改".repeat(201) });
+    expect(tooLong.status).toBe(400);
+
+    const badIndex = await request(app)
+      .post("/api/mistake-photo/draft_revise_val/items/9/revise")
+      .send({ sessionId, instruction: "学科改成语文" });
+    expect(badIndex.status).toBe(404);
+
+    const badConfirmIndex = await request(app)
+      .post("/api/mistake-photo/draft_revise_val/confirm")
+      .send({ sessionId, itemIndex: 9 });
+    expect(badConfirmIndex.status).toBe(400);
+    expect(providerCalls).toBe(1); // only the analyze call
+  });
+});
+

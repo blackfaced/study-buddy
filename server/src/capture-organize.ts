@@ -53,7 +53,7 @@ function asString(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-function normalizeSubject(v: unknown): string {
+export function normalizeSubject(v: unknown): string {
   const s = asString(v).toLowerCase();
   if ((SUBJECTS as readonly string[]).includes(s)) return s;
   const alias = SUBJECT_ALIASES[asString(v)];
