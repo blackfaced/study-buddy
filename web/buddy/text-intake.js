@@ -155,6 +155,24 @@
     $("ti-preview").style.display = "none";
   }
 
+  // The organize LLM call occasionally 502s once then succeeds on a
+  // retry (observed on the test server 9/5 — a single 5.4s 502 followed
+  // by a 3.7s 200). Absorb one transient failure so the parent doesn't
+  // have to re-tap 整理; a second failure surfaces as before.
+  async function organizeWithRetry(fetchFn, text) {
+    try {
+      return await fetchFn("/api/capture/organize", {
+        method: "POST",
+        body: { text: text },
+      });
+    } catch {
+      return await fetchFn("/api/capture/organize", {
+        method: "POST",
+        body: { text: text },
+      });
+    }
+  }
+
   async function onOrganize() {
     var textEl = $("ti-text");
     var text = textEl.value.trim();
@@ -167,10 +185,7 @@
     hidePreview();
     setStatus("整理中…", false);
     try {
-      var data = await window.StudyBuddy.fetch("/api/capture/organize", {
-        method: "POST",
-        body: { text: text },
-      });
+      var data = await organizeWithRetry(window.StudyBuddy.fetch, text);
       showPreview(normalizeOrganized(data));
       setStatus("", false);
     } catch (err) {
@@ -259,6 +274,7 @@
     renderInboxEntry: renderInboxEntry,
     inboxTitle: inboxTitle,
     emptyInboxCopy: emptyInboxCopy,
+    organizeWithRetry: organizeWithRetry,
     onUnlock: onUnlock,
   };
 })();
