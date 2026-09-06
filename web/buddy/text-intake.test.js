@@ -143,3 +143,42 @@ test("renderInboxEntry without openedAt still renders (old rows)", () => {
   const html = TI.renderInboxEntry({ caseId: "case:x", problem: "1+1", subject: "math" });
   assert.ok(html.includes("1+1"));
 });
+
+// organizeWithRetry: the organize LLM call occasionally 502s once then
+// succeeds on retry (observed on the test server 9/5). The buddy UI must
+// absorb a single transient failure instead of making the parent re-tap.
+test("organizeWithRetry retries once on failure and returns the second result", async () => {
+  const TI = loadModule();
+  let calls = 0;
+  const fetchFn = async () => {
+    calls += 1;
+    if (calls === 1) throw new Error("502 整理失败");
+    return { problem: "8+5=?", userAnswer: "12", correctAnswer: "13", subject: "math", errorType: "" };
+  };
+  const out = await TI.organizeWithRetry(fetchFn, "昨天小宝算 8+5 写成 12");
+  assert.equal(calls, 2);
+  assert.equal(out.problem, "8+5=?");
+});
+
+test("organizeWithRetry rethrows after the second failure", async () => {
+  const TI = loadModule();
+  let calls = 0;
+  const fetchFn = async () => {
+    calls += 1;
+    throw new Error("502 boom");
+  };
+  await assert.rejects(TI.organizeWithRetry(fetchFn, "text"), /boom/);
+  assert.equal(calls, 2);
+});
+
+test("organizeWithRetry does not retry when the first call succeeds", async () => {
+  const TI = loadModule();
+  let calls = 0;
+  const fetchFn = async () => {
+    calls += 1;
+    return { problem: "1+1" };
+  };
+  const out = await TI.organizeWithRetry(fetchFn, "text");
+  assert.equal(calls, 1);
+  assert.equal(out.problem, "1+1");
+});
