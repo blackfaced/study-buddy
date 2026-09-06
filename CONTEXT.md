@@ -1,6 +1,6 @@
 # study-buddy
 
-A parent-operated family learning-operations loop for one kid: capture real wrong answers, drive them through the Closure Loop, and surface bounded evidence to parents. Kid-facing apps are execution surfaces; the chat buddy is deprecated as a touchpoint (hidden by default, `BUDDY_CHAT_ENABLED=false`).
+A family paper-practice context: confirmed schoolwork and wrong answers inform small Worksheets, and confirmed feedback informs the next selection. Games provide supplementary practice evidence; writing demonstrations support work on paper.
 
 ## Language
 
@@ -27,3 +27,15 @@ _Avoid_: intake, ingestion
 **Source Event** (来源事件):
 An immutable, provider-owned record of a learning fact, committed in the same transaction as the local write. External consumers read monotonic pages of Source Events; they never see raw chat, images, or credentials.
 _Avoid_: outbox row, push message
+
+**Worksheet** (纸质练习):
+A selected set of exercises prepared for work on paper, with a stable identity and a fixed version once approved for printing. Its existence or printing does not establish that the child attempted it.
+_Avoid_: daily obligation, app session
+
+**Practice Round** (游戏练习轮):
+One bounded set of game questions together with its first responses and subsequent retries. First-pass performance remains distinguishable from eventual completion.
+_Avoid_: final accuracy, streak
+
+**First-pass Accuracy** (首轮正确率):
+The proportion of questions answered correctly on their first response in a Practice Round, reported with the number answered and the round's total question count. Later retries do not overwrite it.
+_Avoid_: eventual accuracy, mastery percentage
