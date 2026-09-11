@@ -7,6 +7,7 @@
     "lint": "oxlint server/src/ && cd mcp-server && oxlint src/ || true",
     "lint:type-aware": "oxlint --type-aware server/src/ || true",
     "test:e2e": "node --test e2e/*.test.js",
+    "test:shared-app": "node --test e2e/shared-app.test.js",
     "prepare": "husky || true"
   },
   "devDependencies": {
