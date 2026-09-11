@@ -4,15 +4,18 @@ A small, opinionated guide to running the study-buddy HTTP server on the Mac min
 
 Child-chat safety behavior and minimized retention are documented in [child-safety.md](child-safety.md).
 
+For fresh-checkout test setup and isolated browser checks that do not touch the
+running service, see [Integration testing](testing/integration.md).
+
 ## Components
 
-| Process | What it does | How it's managed |
-|---|---|---|
-| `mcp-server/` | stdio MCP server, queried by Mavis | mavis daemon (`mavis mcp add`) — don't manage manually |
-| `server/` | Express HTTP server, port 3000 (HTTPS) / 3001 (HTTP redirect) | `bin/study-buddy-server.sh` |
-| `web/index.html` | static SPA, served by `server/` | bundled with the server |
-| `data/study.db` | shared SQLite, WAL mode | opened by both processes |
-| `data/logs/study-buddy-server.log` | access + event log | rotated at 5MB, keeps 3 generations |
+| Process                            | What it does                                                  | How it's managed                                       |
+| ---------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------ |
+| `mcp-server/`                      | stdio MCP server, queried by Mavis                            | mavis daemon (`mavis mcp add`) — don't manage manually |
+| `server/`                          | Express HTTP server, port 3000 (HTTPS) / 3001 (HTTP redirect) | `bin/study-buddy-server.sh`                            |
+| `web/index.html`                   | static SPA, served by `server/`                               | bundled with the server                                |
+| `data/study.db`                    | shared SQLite, WAL mode                                       | opened by both processes                               |
+| `data/logs/study-buddy-server.log` | access + event log                                            | rotated at 5MB, keeps 3 generations                    |
 
 The mcp-server is a child of mavis, not this script. The script only handles the HTTP server.
 
@@ -31,15 +34,15 @@ bin/study-buddy-server.sh logs
 
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `start` | background-launches `npm start` from `server/`. Writes PID to `data/study-buddy-server.pid`. Captures stdout/stderr to `data/logs/study-buddy-server.log`. Waits up to 10s for the port to start listening. |
-| `stop` | sends SIGTERM, waits 5s, then SIGKILL. Removes the PID file. |
-| `restart` | stop + start |
-| `status` | prints PID, whether the port is listening, log line count. Exit 2 if not running. |
-| `logs [-n N]` | `tail -f` the log file. `logs --error` / `--warn` / `--info` / `--debug` filter by level. |
-| `rotate` | reports the rotation threshold and current files (rotation is automatic). |
-| `env` | prints the resolved paths + .env with secrets masked. |
+| Command       | What it does                                                                                                                                                                                                |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start`       | background-launches `npm start` from `server/`. Writes PID to `data/study-buddy-server.pid`. Captures stdout/stderr to `data/logs/study-buddy-server.log`. Waits up to 10s for the port to start listening. |
+| `stop`        | sends SIGTERM, waits 5s, then SIGKILL. Removes the PID file.                                                                                                                                                |
+| `restart`     | stop + start                                                                                                                                                                                                |
+| `status`      | prints PID, whether the port is listening, log line count. Exit 2 if not running.                                                                                                                           |
+| `logs [-n N]` | `tail -f` the log file. `logs --error` / `--warn` / `--info` / `--debug` filter by level.                                                                                                                   |
+| `rotate`      | reports the rotation threshold and current files (rotation is automatic).                                                                                                                                   |
+| `env`         | prints the resolved paths + .env with secrets masked.                                                                                                                                                       |
 
 ## Pairing a child browser
 
@@ -92,18 +95,18 @@ Event logs are domain-specific (`session started`, `frame sharp error`, etc.) an
 
 ## Environment variables
 
-| Var | Default | Notes |
-|---|---|---|
-| `HTTPS_PORT` | `3000` | primary port. Surfaced in `/api/pair.serverUrl`. |
-| `HTTP_PORT` | `3001` | HTTP→HTTPS redirect listener. |
-| `STUDY_DB` | `data/study.db` | absolute path preferred. |
-| `SSL_KEY` / `SSL_CERT` | `server.key` / `server.cert` (project root) | self-signed. If either is missing, the server falls back to plain HTTP. |
-| `MINIMAX_API_KEY` | — | required for `/api/mistake-photo`. Without it, the endpoint returns 503. See [mistake-photo.md](mistake-photo.md) for limits and temporary-media retention. |
-| `INTEGRATION_API_TOKEN` | — | independent high-entropy Bearer token for the loopback-only Source Event feed and bounded chat-turn retrieval API. Do not reuse `BUDDY_PIN`; when unset, both stay unauthorized. |
-| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
-| `LOG_DIR` | `data/logs` | |
-| `LOG_FILE` | `$LOG_DIR/study-buddy-server.log` | |
-| `LOG_MAX_BYTES` | `5242880` (5MB) | rotation threshold |
+| Var                     | Default                                     | Notes                                                                                                                                                                            |
+| ----------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HTTPS_PORT`            | `3000`                                      | primary port. Surfaced in `/api/pair.serverUrl`.                                                                                                                                 |
+| `HTTP_PORT`             | `3001`                                      | HTTP→HTTPS redirect listener.                                                                                                                                                    |
+| `STUDY_DB`              | `data/study.db`                             | absolute path preferred.                                                                                                                                                         |
+| `SSL_KEY` / `SSL_CERT`  | `server.key` / `server.cert` (project root) | self-signed. If either is missing, the server falls back to plain HTTP.                                                                                                          |
+| `MINIMAX_API_KEY`       | —                                           | required for `/api/mistake-photo`. Without it, the endpoint returns 503. See [mistake-photo.md](mistake-photo.md) for limits and temporary-media retention.                      |
+| `INTEGRATION_API_TOKEN` | —                                           | independent high-entropy Bearer token for the loopback-only Source Event feed and bounded chat-turn retrieval API. Do not reuse `BUDDY_PIN`; when unset, both stay unauthorized. |
+| `LOG_LEVEL`             | `info`                                      | `debug` / `info` / `warn` / `error`                                                                                                                                              |
+| `LOG_DIR`               | `data/logs`                                 |                                                                                                                                                                                  |
+| `LOG_FILE`              | `$LOG_DIR/study-buddy-server.log`           |                                                                                                                                                                                  |
+| `LOG_MAX_BYTES`         | `5242880` (5MB)                             | rotation threshold                                                                                                                                                               |
 
 ## Provider integration cutover
 

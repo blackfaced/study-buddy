@@ -60,3 +60,7 @@ jobs:
       - name: Writing layout regression (isolated WebKit)
         if: matrix.package == 'server'
         run: node --test ../e2e/write-layout.test.js
+
+      - name: Shared-app verifier (isolated WebKit)
+        if: matrix.package == 'server'
+        run: npm run test:shared-app --prefix ..

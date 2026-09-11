@@ -5,12 +5,11 @@
 //   3. warmupTTS actually speaks a silent utterance
 //   4. fetch does the Content-Type / JSON round-trip
 //
-// Run with the dev server running locally on port 3000:
-//   NODE_PATH=/Users/mac/.npm/_npx/aa1f6563a672b75d/node_modules \
-//     node scripts/verify-shared-app.js
-const { chromium } = require("playwright");
+// Supported isolated command: npm run test:shared-app
+// Setup and opt-in live usage: docs/testing/integration.md
+const { webkit } = require("playwright");
 
-const BASE = process.env.TEST_URL || "https://localhost:3000";
+const BASE = (process.env.TEST_URL || "").replace(/\/$/, "");
 
 const PAGES = [
   { name: "buddy", url: `${BASE}/buddy/` },
@@ -20,25 +19,28 @@ const PAGES = [
 
 async function checkPage(page, def) {
   const consoleMsgs = [];
-  page.on("console", (msg) => consoleMsgs.push(`[${msg.type()}] ${msg.text()}`));
+  page.on("console", (msg) =>
+    consoleMsgs.push(`[${msg.type()}] ${msg.text()}`),
+  );
   page.on("pageerror", (err) => consoleMsgs.push(`[pageerror] ${err.message}`));
 
   await page.goto(def.url, { waitUntil: "domcontentloaded" });
-  // Wait for the last <script> in the page to run. domcontentloaded
-  // doesn't guarantee inline modules / shared/app.js have executed.
-  await page.waitForTimeout(800);
+  await page.waitForFunction(() => typeof window.StudyBuddy === "object");
 
   // 1. window.StudyBuddy exists with all three helpers
   const sb = await page.evaluate(() => ({
     has: typeof window.StudyBuddy === "object" && window.StudyBuddy !== null,
     fns: window.StudyBuddy
-      ? Object.keys(window.StudyBuddy).filter((k) => typeof window.StudyBuddy[k] === "function")
+      ? Object.keys(window.StudyBuddy).filter(
+          (k) => typeof window.StudyBuddy[k] === "function",
+        )
       : [],
   }));
   console.log(`  ${def.name}: StudyBuddy = ${JSON.stringify(sb)}`);
   if (!sb.has) throw new Error(`${def.name}: window.StudyBuddy missing`);
   for (const fn of ["warmupTTS", "fetch", "cameraPause"]) {
-    if (!sb.fns.includes(fn)) throw new Error(`${def.name}: StudyBuddy.${fn} missing`);
+    if (!sb.fns.includes(fn))
+      throw new Error(`${def.name}: StudyBuddy.${fn} missing`);
   }
 
   // 2. warmupTTS actually calls speechSynthesis.speak with a silent
@@ -48,13 +50,23 @@ async function checkPage(page, def) {
     return new Promise((resolve) => {
       const calls = [];
       const fake = {
-        speak(u) { calls.push({ text: u.text, volume: u.volume }); },
+        speak(u) {
+          calls.push({ text: u.text, volume: u.volume });
+        },
         cancel() {},
       };
       const prev = window.speechSynthesis;
-      Object.defineProperty(window, "speechSynthesis", { value: fake, configurable: true });
-      try { window.StudyBuddy.warmupTTS(); } finally {
-        Object.defineProperty(window, "speechSynthesis", { value: prev, configurable: true });
+      Object.defineProperty(window, "speechSynthesis", {
+        value: fake,
+        configurable: true,
+      });
+      try {
+        window.StudyBuddy.warmupTTS();
+      } finally {
+        Object.defineProperty(window, "speechSynthesis", {
+          value: prev,
+          configurable: true,
+        });
       }
       resolve(calls);
     });
@@ -64,7 +76,9 @@ async function checkPage(page, def) {
     throw new Error(`${def.name}: warmupTTS should call speak() exactly once`);
   }
   if (speakResult[0].volume !== 0) {
-    throw new Error(`${def.name}: warmupTTS utterance must be silent (volume=0)`);
+    throw new Error(
+      `${def.name}: warmupTTS utterance must be silent (volume=0)`,
+    );
   }
 
   // 3. fetch round-trip — a 200 JSON response is parsed, a 4xx throws
@@ -72,11 +86,16 @@ async function checkPage(page, def) {
   const fetchResult = await page.evaluate(async (base) => {
     const ok = await window.StudyBuddy.fetch(`${base}/api/health`);
     let err = null;
-    try { await window.StudyBuddy.fetch(`${base}/api/nope-not-here`); }
-    catch (e) { err = { status: e.status, hasText: typeof e.text === "string" }; }
+    try {
+      await window.StudyBuddy.fetch(`${base}/api/nope-not-here`);
+    } catch (e) {
+      err = { status: e.status, hasText: typeof e.text === "string" };
+    }
     return { okKeys: Object.keys(ok), err };
   }, BASE);
-  console.log(`  ${def.name}: fetch ok keys = ${JSON.stringify(fetchResult.okKeys)}, err = ${JSON.stringify(fetchResult.err)}`);
+  console.log(
+    `  ${def.name}: fetch ok keys = ${JSON.stringify(fetchResult.okKeys)}, err = ${JSON.stringify(fetchResult.err)}`,
+  );
   if (!Array.isArray(fetchResult.okKeys) || fetchResult.okKeys.length === 0) {
     throw new Error(`${def.name}: fetch did not return JSON object`);
   }
@@ -85,7 +104,8 @@ async function checkPage(page, def) {
   }
 
   // 4. No JS errors in the page console (other than favicon).
-  const errs = consoleMsgs.filter((m) => m.startsWith("[error]") || m.startsWith("[pageerror]"))
+  const errs = consoleMsgs
+    .filter((m) => m.startsWith("[error]") || m.startsWith("[pageerror]"))
     .filter((m) => !m.includes("favicon"));
   if (errs.length > 0) {
     console.log(`  ${def.name}: page errors:`);
@@ -95,17 +115,53 @@ async function checkPage(page, def) {
 }
 
 (async () => {
-  const browser = await chromium.launch({
-    executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  });
-  const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
-  const page = await ctx.newPage();
-
-  console.log("=== Verify #21: shared/app.js loaded on all 3 apps ===");
-  for (const def of PAGES) {
-    console.log(`\n-- ${def.name} (${def.url}) --`);
-    await checkPage(page, def);
+  let target;
+  try {
+    target = new URL(BASE);
+  } catch {
+    /* handled below */
   }
-  console.log("\nOK: shared/app.js is loaded + functional on buddy, write, candy");
-  await browser.close();
-})();
+  if (
+    !target ||
+    !["http:", "https:"].includes(target.protocol) ||
+    target.username ||
+    target.password ||
+    target.pathname !== "/" ||
+    target.search ||
+    target.hash
+  ) {
+    throw new Error(
+      "TEST_URL must be an explicit HTTP(S) origin. For isolated verification use: npm run test:shared-app",
+    );
+  }
+  const browser = await webkit.launch();
+  try {
+    const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+    ctx.setDefaultTimeout(5000);
+    ctx.setDefaultNavigationTimeout(15000);
+    // The shared-helper check needs no third-party network access.
+    await ctx.route("**/*", (route) =>
+      new URL(route.request().url()).origin === new URL(BASE).origin
+        ? route.continue()
+        : route.abort(),
+    );
+    console.log("=== Verify #21: shared/app.js loaded on all 3 apps ===");
+    for (const def of PAGES) {
+      const page = await ctx.newPage();
+      try {
+        console.log(`\n-- ${def.name} (${def.url}) --`);
+        await checkPage(page, def);
+      } finally {
+        await page.close();
+      }
+    }
+    console.log(
+      "\nOK: shared/app.js is loaded + functional on buddy, write, candy",
+    );
+  } finally {
+    await browser.close();
+  }
+})().catch((error) => {
+  console.error(error.message);
+  process.exitCode = 1;
+});
